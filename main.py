@@ -569,9 +569,10 @@ def get_keyboard(user_id):
             markup.row(KeyboardButton('🔙 Back to Main'))
             return markup
 
+        # FIX: Replaced underscores with spaces for clean button text
         if state == 'admin_dep_menu':
             for c in deposit_settings.keys():
-                markup.row(KeyboardButton(c)) # Removed emoji so it never crashes
+                markup.row(KeyboardButton(c.replace('_', ' '))) 
             markup.row(KeyboardButton('🔙 Back to Admin'))
             return markup
 
@@ -883,10 +884,13 @@ def handle_messages(message):
         if text == '🔙 Back to Admin':
             user_state[user_id] = 'admin_menu'
             bot.send_message(message.chat.id, "🔐 **Admin Panel**", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
-        elif text in deposit_settings:
-            admin_dep_setup[user_id] = text
-            user_state[user_id] = 'admin_dep_settings'
-            bot.send_message(message.chat.id, f"🏦 **Editing Settings for {text}**", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
+        else:
+            # FIX: Translate clicked keyboard text (spaces) back into dictionary keys (underscores)
+            curr_key = text.strip().upper().replace(' ', '_')
+            if curr_key in deposit_settings:
+                admin_dep_setup[user_id] = curr_key
+                user_state[user_id] = 'admin_dep_settings'
+                bot.send_message(message.chat.id, f"🏦 **Editing Settings for {text}**", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
         return
         
     if state == 'admin_dep_settings':
@@ -956,7 +960,7 @@ def handle_messages(message):
                 user_state[user_id] = 'pi_wait_dep_curr'
                 markup = ReplyKeyboardMarkup(resize_keyboard=True)
                 for c in deposit_settings.keys():
-                    markup.row(KeyboardButton(c))
+                    markup.row(KeyboardButton(c.replace('_', ' '))) # FIX: Make inline setup keyboard clean
                 markup.row(KeyboardButton('❌ Cancel Action'))
                 bot.send_message(message.chat.id, "🏦 Select the deposit method for this button:", reply_markup=markup)
                 return
@@ -985,9 +989,10 @@ def handle_messages(message):
 
     # NEW INTERACTIVE STATE
     if state == 'pi_wait_dep_curr':
-        if text not in deposit_settings:
+        curr_key = text.strip().upper().replace(" ", "_") # FIX: Translate selection back to dictionary key
+        if curr_key not in deposit_settings:
             return bot.send_message(message.chat.id, "⚠️ Invalid method. Please select directly from the keyboard buttons.")
-        user_action_data[user_id]['dep_curr'] = text
+        user_action_data[user_id]['dep_curr'] = curr_key
         user_state[user_id] = 'pi_wait_text'
         
         prev_text = ""
