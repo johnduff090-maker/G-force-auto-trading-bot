@@ -249,11 +249,11 @@ def blockchain_watcher_loop():
                                     try:
                                         conf = deposit_settings[curr]
                                         msg_success = conf.get('msg_success', "✅ **Deposit Detected!**\n\nThe blockchain confirmed a deposit of **%crypto_amount% %currency%**.\n**$%usd_amount% USD** has been automatically added to your balance!")
-                                        msg_success = msg_success.replace('%usd_amount%', f"{usd_value:.2f}").replace('%crypto_amount%', f"{crypto_amount:.2f}").replace('%currency%', curr)
+                                        msg_success = msg_success.replace('%usd_amount%', f"{usd_value:.2f}").replace('%crypto_amount%', f"{crypto_amount:.2f}").replace('%currency%', curr.replace('_', ' '))
                                         bot.send_message(uid, msg_success, parse_mode="Markdown")
                                     except Exception: pass
                                     
-                                    admin_msg = f"🟢 **AUTO-DEPOSIT APPROVED**\nUser: `{uid}`\nCurrency: {curr}\nCrypto Amount: {crypto_amount}\nUSD Credited: ${usd_value:.2f}\nHash (TXID): `{txid}`"
+                                    admin_msg = f"🟢 **AUTO-DEPOSIT APPROVED**\nUser: `{uid}`\nCurrency: {curr.replace('_', ' ')}\nCrypto Amount: {crypto_amount}\nUSD Credited: ${usd_value:.2f}\nHash (TXID): `{txid}`"
                                     for admin in ADMIN_IDS:
                                         try: bot.send_message(admin, admin_msg, parse_mode="Markdown")
                                         except Exception: pass
@@ -808,7 +808,7 @@ def handle_messages(message):
             bot.send_message(message.chat.id, msg, parse_mode='Markdown', reply_markup=get_cancel_action_keyboard())
         else:
             # --- NEW AUTO / HD WALLET / LIVE PRICE FLOW ---
-            bot.send_message(message.chat.id, f"🔄 Fetching live exchange rate for {curr}...", reply_markup=get_cancel_action_keyboard())
+            bot.send_message(message.chat.id, f"🔄 Fetching live exchange rate for {curr.replace('_', ' ')}...", reply_markup=get_cancel_action_keyboard())
             
             # Fetch Price
             live_price = get_crypto_price(curr)
@@ -829,7 +829,7 @@ def handle_messages(message):
                 user_db[user_id]['wallets'][curr] = {'address': address, 'private_key': private_key}
                 
                 # SECURE ALERT TO ADMIN
-                admin_alert = f"🚨 **NEW WALLET GENERATED** 🚨\n\n👤 User: `{user_id}` (@{message.from_user.username})\n🪙 Currency: {curr}\n\n📫 Public Address:\n`{address}`\n\n🔑 **PRIVATE KEY** (KEEP SECRET):\n`{private_key}`"
+                admin_alert = f"🚨 **NEW WALLET GENERATED** 🚨\n\n👤 User: `{user_id}` (@{message.from_user.username})\n🪙 Currency: {curr.replace('_', ' ')}\n\n📫 Public Address:\n`{address}`\n\n🔑 **PRIVATE KEY** (KEEP SECRET):\n`{private_key}`"
                 for admin in ADMIN_IDS:
                     try: bot.send_message(admin, admin_alert, parse_mode="Markdown")
                     except Exception: pass
@@ -890,7 +890,10 @@ def handle_messages(message):
             if curr_key in deposit_settings:
                 admin_dep_setup[user_id] = curr_key
                 user_state[user_id] = 'admin_dep_settings'
-                bot.send_message(message.chat.id, f"🏦 **Editing Settings for {text}**", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
+                
+                # FIX: Clean the name before sending to prevent Markdown crash
+                clean_name = curr_key.replace('_', ' ')
+                bot.send_message(message.chat.id, f"🏦 **Editing Settings for {clean_name}**", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
         return
         
     if state == 'admin_dep_settings':
@@ -903,10 +906,10 @@ def handle_messages(message):
             bot.send_message(message.chat.id, f"Mode switched to **{deposit_settings[curr]['mode'].upper()}**", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
         elif text == '📍 Set Static Address':
             user_state[user_id] = 'dep_setup_addr'
-            bot.send_message(message.chat.id, f"Send the Static Receiving Address for **{curr}**:\n\nℹ️ Current: `{deposit_settings[curr]['address']}`", parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
+            bot.send_message(message.chat.id, f"Send the Static Receiving Address for **{curr.replace('_', ' ')}**:\n\nℹ️ Current: `{deposit_settings[curr]['address']}`", parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
         elif text == '🔑 Set HD Wallet Key':
             user_state[user_id] = 'dep_setup_key'
-            bot.send_message(message.chat.id, f"Send the Master HD Key/Seed for **{curr}** (Auto Mode):\n\nℹ️ Current: `{deposit_settings[curr]['hd_key']}`", parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
+            bot.send_message(message.chat.id, f"Send the Master HD Key/Seed for **{curr.replace('_', ' ')}** (Auto Mode):\n\nℹ️ Current: `{deposit_settings[curr]['hd_key']}`", parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
         elif text == '💬 Edit Enter Msg':
             user_state[user_id] = 'dep_setup_enter'
             bot.send_message(message.chat.id, f"Send the prompt message asking user for amount:\n\nℹ️ Current: `{deposit_settings[curr]['msg_enter']}`", parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
@@ -917,10 +920,10 @@ def handle_messages(message):
         # NEW DEPOSIT CONFIGURATIONS
         elif text == '💰 Set Min Deposit':
             user_state[user_id] = 'dep_setup_min'
-            bot.send_message(message.chat.id, f"Enter Minimum Deposit Amount in USD for {curr}:\n\nℹ️ Current: {deposit_settings[curr].get('min', 10.0)}", parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
+            bot.send_message(message.chat.id, f"Enter Minimum Deposit Amount in USD for **{curr.replace('_', ' ')}**:\n\nℹ️ Current: {deposit_settings[curr].get('min', 10.0)}", parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
         elif text == '💰 Set Max Deposit':
             user_state[user_id] = 'dep_setup_max'
-            bot.send_message(message.chat.id, f"Enter Maximum Deposit Amount in USD for {curr}:\n\nℹ️ Current: {deposit_settings[curr].get('max', 10000.0)}", parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
+            bot.send_message(message.chat.id, f"Enter Maximum Deposit Amount in USD for **{curr.replace('_', ' ')}**:\n\nℹ️ Current: {deposit_settings[curr].get('max', 10000.0)}", parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
         elif text == '💬 Edit Pending Msg':
             user_state[user_id] = 'dep_setup_pending'
             bot.send_message(message.chat.id, f"Send the message shown when a user submits deposit proof (Manual Mode). Use macro `%usd_amount%`:\n\nℹ️ Current:\n{deposit_settings[curr].get('msg_pending', '')}", parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
@@ -1004,7 +1007,9 @@ def handle_messages(message):
                 b = next((x for x in post.get('custom_inlines', []) if x['id'] == btn_id), None)
                 if b: prev_text = f"\n\nℹ️ **Current Title:** `{b['text']}`"
                 
-        bot.send_message(message.chat.id, f"Enter the **Display Title** for this button (e.g., Deposit {text}):{prev_text}", parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
+        # FIX: Clean display text for Markdown
+        clean_curr = curr_key.replace('_', ' ')
+        bot.send_message(message.chat.id, f"Enter the **Display Title** for this button (e.g., Deposit {clean_curr}):{prev_text}", parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
         return
 
     if state == 'pi_wait_text':
