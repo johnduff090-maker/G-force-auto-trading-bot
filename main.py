@@ -98,7 +98,7 @@ if not bot_plans:
         bot_plans[f'plan{i}'] = {
             'name': f'Plan {i}', 'min': 10.0, 'max': 1000.0, 'length': 24.0, 'profit': 5.0,
             'text': f'✨ **Plan {i} Description** ✨\n\nEdit this in Admin -> Plans.',
-            'photo': None, 'inline_text': '🛒 Purchase Plan'
+            'photo': None, 'inline_text': '🛒 Purchase Plan', 'redirect_cmd': None
         }
 
 processed_txids = set() # Stores Hashes to prevent double-crediting
@@ -638,10 +638,13 @@ def get_keyboard(user_id):
             markup.row(KeyboardButton('💰 Set Min Deposit'), KeyboardButton('💰 Set Max Deposit'))
             markup.row(KeyboardButton('⏱ Contract Length'), KeyboardButton('📈 Plan Percentage'))
             markup.row(KeyboardButton('🖼 Plan Display'), KeyboardButton('💬 Set Inline Text'))
-            markup.row(KeyboardButton('🔙 Back to Plans List'))
+            markup.row(KeyboardButton('🔗 Set Redirect Cmd'), KeyboardButton('🔙 Back to Plans List')) # ADDED REDIRECT BUTTON
             return markup
 
         if state.startswith('plan_setup_'):
+            p_id = user_action_data.get(user_id, {}).get('edit_plan')
+            if state == 'plan_setup_redirect':
+                return get_wizard_keyboard(bot_plans.get(p_id, {}).get('redirect_cmd'), allow_empty=True)
             return get_cancel_action_keyboard()
 
         # BALANCE STATES
@@ -1060,6 +1063,9 @@ def handle_messages(message):
         elif text == '💬 Set Inline Text':
             user_state[user_id] = 'plan_setup_inline'
             bot.send_message(message.chat.id, f"Enter the text for the inline purchase button (e.g. 'Buy Now'):\n\nℹ️ Current: {bot_plans[p_id].get('inline_text', 'Buy Now')}", parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
+        elif text == '🔗 Set Redirect Cmd':
+            user_state[user_id] = 'plan_setup_redirect'
+            bot.send_message(message.chat.id, f"Enter the command or text to redirect users to when they lack funds (e.g. /deposit or a menu button name). Send '➖ Set Empty' to use the default deposit menu:\n\nℹ️ Current: {bot_plans[p_id].get('redirect_cmd', 'Default Deposit Menu')}", parse_mode="Markdown", reply_markup=get_wizard_keyboard(bot_plans[p_id].get('redirect_cmd'), allow_empty=True))
         return
 
     if state.startswith('plan_setup_'):
@@ -1081,6 +1087,8 @@ def handle_messages(message):
             bot_plans[p_id]['text'] = message.caption if message.photo else text
         elif state == 'plan_setup_inline':
             bot_plans[p_id]['inline_text'] = text
+        elif state == 'plan_setup_redirect':
+            bot_plans[p_id]['redirect_cmd'] = None if text == '➖ Set Empty' else text
             
         user_state[user_id] = 'admin_plan_settings'
         bot.send_message(message.chat.id, "✅ Plan updated successfully!", reply_markup=get_keyboard(user_id))
@@ -1519,20 +1527,6 @@ def handle_messages(message):
             bot.send_message(message.chat.id, "✅ Withdrawal setup complete!", reply_markup=get_keyboard(user_id))
         return
 
-    # --- NEW: ASSIGN PLAN TO BUTTON MENU ---
-    if state == 'assign_plan':
-        if text == '➖ Remove Plan':
-            btn_metadata[full_path]['assigned_plan'] = None
-            bot.send_message(message.chat.id, "Plan removed from button.", reply_markup=get_keyboard(user_id))
-        elif text.startswith('Plan '):
-            p_id = text.replace('Plan ', 'plan').lower()
-            btn_metadata[full_path]['assigned_plan'] = p_id
-            bot.send_message(message.chat.id, f"✅ Button assigned to **{bot_plans[p_id]['name']}**!", parse_mode="Markdown")
-        
-        user_state[user_id] = 'button_settings'
-        bot.send_message(message.chat.id, "Menu:", reply_markup=get_keyboard(user_id))
-        return
-
     # --- STATE: ASSIGN COMMAND MENU ---
     if state == 'assign_command':
         if text == '🚫 Cancel':
@@ -1658,6 +1652,32 @@ def handle_messages(message):
             bot.send_message(message.chat.id, "📍 Navigation Controls:", reply_markup=get_keyboard(user_id))
             return
 
+    # --- HANDLE EDIT MODE CONTROLS ---
+    if state == 'editing':
+        if text == '🛑 Stop Editor':
+            user_state[user_id] = 'normal'
+            user_selected_button[user_id] = None
+            bot.send_message(message.chat.id, "Editor stopped.", reply_markup=get_keyboard(user_id))
+        elif text == '➕ Add Button':
+            user_state[user_id] = 'adding_button'
+            bot.send_message(message.chat.id, "Send the name for the new button:", reply_markup=get_cancel_action_keyboard())
+        elif text == '📝 Posts Editor':
+            user_state[user_id] = 'posts_editing'
+            bot.send_message(message.chat.id, "📝 **Posts Editor Activated**", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
+            send_path_content(message.chat.id, user_id, current_path, True)
+        elif current_path in menus and text in menus[current_path]:
+            if user_selected_button.get(user_id) == text:
+                user_selected_button[user_id] = None
+                new_path = f"{current_path}/{text}"
+                user_current_path[user_id] = new_path
+                if new_path not in menus: menus[new_path] = []
+                send_path_content(message.chat.id, user_id, new_path, False)
+                bot.send_message(message.chat.id, "📍 Navigation Controls:", reply_markup=get_keyboard(user_id))
+            else:
+                user_selected_button[user_id] = text
+                bot.send_message(message.chat.id, f"🛠 Selected: **{text}**\nChoose an action:", parse_mode="Markdown", reply_markup=get_edit_inline_tools())
+        return
+
     # --- HANDLE NORMAL / POSTS EDITING TRAVERSAL ---
     if state == 'normal' or state == 'posts_editing':
         if text == '🎛️ Buttons Editor':
@@ -1721,11 +1741,22 @@ def handle_inline(call):
         u_bal = user_db[user_id].get('balance', 0)
         total_avail = u_dep + u_bal
         
-        # Insufficient Funds -> Redirect to Deposit Engine
+        # Insufficient Funds -> Check Redirect Command
         if total_avail < p_data['min']:
             user_db[user_id]['pending_plan'] = plan_id
-            bot.answer_callback_query(call.id, "Insufficient balance. Redirecting to Deposit...", show_alert=True)
+            bot.answer_callback_query(call.id, "Insufficient balance.", show_alert=True)
             
+            redirect_cmd = p_data.get('redirect_cmd')
+            if redirect_cmd:
+                try: bot.delete_message(call.message.chat.id, call.message.message_id)
+                except Exception: pass
+                msg = call.message
+                msg.from_user = call.from_user
+                msg.text = redirect_cmd
+                handle_messages(msg)
+                return
+            
+            # Default behavior if no redirect command is set
             markup = InlineKeyboardMarkup()
             for c in deposit_settings.keys():
                 markup.row(InlineKeyboardButton(c.replace('_', ' '), callback_data=f"cb_dep_{c}"))
