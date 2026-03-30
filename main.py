@@ -92,6 +92,15 @@ deposit_settings = {
     'BTC': {'mode': 'auto', 'address': 'Not Set', 'hd_key': 'Not Set', 'min': 50.0, 'max': 50000.0, 'msg_enter': 'Enter amount of BTC (in USD) to deposit:', 'msg_instruct': 'Please send exactly `%crypto_amount%` BTC to:\n\n`%address%`\n\n_The system is monitoring the blockchain and will credit you automatically._', 'msg_pending': '✅ Your deposit request for $%usd_amount% has been submitted to the administrators.', 'msg_success': '✅ **Deposit Approved!**\n**$%usd_amount%** has been successfully added to your deposit balance.'}
 }
 
+# --- NEW: SYSTEM PLANS INITIALIZATION ---
+if not bot_plans:
+    for i in range(6):
+        bot_plans[f'plan{i}'] = {
+            'name': f'Plan {i}', 'min': 10.0, 'max': 1000.0, 'length': 24.0, 'profit': 5.0,
+            'text': f'✨ **Plan {i} Description** ✨\n\nEdit this in Admin -> Plans.',
+            'photo': None, 'inline_text': '🛒 Purchase Plan'
+        }
+
 processed_txids = set() # Stores Hashes to prevent double-crediting
 
 def get_default_metadata():
@@ -110,7 +119,8 @@ def get_default_metadata():
         'w_msg_enter': None,
         'w_msg_addr': None,
         'w_msg_conf': None,
-        'row_idx': 0  
+        'row_idx': 0,
+        'assigned_plan': None # NEW: Maps a button directly to a Plan
     }
 
 def init_user_db(message):
@@ -429,8 +439,31 @@ def send_path_content(chat_id, user_id, path, is_editing=False):
             except Exception: pass
         editor_msg_ids[user_id] = []
 
+    # NEW: Check if this button is assigned directly to a Plan
+    meta = btn_metadata.get(path, get_default_metadata())
+    assigned_plan = meta.get('assigned_plan')
+    
+    if assigned_plan and assigned_plan in bot_plans:
+        p_data = bot_plans[assigned_plan]
+        p_text = replace_macros(p_data.get('text', ''), user_id, path)
+        p_photo = p_data.get('photo')
+        
+        markup = InlineKeyboardMarkup()
+        markup.row(InlineKeyboardButton(p_data.get('inline_text', '🛒 Purchase Plan'), callback_data=f"cb_buyplan_{assigned_plan}"))
+        
+        try:
+            if p_photo:
+                sent = bot.send_photo(chat_id, p_photo, caption=p_text, parse_mode="Markdown", reply_markup=markup)
+            else:
+                sent = bot.send_message(chat_id, p_text, parse_mode="Markdown", reply_markup=markup)
+            if is_editing: editor_msg_ids.setdefault(user_id, []).append(sent.message_id)
+        except Exception as e:
+            sent = bot.send_message(chat_id, f"⚠️ Error rendering plan: {e}")
+            if is_editing: editor_msg_ids.setdefault(user_id, []).append(sent.message_id)
+
+    # Standard post rendering follows...
     posts = menu_posts.get(path, [])
-    if not posts:
+    if not posts and not assigned_plan:
         msg = f"📂 **{path.split('/')[-1]}**\n\n_(No messages set for this menu)_" if path != 'root' else "Welcome!"
         sent = bot.send_message(chat_id, msg, parse_mode="Markdown")
         if is_editing: editor_msg_ids.setdefault(user_id, []).append(sent.message_id)
@@ -507,7 +540,7 @@ def get_settings_keyboard(full_path):
     
     markup.row(KeyboardButton(f'Random Message ({rm_text})'), KeyboardButton(f'Admin Only ({ao_text})'))
     markup.row(KeyboardButton(f'Invisible ({inv_text})'), KeyboardButton('Subscription (Join)'))
-    markup.row(KeyboardButton('Assign Command'), KeyboardButton('Assign Condition'))
+    markup.row(KeyboardButton('Assign Command'), KeyboardButton('Assign Plan')) # NEW
     markup.row(KeyboardButton('Assign Editor'), KeyboardButton('Assign Bonus'))
     markup.row(KeyboardButton('Set Fixed Exchange'), KeyboardButton('Form Settings'))
     markup.row(KeyboardButton('Assign Withdrawal'), KeyboardButton('Shop Editor'))
@@ -569,18 +602,15 @@ def get_keyboard(user_id):
             markup.row(KeyboardButton('🔙 Back to Main'))
             return markup
 
-        # FIX: Replaced underscores with spaces for clean button text
         if state == 'admin_dep_menu':
             for c in deposit_settings.keys():
                 markup.row(KeyboardButton(c.replace('_', ' '))) 
             markup.row(KeyboardButton('🔙 Back to Admin'))
             return markup
 
-        # UPDATED: Admin Deposit Currency Configuration Keyboard
         if state == 'admin_dep_settings':
             c = admin_dep_setup.get(user_id)
             if not c or c not in deposit_settings:
-                # Safe fallback if admin reboots bot while in this menu
                 markup.row(KeyboardButton('🔙 Back to Deposit Menu'))
                 return markup
                 
@@ -596,26 +626,23 @@ def get_keyboard(user_id):
         if state.startswith('dep_setup_'):
             return get_cancel_action_keyboard()
 
+        # --- NEW: ADMIN PLANS MANAGER ---
         if state == 'admin_plans':
-            for p_macro, p_data in bot_plans.items():
-                markup.row(KeyboardButton(f"⚙️ Edit {p_macro}"))
-            markup.row(KeyboardButton('➕ Add Plan'))
+            markup.row(KeyboardButton('Plan 0'), KeyboardButton('Plan 1'))
+            markup.row(KeyboardButton('Plan 2'), KeyboardButton('Plan 3'))
+            markup.row(KeyboardButton('Plan 4'), KeyboardButton('Plan 5'))
             markup.row(KeyboardButton('🔙 Back to Admin'))
             return markup
 
+        if state == 'admin_plan_settings':
+            markup.row(KeyboardButton('💰 Set Min Deposit'), KeyboardButton('💰 Set Max Deposit'))
+            markup.row(KeyboardButton('⏱ Contract Length'), KeyboardButton('📈 Plan Percentage'))
+            markup.row(KeyboardButton('🖼 Plan Display'), KeyboardButton('💬 Set Inline Text'))
+            markup.row(KeyboardButton('🔙 Back to Plans List'))
+            return markup
+
         if state.startswith('plan_setup_'):
-            td = user_plan_setup.get(user_id, {})
-            if state == 'plan_setup_macro': return get_wizard_keyboard(td.get('macro'))
-            if state == 'plan_setup_name': return get_wizard_keyboard(td.get('name'), allow_empty=True)
-            if state == 'plan_setup_min': return get_wizard_keyboard(td.get('min'))
-            if state == 'plan_setup_max': return get_wizard_keyboard(td.get('max'))
-            if state == 'plan_setup_profit': return get_wizard_keyboard(td.get('profit'))
-            if state == 'plan_setup_length': return get_wizard_keyboard(td.get('length'))
-            if state == 'plan_setup_action': 
-                curr_act = "▶️ On" if td.get('action') else "⏸ Off"
-                return get_wizard_keyboard(curr_act if 'action' in td else None, ['▶️ On (Enforce Limit)', '⏸ Off (No Enforcement)'])
-            if state == 'plan_setup_inline_buy': return get_wizard_keyboard(td.get('inline_buy'), allow_empty=True)
-            if state == 'plan_setup_inline_act': return get_wizard_keyboard(td.get('inline_act'), allow_empty=True)
+            return get_cancel_action_keyboard()
 
         # BALANCE STATES
         if state == 'bal_select':
@@ -659,6 +686,9 @@ def get_keyboard(user_id):
         if state in ['adding_button', 'renaming_button']:
             markup.row(KeyboardButton('❌ Cancel Action'))
             return markup
+
+    if state == 'buyplan_wait_amount':
+        return get_cancel_action_keyboard()
 
     # CUSTOM BUTTONS (Visible to all)
     if current_path in menus and menus[current_path]:
@@ -746,7 +776,7 @@ def handle_messages(message):
     
     if user_id not in user_current_path: user_current_path[user_id] = 'root'
     if user_id not in user_state: user_state[user_id] = 'normal'
-    if not is_admin and user_state[user_id] not in ['w_action_amount', 'w_action_addr', 'dep_wait_amount', 'dep_wait_proof']: 
+    if not is_admin and user_state[user_id] not in ['w_action_amount', 'w_action_addr', 'dep_wait_amount', 'dep_wait_proof', 'buyplan_wait_amount']: 
         user_state[user_id] = 'normal'
         
     current_path = user_current_path[user_id]
@@ -766,7 +796,7 @@ def handle_messages(message):
             bot.send_message(message.chat.id, "Inline editor action cancelled.", reply_markup=get_keyboard(user_id))
             send_path_content(message.chat.id, user_id, current_path, True)
             return
-        elif state.startswith('bal_') or state in ['adding_button', 'renaming_button']:
+        elif state.startswith('bal_') or state in ['adding_button', 'renaming_button', 'assign_plan']:
             fallback = 'bal_menu' if state.startswith('bal_') else 'editing'
             user_state[user_id] = fallback
             bot.send_message(message.chat.id, "Action cancelled.", reply_markup=get_keyboard(user_id))
@@ -775,10 +805,56 @@ def handle_messages(message):
             user_state[user_id] = 'admin_dep_settings'
             bot.send_message(message.chat.id, "Deposit setting cancelled.", reply_markup=get_keyboard(user_id))
             return
+        elif state.startswith('plan_setup_'):
+            user_state[user_id] = 'admin_plan_settings'
+            bot.send_message(message.chat.id, "Plan setting cancelled.", reply_markup=get_keyboard(user_id))
+            return
         else:
             user_state[user_id] = 'normal'
             bot.send_message(message.chat.id, "❌ Action Cancelled.", reply_markup=get_keyboard(user_id))
             return
+
+    # --- ENHANCED PLAN BUYING ENGINE ---
+    if state == 'buyplan_wait_amount':
+        try: invest_amount = float(text)
+        except ValueError: return bot.send_message(message.chat.id, "⚠️ Invalid amount. Numbers only.")
+        
+        p_id = user_action_data[user_id].get('buy_plan_id')
+        p_data = bot_plans[p_id]
+        
+        if invest_amount < p_data['min'] or invest_amount > p_data['max']:
+            return bot.send_message(message.chat.id, f"⚠️ Amount must be between **${p_data['min']}** and **${p_data['max']}**.", parse_mode="Markdown")
+            
+        u_dep = user_db[user_id].get('deposit', 0)
+        u_bal = user_db[user_id].get('balance', 0)
+        
+        if invest_amount > (u_dep + u_bal):
+            return bot.send_message(message.chat.id, "⚠️ Insufficient funds.")
+            
+        # Deduct from deposit first, then balance
+        if u_dep >= invest_amount:
+            user_db[user_id]['deposit'] -= invest_amount
+        else:
+            rem = invest_amount - u_dep
+            user_db[user_id]['deposit'] = 0
+            user_db[user_id]['balance'] -= rem
+            
+        new_plan = {
+            'id': str(uuid.uuid4())[:8],
+            'macro': p_id,
+            'amount': invest_amount,
+            'profit_pct': p_data['profit'],
+            'length_hours': p_data.get('length', 0),
+            'start_time': time.time(),
+            'last_accrual': time.time(),
+            'earned': 0.0,
+            'status': 'active'
+        }
+        user_db[user_id]['active_plans'].append(new_plan)
+        
+        user_state[user_id] = 'normal'
+        bot.send_message(message.chat.id, f"🎉 **Success!**\nYou invested **${invest_amount:.2f}** into **{p_data['name']}**!\nYour profit is accruing automatically.", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
+        return
 
     # --- ENHANCED USER DEPOSIT FLOW ENGINE (WITH ORACLE & HD WALLETS) ---
     if state == 'dep_wait_amount':
@@ -885,13 +961,10 @@ def handle_messages(message):
             user_state[user_id] = 'admin_menu'
             bot.send_message(message.chat.id, "🔐 **Admin Panel**", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
         else:
-            # FIX: Translate clicked keyboard text (spaces) back into dictionary keys (underscores)
             curr_key = text.strip().upper().replace(' ', '_')
             if curr_key in deposit_settings:
                 admin_dep_setup[user_id] = curr_key
                 user_state[user_id] = 'admin_dep_settings'
-                
-                # FIX: Clean the name before sending to prevent Markdown crash
                 clean_name = curr_key.replace('_', ' ')
                 bot.send_message(message.chat.id, f"🏦 **Editing Settings for {clean_name}**", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
         return
@@ -917,7 +990,6 @@ def handle_messages(message):
             user_state[user_id] = 'dep_setup_instruct'
             bot.send_message(message.chat.id, f"Send instructions containing `%crypto_amount%` and `%address%` macros:\n\nℹ️ Current:\n{deposit_settings[curr]['msg_instruct']}", parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
         
-        # NEW DEPOSIT CONFIGURATIONS
         elif text == '💰 Set Min Deposit':
             user_state[user_id] = 'dep_setup_min'
             bot.send_message(message.chat.id, f"Enter Minimum Deposit Amount in USD for **{curr.replace('_', ' ')}**:\n\nℹ️ Current: {deposit_settings[curr].get('min', 10.0)}", parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
@@ -951,6 +1023,69 @@ def handle_messages(message):
         bot.send_message(message.chat.id, "✅ Setting updated successfully!", reply_markup=get_keyboard(user_id))
         return
 
+    # --- NEW: ADMIN PLANS MANAGER ---
+    if state == 'admin_plans':
+        if text == '🔙 Back to Admin':
+            user_state[user_id] = 'admin_menu'
+            bot.send_message(message.chat.id, "🔐 **Admin Panel**", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
+        elif text.startswith('Plan '):
+            p_id = text.replace('Plan ', 'plan').lower()
+            if p_id in bot_plans:
+                if user_id not in user_action_data: user_action_data[user_id] = {}
+                user_action_data[user_id]['edit_plan'] = p_id
+                user_state[user_id] = 'admin_plan_settings'
+                bot.send_message(message.chat.id, f"⚙️ **Editing {text}**", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
+        return
+
+    if state == 'admin_plan_settings':
+        p_id = user_action_data[user_id].get('edit_plan')
+        if text == '🔙 Back to Plans List':
+            user_state[user_id] = 'admin_plans'
+            bot.send_message(message.chat.id, "📊 **Plans Manager**", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
+        elif text == '💰 Set Min Deposit':
+            user_state[user_id] = 'plan_setup_min'
+            bot.send_message(message.chat.id, f"Enter Minimum Deposit for **{bot_plans[p_id]['name']}**:\n\nℹ️ Current: ${bot_plans[p_id]['min']}", parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
+        elif text == '💰 Set Max Deposit':
+            user_state[user_id] = 'plan_setup_max'
+            bot.send_message(message.chat.id, f"Enter Maximum Deposit for **{bot_plans[p_id]['name']}**:\n\nℹ️ Current: ${bot_plans[p_id]['max']}", parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
+        elif text == '⏱ Contract Length':
+            user_state[user_id] = 'plan_setup_length'
+            bot.send_message(message.chat.id, f"Enter Contract Length (in hours) for **{bot_plans[p_id]['name']}**:\n\nℹ️ Current: {bot_plans[p_id]['length']} hours", parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
+        elif text == '📈 Plan Percentage':
+            user_state[user_id] = 'plan_setup_profit'
+            bot.send_message(message.chat.id, f"Enter Profit Percentage for **{bot_plans[p_id]['name']}**:\n\nℹ️ Current: {bot_plans[p_id]['profit']}%", parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
+        elif text == '🖼 Plan Display':
+            user_state[user_id] = 'plan_setup_display'
+            bot.send_message(message.chat.id, f"Send an Image with a Caption (or just text) to set as the display for **{bot_plans[p_id]['name']}**:", parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
+        elif text == '💬 Set Inline Text':
+            user_state[user_id] = 'plan_setup_inline'
+            bot.send_message(message.chat.id, f"Enter the text for the inline purchase button (e.g. 'Buy Now'):\n\nℹ️ Current: {bot_plans[p_id].get('inline_text', 'Buy Now')}", parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
+        return
+
+    if state.startswith('plan_setup_'):
+        p_id = user_action_data[user_id].get('edit_plan')
+        if state == 'plan_setup_min':
+            try: bot_plans[p_id]['min'] = float(text)
+            except ValueError: return bot.send_message(message.chat.id, "⚠️ Invalid amount. Numbers only.")
+        elif state == 'plan_setup_max':
+            try: bot_plans[p_id]['max'] = float(text)
+            except ValueError: return bot.send_message(message.chat.id, "⚠️ Invalid amount. Numbers only.")
+        elif state == 'plan_setup_length':
+            try: bot_plans[p_id]['length'] = float(text)
+            except ValueError: return bot.send_message(message.chat.id, "⚠️ Invalid amount. Numbers only.")
+        elif state == 'plan_setup_profit':
+            try: bot_plans[p_id]['profit'] = float(text)
+            except ValueError: return bot.send_message(message.chat.id, "⚠️ Invalid amount. Numbers only.")
+        elif state == 'plan_setup_display':
+            bot_plans[p_id]['photo'] = message.photo[-1].file_id if message.photo else None
+            bot_plans[p_id]['text'] = message.caption if message.photo else text
+        elif state == 'plan_setup_inline':
+            bot_plans[p_id]['inline_text'] = text
+            
+        user_state[user_id] = 'admin_plan_settings'
+        bot.send_message(message.chat.id, "✅ Plan updated successfully!", reply_markup=get_keyboard(user_id))
+        return
+
     # --- HANDLE INLINE BUTTONS EDITOR WORKFLOW ---
     if state == 'pi_wait_mode':
         mode_map = {'🔗 URL or Share': 'url', '💬 Popup Window': 'popup', '🚀 Command': 'command', '🛒 Buy Plan': 'buy_plan', '🏦 Deposit': 'deposit'}
@@ -958,16 +1093,14 @@ def handle_messages(message):
             if user_id not in user_action_data: user_action_data[user_id] = {}
             user_action_data[user_id]['mode'] = mode_map[text]
             
-            # --- NEW INTERACTIVE DEPOSIT INLINE BUTTON FLOW ---
             if mode_map[text] == 'deposit':
                 user_state[user_id] = 'pi_wait_dep_curr'
                 markup = ReplyKeyboardMarkup(resize_keyboard=True)
                 for c in deposit_settings.keys():
-                    markup.row(KeyboardButton(c.replace('_', ' '))) # FIX: Make inline setup keyboard clean
+                    markup.row(KeyboardButton(c.replace('_', ' '))) 
                 markup.row(KeyboardButton('❌ Cancel Action'))
                 bot.send_message(message.chat.id, "🏦 Select the deposit method for this button:", reply_markup=markup)
                 return
-            # --------------------------------------------------
 
             user_state[user_id] = 'pi_wait_text'
             
@@ -990,9 +1123,8 @@ def handle_messages(message):
             bot.send_message(message.chat.id, "Please use the keyboard to select a valid category.")
         return
 
-    # NEW INTERACTIVE STATE
     if state == 'pi_wait_dep_curr':
-        curr_key = text.strip().upper().replace(" ", "_") # FIX: Translate selection back to dictionary key
+        curr_key = text.strip().upper().replace(" ", "_") 
         if curr_key not in deposit_settings:
             return bot.send_message(message.chat.id, "⚠️ Invalid method. Please select directly from the keyboard buttons.")
         user_action_data[user_id]['dep_curr'] = curr_key
@@ -1007,7 +1139,6 @@ def handle_messages(message):
                 b = next((x for x in post.get('custom_inlines', []) if x['id'] == btn_id), None)
                 if b: prev_text = f"\n\nℹ️ **Current Title:** `{b['text']}`"
                 
-        # FIX: Clean display text for Markdown
         clean_curr = curr_key.replace('_', ' ')
         bot.send_message(message.chat.id, f"Enter the **Display Title** for this button (e.g., Deposit {clean_curr}):{prev_text}", parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
         return
@@ -1015,7 +1146,6 @@ def handle_messages(message):
     if state == 'pi_wait_text':
         mode = user_action_data[user_id]['mode']
         
-        # IF IT IS A DEPOSIT BUTTON, WE ALREADY HAVE THE DATA
         if mode == 'deposit':
             title = text.strip()
             data = user_action_data[user_id]['dep_curr']
@@ -1094,6 +1224,31 @@ def handle_messages(message):
         return
 
     # --- ADMIN POSTS EDITOR CONTROLS ---
+    if state == 'editing':
+        if text == '🛑 Stop Editor':
+            user_state[user_id] = 'normal'
+            user_selected_button[user_id] = None
+            bot.send_message(message.chat.id, "Editor stopped.", reply_markup=get_keyboard(user_id))
+        elif text == '➕ Add Button':
+            user_state[user_id] = 'adding_button'
+            bot.send_message(message.chat.id, "Send the name for the new button:", reply_markup=get_cancel_action_keyboard())
+        elif text == '📝 Posts Editor':
+            user_state[user_id] = 'posts_editing'
+            bot.send_message(message.chat.id, "📝 **Posts Editor Activated**", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
+            send_path_content(message.chat.id, user_id, current_path, True)
+        elif current_path in menus and text in menus[current_path]:
+            if user_selected_button.get(user_id) == text:
+                user_selected_button[user_id] = None
+                new_path = f"{current_path}/{text}"
+                user_current_path[user_id] = new_path
+                if new_path not in menus: menus[new_path] = []
+                send_path_content(message.chat.id, user_id, new_path, False)
+                bot.send_message(message.chat.id, "📍 Navigation Controls:", reply_markup=get_keyboard(user_id))
+            else:
+                user_selected_button[user_id] = text
+                bot.send_message(message.chat.id, f"🛠 Selected: **{text}**\nChoose an action:", parse_mode="Markdown", reply_markup=get_edit_inline_tools())
+        return
+
     if state == 'posts_editing':
         if text == '🛑 Stop Editor':
             user_state[user_id] = 'normal'
@@ -1122,7 +1277,6 @@ def handle_messages(message):
             user_state[user_id] = 'admin_dep_menu'
             bot.send_message(message.chat.id, "🏦 **Deposit Architecture Menu**", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
         elif text == '📜 Macros':
-            # UPDATED MACROS LIST
             macros_msg = (
                 "📝 **Available Macros List**\n"
                 "(Tap on any macro to copy it)\n\n"
@@ -1133,92 +1287,15 @@ def handle_messages(message):
                 "`%username%` - Telegram @username\n"
                 "`%firstname%` - User's first name\n"
                 "`%lastname%` - User's last name\n\n"
-                "`%usd_amount%` - USD amount of deposit (Deposit settings only)\n"
-                "`%crypto_amount%` - Crypto amount of deposit (Deposit settings only)\n"
-                "`%address%` - Wallet address (Deposit settings only)\n\n"
-                "`%plan0%` ... `%plan5%` - Plan details\n\n"
-                "`%minwithdraw%` - Button min limit\n"
-                "`%maxwithdraw%` - Button max limit\n"
+                "`%usd_amount%` - USD amount of deposit\n"
+                "`%crypto_amount%` - Crypto amount of deposit\n"
+                "`%address%` - Wallet address\n\n"
+                "`%plan0%` ... `%plan5%` - Plan details\n"
             )
             bot.send_message(message.chat.id, macros_msg, parse_mode="Markdown")
         elif text == '📊 Plans':
             user_state[user_id] = 'admin_plans'
             bot.send_message(message.chat.id, "📊 **Plans Manager**", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
-        return
-
-    if state == 'admin_plans':
-        if text == '🔙 Back to Admin':
-            user_state[user_id] = 'admin_menu'
-            bot.send_message(message.chat.id, "🔐 **Admin Panel**", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
-        elif text == '➕ Add Plan':
-            user_plan_setup[user_id] = {}
-            user_state[user_id] = 'plan_setup_macro'
-            bot.send_message(message.chat.id, "Enter the **Plan Macro** (e.g., `%plan0%`):", parse_mode="Markdown", reply_markup=get_wizard_keyboard(None))
-        elif text.startswith('⚙️ Edit '):
-            p_macro = text.replace('⚙️ Edit ', '')
-            if p_macro in bot_plans:
-                user_plan_setup[user_id] = bot_plans[p_macro].copy()
-                user_state[user_id] = 'plan_setup_macro'
-                bot.send_message(message.chat.id, f"Editing **{p_macro}**.\nEnter the **Plan Macro**:\n\nℹ️ Current: {p_macro}", parse_mode="Markdown", reply_markup=get_wizard_keyboard(p_macro))
-        return
-
-    if state.startswith('plan_setup_'):
-        if text == '🚫 Cancel':
-            user_state[user_id] = 'admin_plans'
-            bot.send_message(message.chat.id, "Plan setup cancelled.", reply_markup=get_keyboard(user_id))
-            return
-
-        val = None if text == '➖ Set Empty' else text
-        td = user_plan_setup[user_id]
-
-        if text != '✔️ Leave as Is':
-            if state == 'plan_setup_macro': td['macro'] = val
-            elif state == 'plan_setup_name': td['name'] = val
-            elif state == 'plan_setup_min':
-                try: td['min'] = float(val) if val else 0.0
-                except ValueError: return bot.send_message(message.chat.id, "⚠️ Numeric only for Min amount.")
-            elif state == 'plan_setup_max':
-                try: td['max'] = float(val) if val else 0.0
-                except ValueError: return bot.send_message(message.chat.id, "⚠️ Numeric only for Max amount.")
-            elif state == 'plan_setup_profit':
-                try: td['profit'] = float(val) if val else 0.0
-                except ValueError: return bot.send_message(message.chat.id, "⚠️ Numeric only for Profit percentage.")
-            elif state == 'plan_setup_length':
-                try: td['length'] = float(val) if val else 0.0
-                except ValueError: return bot.send_message(message.chat.id, "⚠️ Numeric only for Length.")
-            elif state == 'plan_setup_action': td['action'] = True if 'On' in text else False
-            elif state == 'plan_setup_inline_buy': td['inline_buy'] = val
-            elif state == 'plan_setup_inline_act': td['inline_act'] = val
-
-        # Wizard Navigation
-        if state == 'plan_setup_macro':
-            user_state[user_id] = 'plan_setup_name'
-            bot.send_message(message.chat.id, f"Enter **Plan Name**:\n\nℹ️ Current: {td.get('name')}", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
-        elif state == 'plan_setup_name':
-            user_state[user_id] = 'plan_setup_min'
-            bot.send_message(message.chat.id, f"Enter **Minimum Amount** (numeric):\n\nℹ️ Current: {td.get('min')}", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
-        elif state == 'plan_setup_min':
-            user_state[user_id] = 'plan_setup_max'
-            bot.send_message(message.chat.id, f"Enter **Maximum Amount** (numeric):\n\nℹ️ Current: {td.get('max')}", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
-        elif state == 'plan_setup_max':
-            user_state[user_id] = 'plan_setup_profit'
-            bot.send_message(message.chat.id, f"Enter **Profit in Hours** (percentage, numeric):\n\nℹ️ Current: {td.get('profit')}", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
-        elif state == 'plan_setup_profit':
-            user_state[user_id] = 'plan_setup_length'
-            bot.send_message(message.chat.id, f"Enter **Contract Length** in hours (e.g., 24 for 1 day. Enter 0 for NO LIMIT):\n\nℹ️ Current: {td.get('length')}", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
-        elif state == 'plan_setup_length':
-            user_state[user_id] = 'plan_setup_action'
-            bot.send_message(message.chat.id, "Set **Action Toggle** (Must deposit be within min-max?):", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
-        elif state == 'plan_setup_action':
-            user_state[user_id] = 'plan_setup_inline_buy'
-            bot.send_message(message.chat.id, f"Enter display if used as inline (e.g. 'Buy Now'):\n\nℹ️ Current: {td.get('inline_buy')}", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
-        elif state == 'plan_setup_inline_buy':
-            user_state[user_id] = 'plan_setup_inline_act'
-            bot.send_message(message.chat.id, f"Enter display if purchased in inline (e.g. 'Activated'):\n\nℹ️ Current: {td.get('inline_act')}", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
-        elif state == 'plan_setup_inline_act':
-            bot_plans[td['macro']] = td
-            user_state[user_id] = 'admin_plans'
-            bot.send_message(message.chat.id, f"✅ Plan **{td['macro']}** saved successfully!", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
         return
 
     # --- ADMIN BALANCE MANAGEMENT ENGINE ---
@@ -1442,6 +1519,20 @@ def handle_messages(message):
             bot.send_message(message.chat.id, "✅ Withdrawal setup complete!", reply_markup=get_keyboard(user_id))
         return
 
+    # --- NEW: ASSIGN PLAN TO BUTTON MENU ---
+    if state == 'assign_plan':
+        if text == '➖ Remove Plan':
+            btn_metadata[full_path]['assigned_plan'] = None
+            bot.send_message(message.chat.id, "Plan removed from button.", reply_markup=get_keyboard(user_id))
+        elif text.startswith('Plan '):
+            p_id = text.replace('Plan ', 'plan').lower()
+            btn_metadata[full_path]['assigned_plan'] = p_id
+            bot.send_message(message.chat.id, f"✅ Button assigned to **{bot_plans[p_id]['name']}**!", parse_mode="Markdown")
+        
+        user_state[user_id] = 'button_settings'
+        bot.send_message(message.chat.id, "Menu:", reply_markup=get_keyboard(user_id))
+        return
+
     # --- STATE: ASSIGN COMMAND MENU ---
     if state == 'assign_command':
         if text == '🚫 Cancel':
@@ -1493,6 +1584,13 @@ def handle_messages(message):
             user_state[user_id] = 'assign_command'
             curr = btn_metadata[full_path].get('command', 'None assigned yet')
             bot.send_message(message.chat.id, f"Send the command for this button (Current: `{curr}`)", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
+        elif text == 'Assign Plan':
+            user_state[user_id] = 'assign_plan'
+            markup = ReplyKeyboardMarkup(resize_keyboard=True)
+            markup.row(KeyboardButton('Plan 0'), KeyboardButton('Plan 1'), KeyboardButton('Plan 2'))
+            markup.row(KeyboardButton('Plan 3'), KeyboardButton('Plan 4'), KeyboardButton('Plan 5'))
+            markup.row(KeyboardButton('➖ Remove Plan'), KeyboardButton('❌ Cancel Action'))
+            bot.send_message(message.chat.id, "Select a Plan to assign directly to this button:", reply_markup=markup)
         elif text == 'Assign Withdrawal':
             user_state[user_id] = 'withdrawal_settings'
             bot.send_message(message.chat.id, f"Withdrawal settings for: {selected_btn}", reply_markup=get_keyboard(user_id))
@@ -1560,32 +1658,6 @@ def handle_messages(message):
             bot.send_message(message.chat.id, "📍 Navigation Controls:", reply_markup=get_keyboard(user_id))
             return
 
-    # --- HANDLE EDIT MODE CONTROLS ---
-    if state == 'editing':
-        if text == '🛑 Stop Editor':
-            user_state[user_id] = 'normal'
-            user_selected_button[user_id] = None
-            bot.send_message(message.chat.id, "Editor stopped.", reply_markup=get_keyboard(user_id))
-        elif text == '➕ Add Button':
-            user_state[user_id] = 'adding_button'
-            bot.send_message(message.chat.id, "Send the name for the new button:", reply_markup=get_cancel_action_keyboard())
-        elif text == '📝 Posts Editor':
-            user_state[user_id] = 'posts_editing'
-            bot.send_message(message.chat.id, "📝 **Posts Editor Activated**", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
-            send_path_content(message.chat.id, user_id, current_path, True)
-        elif current_path in menus and text in menus[current_path]:
-            if user_selected_button.get(user_id) == text:
-                user_selected_button[user_id] = None
-                new_path = f"{current_path}/{text}"
-                user_current_path[user_id] = new_path
-                if new_path not in menus: menus[new_path] = []
-                send_path_content(message.chat.id, user_id, new_path, False)
-                bot.send_message(message.chat.id, "📍 Navigation Controls:", reply_markup=get_keyboard(user_id))
-            else:
-                user_selected_button[user_id] = text
-                bot.send_message(message.chat.id, f"🛠 Selected: **{text}**\nChoose an action:", parse_mode="Markdown", reply_markup=get_edit_inline_tools())
-        return
-
     # --- HANDLE NORMAL / POSTS EDITING TRAVERSAL ---
     if state == 'normal' or state == 'posts_editing':
         if text == '🎛️ Buttons Editor':
@@ -1635,6 +1707,38 @@ def handle_inline(call):
     current_path = user_current_path.get(user_id, 'root')
     target_btn = user_selected_button.get(user_id)
     is_admin = user_id in ADMIN_IDS
+
+    # --- ENHANCED DYNAMIC PLAN BUYER INLINE ACTION ---
+    if call.data.startswith('cb_buyplan_'):
+        plan_id = call.data.split('_')[2]
+        if plan_id not in bot_plans:
+            return bot.answer_callback_query(call.id, "Plan not found.", show_alert=True)
+            
+        p_data = bot_plans[plan_id]
+        
+        # Check Total Available Funds (Deposit + Withdrawal Balance)
+        u_dep = user_db[user_id].get('deposit', 0)
+        u_bal = user_db[user_id].get('balance', 0)
+        total_avail = u_dep + u_bal
+        
+        # Insufficient Funds -> Redirect to Deposit Engine
+        if total_avail < p_data['min']:
+            user_db[user_id]['pending_plan'] = plan_id
+            bot.answer_callback_query(call.id, "Insufficient balance. Redirecting to Deposit...", show_alert=True)
+            
+            markup = InlineKeyboardMarkup()
+            for c in deposit_settings.keys():
+                markup.row(InlineKeyboardButton(c.replace('_', ' '), callback_data=f"cb_dep_{c}"))
+            bot.send_message(call.message.chat.id, "💰 **Insufficient Funds!**\nPlease select a deposit method below to fund your account and automatically activate your plan:", parse_mode="Markdown", reply_markup=markup)
+            return
+            
+        # Funds OK -> Move to Amount Entry State
+        if user_id not in user_action_data: user_action_data[user_id] = {}
+        user_action_data[user_id]['buy_plan_id'] = plan_id
+        user_state[user_id] = 'buyplan_wait_amount'
+        bot.send_message(call.message.chat.id, f"📈 **{p_data['name']}**\nMin: ${p_data['min']} | Max: ${p_data['max']}\n\nAvailable Balance: ${total_avail:.2f}\n\nEnter the amount you wish to invest:", reply_markup=get_cancel_action_keyboard())
+        bot.answer_callback_query(call.id)
+        return
 
     # --- ADMIN MANUAL DEPOSIT APPROVAL RECEIPTS ---
     if call.data.startswith('cb_depapp_'):
@@ -1707,25 +1811,29 @@ def handle_inline(call):
         
     elif call.data.startswith('cb_dep_'):
         btn_id = call.data.split('_')[2]
-        for path, posts in menu_posts.items():
-            for p in posts:
-                for b in p.get('custom_inlines', []):
-                    if b['id'] == btn_id:
-                        curr = b['data'].strip().upper().replace(" ", "_")
-                        if curr not in deposit_settings:
-                            return bot.answer_callback_query(call.id, "Error: Currency not configured.", show_alert=True)
-                            
-                        bot.answer_callback_query(call.id)
-                        if user_id not in user_action_data: user_action_data[user_id] = {}
-                        user_action_data[user_id]['currency'] = curr
-                        user_state[user_id] = 'dep_wait_amount'
-                        
-                        try: bot.delete_message(call.message.chat.id, call.message.message_id)
-                        except Exception: pass
-                        
-                        bot.send_message(call.message.chat.id, deposit_settings[curr]['msg_enter'], parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
-                        return
-        return bot.answer_callback_query(call.id)
+        # Allow checking if it was generated directly from the Buy Plan redirect
+        if len(call.data.split('_')) > 2 and call.data.split('_')[2] in deposit_settings:
+             curr = call.data.replace('cb_dep_', '')
+        else:
+            for path, posts in menu_posts.items():
+                for p in posts:
+                    for b in p.get('custom_inlines', []):
+                        if b['id'] == btn_id:
+                            curr = b['data'].strip().upper().replace(" ", "_")
+        
+        if curr not in deposit_settings:
+            return bot.answer_callback_query(call.id, "Error: Currency not configured.", show_alert=True)
+            
+        bot.answer_callback_query(call.id)
+        if user_id not in user_action_data: user_action_data[user_id] = {}
+        user_action_data[user_id]['currency'] = curr
+        user_state[user_id] = 'dep_wait_amount'
+        
+        try: bot.delete_message(call.message.chat.id, call.message.message_id)
+        except Exception: pass
+        
+        bot.send_message(call.message.chat.id, deposit_settings[curr]['msg_enter'], parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
+        return
         
     elif call.data.startswith('cb_buy_'):
         btn_id = call.data.split('_')[2]
