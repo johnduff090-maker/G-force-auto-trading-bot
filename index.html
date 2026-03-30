@@ -1,1 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bot Admin Dashboard</title>
+    <style>
+        :root {
+            --bg-color: #121212;
+            --card-bg: #1e1e1e;
+            --text-color: #ffffff;
+            --primary-color: #0088cc;
+            --primary-hover: #006699;
+            --danger-color: #ff4d4d;
+            --border-radius: 8px;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+        }
+
+        .dashboard-container {
+            background-color: var(--card-bg);
+            padding: 30px;
+            border-radius: var(--border-radius);
+            box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+            width: 100%;
+            max-width: 400px;
+        }
+
+        h2 {
+            margin-top: 0;
+            text-align: center;
+            border-bottom: 2px solid #333;
+            padding-bottom: 15px;
+            margin-bottom: 20px;
+        }
+
+        .form-group {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            margin-bottom: 25px;
+        }
+
+        label {
+            font-size: 0.9em;
+            color: #aaa;
+        }
+
+        input[type="number"] {
+            padding: 12px;
+            border: 1px solid #333;
+            border-radius: var(--border-radius);
+            background-color: #2a2a2a;
+            color: white;
+            font-size: 1em;
+            outline: none;
+        }
+
+        input[type="number"]:focus {
+            border-color: var(--primary-color);
+        }
+
+        button {
+            padding: 12px;
+            background-color: var(--primary-color);
+            color: white;
+            border: none;
+            border-radius: var(--border-radius);
+            font-size: 1em;
+            cursor: pointer;
+            transition: background-color 0.3s;
+            font-weight: bold;
+        }
+
+        button:hover {
+            background-color: var(--primary-hover);
+        }
+
+        .admin-list-container {
+            margin-top: 20px;
+        }
+
+        .admin-list {
+            list-style-type: none;
+            padding: 0;
+            margin: 0;
+        }
+
+        .admin-item {
+            background-color: #2a2a2a;
+            padding: 10px 15px;
+            border-radius: var(--border-radius);
+            margin-bottom: 8px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-family: monospace;
+            font-size: 1.1em;
+        }
+
+        .delete-btn {
+            background-color: transparent;
+            color: var(--danger-color);
+            padding: 5px 10px;
+            font-size: 0.9em;
+        }
+
+        .delete-btn:hover {
+            background-color: rgba(255, 77, 77, 0.1);
+        }
+
+        #status-message {
+            margin-top: 15px;
+            text-align: center;
+            font-size: 0.9em;
+            min-height: 20px;
+        }
+
+        .success { color: #4caf50; }
+        .error { color: var(--danger-color); }
+
+        .footer-note {
+            text-align: center;
+            font-size: 0.8em;
+            color: #555;
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="dashboard-container">
+        <h2>🔐 Bot Admin Manager</h2>
+
+        <div class="form-group">
+            <label for="adminId">Add New Admin (Telegram User ID)</label>
+            <input type="number" id="adminId" placeholder="e.g. 123456789" required>
+            <button onclick="addAdmin()">Add Admin</button>
+        </div>
+
+        <div id="status-message"></div>
+
+        <div class="admin-list-container">
+            <label>Current Admins</label>
+            <ul class="admin-list" id="adminList">
+                <li class="admin-item">Loading admins...</li>
+            </ul>
+        </div>
+
+        <div class="footer-note">
+            🟢 UptimeRobot Status: Online & Monitoring
+        </div>
+    </div>
+
+    <script>
+        // When we build the Python backend, this function will ask Python for the current admins
+        async function fetchAdmins() {
+            try {
+                const response = await fetch('/api/get_admins');
+                const data = await response.json();
+                const listElement = document.getElementById('adminList');
+                
+                listElement.innerHTML = '';
+                
+                data.admins.forEach(adminId => {
+                    const li = document.createElement('li');
+                    li.className = 'admin-item';
+                    li.innerHTML = `
+                        ${adminId}
+                        <button class="delete-btn" onclick="removeAdmin(${adminId})">Remove</button>
+                    `;
+                    listElement.appendChild(li);
+                });
+            } catch (error) {
+                document.getElementById('adminList').innerHTML = '<li class="admin-item error">Backend not connected yet.</li>';
+            }
+        }
+
+        // This function will send the new ID to your Python script
+        async function addAdmin() {
+            const adminIdInput = document.getElementById('adminId');
+            const statusMsg = document.getElementById('status-message');
+            const adminId = adminIdInput.value.trim();
+
+            if (!adminId) {
+                statusMsg.textContent = "Please enter a valid Telegram ID.";
+                statusMsg.className = "error";
+                return;
+            }
+
+            statusMsg.textContent = "Connecting to bot...";
+            statusMsg.className = "";
+
+            try {
+                const response = await fetch('/api/add_admin', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ admin_id: adminId })
+                });
+
+                const result = await response.json();
+
+                if (response.ok) {
+                    statusMsg.textContent = `✅ Admin ${adminId} added successfully!`;
+                    statusMsg.className = "success";
+                    adminIdInput.value = ''; // Clear input
+                    fetchAdmins(); // Refresh the list
+                } else {
+                    statusMsg.textContent = `❌ Error: ${result.error}`;
+                    statusMsg.className = "error";
+                }
+            } catch (error) {
+                statusMsg.textContent = "Backend Python server is not active yet.";
+                statusMsg.className = "error";
+            }
+        }
+
+        // This function will tell Python to delete an admin
+        async function removeAdmin(adminId) {
+            if(!confirm(`Are you sure you want to remove admin ${adminId}?`)) return;
+
+            try {
+                await fetch('/api/remove_admin', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ admin_id: adminId })
+                });
+                fetchAdmins();
+            } catch (error) {
+                console.error("Failed to remove admin", error);
+            }
+        }
+
+        // Fetch the list of admins as soon as the page loads
+        window.onload = fetchAdmins;
+    </script>
+</body>
+</html>
 
