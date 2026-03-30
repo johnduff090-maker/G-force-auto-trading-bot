@@ -2005,6 +2005,12 @@ def handle_inline(call):
 
 # --- NEW: LIGHTWEIGHT WEB SERVER FOR ADMIN DASHBOARD & UPTIMEROBOT ---
 class AdminDashboardHandler(BaseHTTPRequestHandler):
+    def do_HEAD(self):
+        # This is strictly for UptimeRobot so it gets a successful ping!
+        self.send_response(200)
+        self.send_header('Content-type', 'text/html')
+        self.end_headers()
+
     def do_GET(self):
         parsed_path = urlparse(self.path)
         if parsed_path.path == '/':
@@ -2097,4 +2103,3 @@ if __name__ == '__main__':
     # Start the Telegram Bot
     print("🚀 Bot is running fast! Press Ctrl+C to stop.")
     bot.infinity_polling(skip_pending=True)
-
