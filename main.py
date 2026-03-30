@@ -1527,6 +1527,20 @@ def handle_messages(message):
             bot.send_message(message.chat.id, "✅ Withdrawal setup complete!", reply_markup=get_keyboard(user_id))
         return
 
+    # --- STATE: ASSIGN PLAN TO BUTTON MENU ---
+    if state == 'assign_plan':
+        if text == '➖ Remove Plan':
+            btn_metadata[full_path]['assigned_plan'] = None
+            bot.send_message(message.chat.id, "Plan removed from button.")
+        elif text.startswith('Plan '):
+            p_id = text.replace('Plan ', 'plan').lower()
+            btn_metadata[full_path]['assigned_plan'] = p_id
+            bot.send_message(message.chat.id, f"✅ Button assigned to **{bot_plans[p_id]['name']}**!", parse_mode="Markdown")
+        
+        user_state[user_id] = 'button_settings'
+        bot.send_message(message.chat.id, "Returned to Button Settings.", reply_markup=get_keyboard(user_id))
+        return
+
     # --- STATE: ASSIGN COMMAND MENU ---
     if state == 'assign_command':
         if text == '🚫 Cancel':
@@ -1651,32 +1665,6 @@ def handle_messages(message):
             send_path_content(message.chat.id, user_id, new_path, is_editing=(state == 'posts_editing'))
             bot.send_message(message.chat.id, "📍 Navigation Controls:", reply_markup=get_keyboard(user_id))
             return
-
-    # --- HANDLE EDIT MODE CONTROLS ---
-    if state == 'editing':
-        if text == '🛑 Stop Editor':
-            user_state[user_id] = 'normal'
-            user_selected_button[user_id] = None
-            bot.send_message(message.chat.id, "Editor stopped.", reply_markup=get_keyboard(user_id))
-        elif text == '➕ Add Button':
-            user_state[user_id] = 'adding_button'
-            bot.send_message(message.chat.id, "Send the name for the new button:", reply_markup=get_cancel_action_keyboard())
-        elif text == '📝 Posts Editor':
-            user_state[user_id] = 'posts_editing'
-            bot.send_message(message.chat.id, "📝 **Posts Editor Activated**", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
-            send_path_content(message.chat.id, user_id, current_path, True)
-        elif current_path in menus and text in menus[current_path]:
-            if user_selected_button.get(user_id) == text:
-                user_selected_button[user_id] = None
-                new_path = f"{current_path}/{text}"
-                user_current_path[user_id] = new_path
-                if new_path not in menus: menus[new_path] = []
-                send_path_content(message.chat.id, user_id, new_path, False)
-                bot.send_message(message.chat.id, "📍 Navigation Controls:", reply_markup=get_keyboard(user_id))
-            else:
-                user_selected_button[user_id] = text
-                bot.send_message(message.chat.id, f"🛠 Selected: **{text}**\nChoose an action:", parse_mode="Markdown", reply_markup=get_edit_inline_tools())
-        return
 
     # --- HANDLE NORMAL / POSTS EDITING TRAVERSAL ---
     if state == 'normal' or state == 'posts_editing':
