@@ -783,6 +783,9 @@ def handle_messages(message):
     selected_btn = user_selected_button.get(user_id)
     full_path = f"{current_path}/{selected_btn}" if selected_btn else None
 
+    # --- BLOCK UNAUTHORIZED ADMIN COMMANDS ---
+    admin_commands = ['🎛️ Buttons Editor', '📝 Posts Editor', '💵 Balance', '🔐 Admin', '➕ Add Button', '🛑 Stop Editor', '🔙 Exit Button Settings', '✅ Confirm', '🚫 Cancel', '✖️ Delete', 'Deposit balance', 'Withdrawal balance', '🔙 Exit Balance', '📜 Macros', '📊 Plans', '🔙 Back to Main', '🔙 Back to Admin', '➕ Add Plan', '➕ Add Message', 'Pagination in Editor (10)', '🏦 Deposit Settings', 'Withdrawal Settings', '🔙 Back to Deposit Menu', '📍 Set Static Address', '🔑 Set HD Wallet Key', '💬 Edit Enter Msg', '💬 Edit Instruct Msg', '💰 Set Min Deposit', '💰 Set Max Deposit', '💬 Edit Pending Msg', '💬 Edit Success Msg', '🧮 Calculator', '📜 Transactions']
+
     # --- HANDLE USER ABORTING ANY LIVE ACTION ---
     if text in ['❌ Cancel Action', '❌ Cancel', '🚫 Cancel Action']:
         if state in ['posts_adding', 'posts_insert_after', 'posts_rep_text', 'posts_rep_all']:
@@ -816,6 +819,52 @@ def handle_messages(message):
             user_state[user_id] = 'normal'
             bot.send_message(message.chat.id, "❌ Action Cancelled.", reply_markup=get_keyboard(user_id))
             return
+
+    # --- HANDLE BUTTONS EDITOR ADD / RENAME ---
+    if state == 'adding_button':
+        if current_path not in menus: menus[current_path] = []
+        
+        forbidden_names = ['🏠 Home', '🔙 Back'] + admin_commands
+        if text in forbidden_names:
+            bot.send_message(message.chat.id, "⚠️ You cannot use a system command as a button name. Please type a unique name, or click '❌ Cancel Action'.", reply_markup=get_cancel_action_keyboard())
+            return
+            
+        if text not in menus[current_path]:
+            max_r_idx = 0
+            for b_name in menus[current_path]:
+                r = btn_metadata.get(f"{current_path}/{b_name}", {}).get('row_idx', 0)
+                if r > max_r_idx: max_r_idx = r
+                
+            menus[current_path].append(text)
+            new_meta = get_default_metadata()
+            new_meta['row_idx'] = max_r_idx
+            btn_metadata[f"{current_path}/{text}"] = new_meta
+            
+            user_state[user_id] = 'editing'
+            bot.send_message(message.chat.id, f"✅ Added '{text}'!", reply_markup=get_keyboard(user_id))
+        else:
+            bot.send_message(message.chat.id, "⚠️ Name exists. Try another, or Cancel.", reply_markup=get_keyboard(user_id))
+        return
+
+    if state == 'renaming_button':
+        old_name = user_selected_button.get(user_id)
+        
+        forbidden_names = ['🏠 Home', '🔙 Back'] + admin_commands
+        if text in forbidden_names:
+            bot.send_message(message.chat.id, "⚠️ You cannot use a system command as a button name. Please type a unique name, or click '❌ Cancel Action'.", reply_markup=get_cancel_action_keyboard())
+            return
+            
+        if not old_name or text in menus[current_path]:
+            bot.send_message(message.chat.id, "⚠️ Invalid or duplicate name. Try another, or Cancel.", reply_markup=get_keyboard(user_id))
+            return
+            
+        idx = menus[current_path].index(old_name)
+        menus[current_path][idx] = text
+        change_menu_paths(f"{current_path}/{old_name}", f"{current_path}/{text}")
+        user_state[user_id] = 'editing'
+        user_selected_button[user_id] = None
+        bot.send_message(message.chat.id, f"✅ Renamed to '{text}'!", reply_markup=get_keyboard(user_id))
+        return
 
     # --- NEW: PROFIT CALCULATOR ENGINE ---
     if state == 'wait_calc_amount':
@@ -1182,158 +1231,8 @@ def handle_messages(message):
         bot.send_message(message.chat.id, "✅ Plan updated successfully!", reply_markup=get_keyboard(user_id))
         return
 
-    # --- HANDLE INLINE BUTTONS EDITOR WORKFLOW ---
-    if state == 'pi_wait_mode':
-        mode_map = {'🔗 URL or Share': 'url', '💬 Popup Window': 'popup', '🚀 Command': 'command', '🛒 Buy Plan': 'buy_plan', '🏦 Deposit': 'deposit'}
-        if text in mode_map:
-            if user_id not in user_action_data: user_action_data[user_id] = {}
-            user_action_data[user_id]['mode'] = mode_map[text]
-            
-            if mode_map[text] == 'deposit':
-                user_state[user_id] = 'pi_wait_dep_curr'
-                markup = ReplyKeyboardMarkup(resize_keyboard=True)
-                for c in deposit_settings.keys():
-                    markup.row(KeyboardButton(c.replace('_', ' '))) 
-                markup.row(KeyboardButton('❌ Cancel Action'))
-                bot.send_message(message.chat.id, "🏦 Select the deposit method for this button:", reply_markup=markup)
-                return
-
-            user_state[user_id] = 'pi_wait_text'
-            
-            prev_text = ""
-            if 'btn_id' in user_action_data[user_id]:
-                post_id = user_action_data[user_id]['post_id']
-                btn_id = user_action_data[user_id]['btn_id']
-                post = next((p for p in menu_posts[current_path] if p['id'] == post_id), None)
-                if post:
-                    b = next((x for x in post.get('custom_inlines', []) if x['id'] == btn_id), None)
-                    if b: prev_text = f"\n\nℹ️ **Current Config:**\nTitle: `{b['text']}`\nData: `{b['data']}`"
-            
-            if mode_map[text] == 'buy_plan':
-                inst = "Send the **Title** on line 1.\nOn line 2, put the **Plan Macro** (e.g. `%plan0%`).\nOn line 3 (Optional), put the **Deposit Command** to trigger if they don't have enough balance."
-            else:
-                inst = "Send the **Title** on line 1, and **Data/URL** on line 2.\n_(Press Enter to jump to the second line)_"
-                
-            bot.send_message(message.chat.id, f"{inst}{prev_text}", parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
-        else:
-            bot.send_message(message.chat.id, "Please use the keyboard to select a valid category.")
-        return
-
-    if state == 'pi_wait_dep_curr':
-        curr_key = text.strip().upper().replace(" ", "_") 
-        if curr_key not in deposit_settings:
-            return bot.send_message(message.chat.id, "⚠️ Invalid method. Please select directly from the keyboard buttons.")
-        user_action_data[user_id]['dep_curr'] = curr_key
-        user_state[user_id] = 'pi_wait_text'
-        
-        prev_text = ""
-        if 'btn_id' in user_action_data[user_id]:
-            post_id = user_action_data[user_id]['post_id']
-            btn_id = user_action_data[user_id]['btn_id']
-            post = next((p for p in menu_posts[current_path] if p['id'] == post_id), None)
-            if post:
-                b = next((x for x in post.get('custom_inlines', []) if x['id'] == btn_id), None)
-                if b: prev_text = f"\n\nℹ️ **Current Title:** `{b['text']}`"
-                
-        clean_curr = curr_key.replace('_', ' ')
-        bot.send_message(message.chat.id, f"Enter the **Display Title** for this button (e.g., Deposit {clean_curr}):{prev_text}", parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
-        return
-
-    if state == 'pi_wait_text':
-        mode = user_action_data[user_id]['mode']
-        
-        if mode == 'deposit':
-            title = text.strip()
-            data = user_action_data[user_id]['dep_curr']
-        else:
-            lines = text.split('\n', 1)
-            if len(lines) < 2 and mode not in ['buy_plan']:
-                bot.send_message(message.chat.id, "⚠️ You must send both Title and Data separated by a new line. Try again.")
-                return
-            title = lines[0].strip()
-            data = lines[1].strip() if len(lines) > 1 else ""
-
-        post_id = user_action_data[user_id]['post_id']
-        post = next((p for p in menu_posts[current_path] if p['id'] == post_id), None)
-        
-        if post:
-            if 'custom_inlines' not in post: post['custom_inlines'] = []
-            
-            if 'btn_id' in user_action_data[user_id]:
-                btn_id = user_action_data[user_id]['btn_id']
-                b = next((x for x in post['custom_inlines'] if x['id'] == btn_id), None)
-                if b:
-                    b['text'], b['data'], b['mode'] = title, data, mode
-            else:
-                max_r = max([x.get('row_idx', 0) for x in post['custom_inlines']] + [0]) if post['custom_inlines'] else 0
-                new_r = max_r + 1 if post['custom_inlines'] else 0
-                post['custom_inlines'].append({'id': str(uuid.uuid4())[:8], 'text': title, 'mode': mode, 'data': data, 'row_idx': new_r})
-                
-        user_state[user_id] = 'posts_editing'
-        bot.send_message(message.chat.id, "✅ Inline Button Saved!", reply_markup=get_keyboard(user_id))
-        send_path_content(message.chat.id, user_id, current_path, True)
-        return
-
-    # --- HANDLE POSTS EDITING WORKFLOW ---
-    if state in ['posts_adding', 'posts_insert_after', 'posts_rep_text', 'posts_rep_all']:
-        post_type = 'photo' if message.photo else 'text'
-        photo_id = message.photo[-1].file_id if message.photo else None
-        
-        if current_path not in menu_posts: menu_posts[current_path] = []
-        posts_list = menu_posts[current_path]
-        
-        if state == 'posts_adding':
-            posts_list.append({'id': str(uuid.uuid4())[:8], 'type': post_type, 'text': text, 'photo': photo_id})
-            
-        elif state == 'posts_insert_after':
-            target_id = user_action_data[user_id]['post_id']
-            for i, p in enumerate(posts_list):
-                if p['id'] == target_id:
-                    posts_list.insert(i + 1, {'id': str(uuid.uuid4())[:8], 'type': post_type, 'text': text, 'photo': photo_id})
-                    break
-                    
-        elif state == 'posts_rep_text':
-            target_id = user_action_data[user_id]['post_id']
-            for p in posts_list:
-                if p['id'] == target_id:
-                    p['text'] = text
-                    break
-                    
-        elif state == 'posts_rep_all':
-            target_id = user_action_data[user_id]['post_id']
-            for p in posts_list:
-                if p['id'] == target_id:
-                    p['type'] = post_type
-                    p['text'] = text
-                    p['photo'] = photo_id
-                    break
-
-        user_state[user_id] = 'posts_editing'
-        bot.send_message(message.chat.id, "✅ Menu Updated!", reply_markup=get_keyboard(user_id))
-        send_path_content(message.chat.id, user_id, current_path, True)
-        return
-
-    # --- ADMIN WAIT TRANSACTION ID ---
-    if state == 'admin_wait_tx_id':
-        try:
-            target = int(text)
-            if target in user_db:
-                txs = user_db[target].get('transactions', [])
-                if not txs:
-                    bot.send_message(message.chat.id, "No transactions found for this user.", reply_markup=get_keyboard(user_id))
-                else:
-                    msg = f"📜 **History for {target}:**\n\n"
-                    for tx in txs[-30:]: # Last 30
-                        msg += f"🗓 `{tx['date']}`\n🔹 **{tx['type']}** | **${tx['amount']:.2f}**\n\n"
-                    bot.send_message(message.chat.id, msg, parse_mode="Markdown", reply_markup=get_keyboard(user_id))
-                user_state[user_id] = 'admin_menu'
-            else:
-                bot.send_message(message.chat.id, "❌ User not found in DB. Try again or Cancel.")
-        except ValueError:
-            bot.send_message(message.chat.id, "⚠️ Invalid ID. Must be a number.")
-        return
-
     # --- BLOCK UNAUTHORIZED ADMIN COMMANDS ---
+    # This must be done AFTER adding_button check, or we must explicitly ignore admin_commands inside adding_button logic.
     admin_commands = ['🎛️ Buttons Editor', '📝 Posts Editor', '💵 Balance', '🔐 Admin', '➕ Add Button', '🛑 Stop Editor', '🔙 Exit Button Settings', '✅ Confirm', '🚫 Cancel', '✖️ Delete', 'Deposit balance', 'Withdrawal balance', '🔙 Exit Balance', '📜 Macros', '📊 Plans', '🔙 Back to Main', '🔙 Back to Admin', '➕ Add Plan', '➕ Add Message', 'Pagination in Editor (10)', '🏦 Deposit Settings', 'Withdrawal Settings', '🔙 Back to Deposit Menu', '📍 Set Static Address', '🔑 Set HD Wallet Key', '💬 Edit Enter Msg', '💬 Edit Instruct Msg', '💰 Set Min Deposit', '💰 Set Max Deposit', '💬 Edit Pending Msg', '💬 Edit Success Msg', '🧮 Calculator', '📜 Transactions']
     if not is_admin and (text in admin_commands or text.startswith('📋 Paste "') or text == '✔️ Leave as Is' or text == '➖ Set Empty' or text.startswith('⚙️ Edit ')):
         bot.send_message(message.chat.id, "Unrecognized command.", reply_markup=get_keyboard(user_id))
@@ -1600,141 +1499,16 @@ def handle_messages(message):
                 bot.send_message(message.chat.id, "📍 Navigation Controls:", reply_markup=get_keyboard(user_id))
                 return
 
-    # --- GLOBAL WITHDRAWAL SETTINGS MENU ---
-    if state == 'admin_w_menu':
-        if text == '🔙 Back to Admin':
-            user_state[user_id] = 'admin_menu'
-            bot.send_message(message.chat.id, "🔐 **Admin Panel**", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
-        elif text == 'Set Withdrawal Var':
-            user_state[user_id] = 'w_setup_var'
-            curr = global_w_setup.get('w_var', 'balance')
-            bot.send_message(message.chat.id, f"✨ Select variable for withdrawal (deduction).\n\n❗️ User will specify the amount deducted from this variable.\n\nℹ️ Current variable:\n{curr}", reply_markup=get_keyboard(user_id))
-        elif text == 'Set Min/Max':
-            user_state[user_id] = 'w_setup_min'
-            curr = global_w_setup.get('w_min')
-            bot.send_message(message.chat.id, f"✨ Enter the MINIMAL sum for withdrawal.\n\nLeave empty if there is no minimal sum.\n\nℹ️ Current minimal sum:\n{curr}", reply_markup=get_keyboard(user_id))
-        elif text == 'Edit Enter Msg':
-            user_state[user_id] = 'w_setup_enter'
-            curr = global_w_setup.get('w_msg_enter')
-            bot.send_message(message.chat.id, f"✨ Enter the MESSAGE shown UPON ENTRANCE into the Withdraw button.\n\n❗️ Use macros like %balance%, %min%, %max%, etc.\n\nℹ️ Current message:\n{curr}", reply_markup=get_keyboard(user_id))
-        elif text == 'Edit Address Msg':
-            user_state[user_id] = 'w_setup_addr'
-            curr = global_w_setup.get('w_msg_addr')
-            bot.send_message(message.chat.id, f"✨ Enter the MESSAGE shown when ASK ADDRESS/PHONE to withdraw.\n\n❗️ Use macros like %firstname%, %address%.\n\nℹ️ Current message:\n{curr}", reply_markup=get_keyboard(user_id))
-        elif text == 'Edit Confirm Msg':
-            user_state[user_id] = 'w_setup_conf'
-            curr = global_w_setup.get('w_msg_conf')
-            bot.send_message(message.chat.id, f"✨ Enter the MESSAGE shown BEFORE the operation commit.\n\n❗️ Ask User to CONFIRM withdraw operation.\n\nℹ️ Current message:\n{curr}", reply_markup=get_keyboard(user_id))
-        elif text.startswith('Do not ask for Address'):
-            global_w_setup['do_not_ask_address'] = not global_w_setup.get('do_not_ask_address', False)
-            bot.send_message(message.chat.id, "Address setting toggled.", reply_markup=get_keyboard(user_id))
-        else:
-            bot.send_message(message.chat.id, f"🛠 **{text}** is acknowledged. Setup feature coming soon!", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
-        return
-
-    if state.startswith('w_setup_'):
-        val = None if text == '➖ Set Empty' else text
-        if text != '✔️ Leave as Is':
-            if state == 'w_setup_var': global_w_setup['w_var'] = val
-            elif state == 'w_setup_min': global_w_setup['w_min'] = val
-            elif state == 'w_setup_max': global_w_setup['w_max'] = val
-            elif state == 'w_setup_enter': global_w_setup['w_msg_enter'] = val
-            elif state == 'w_setup_addr': global_w_setup['w_msg_addr'] = val
-            elif state == 'w_setup_conf': global_w_setup['w_msg_conf'] = val
-
-        if state == 'w_setup_var':
-            user_state[user_id] = 'admin_w_menu'
-            bot.send_message(message.chat.id, "✅ Withdrawal setup saved!", reply_markup=get_keyboard(user_id))
-        elif state == 'w_setup_min':
-            user_state[user_id] = 'w_setup_max'
-            curr = global_w_setup.get('w_max')
-            bot.send_message(message.chat.id, f"✨ Enter the MAXIMAL sum for withdrawal.\n\nLeave empty if there is no maximal sum.\n\nℹ️ Current maximal sum:\n{curr}", reply_markup=get_keyboard(user_id))
-        elif state == 'w_setup_max':
-            user_state[user_id] = 'admin_w_menu'
-            bot.send_message(message.chat.id, "✅ Limits saved!", reply_markup=get_keyboard(user_id))
-        elif state == 'w_setup_enter' or state == 'w_setup_addr' or state == 'w_setup_conf':
-            user_state[user_id] = 'admin_w_menu'
-            bot.send_message(message.chat.id, "✅ Messages updated successfully!", reply_markup=get_keyboard(user_id))
-        return
-
-    # --- STATE: ASSIGN PLAN TO BUTTON MENU ---
-    if state == 'assign_plan':
-        if text == '➖ Remove Plan':
-            btn_metadata[full_path]['assigned_plan'] = None
-            bot.send_message(message.chat.id, "Plan removed from button.")
-        elif text.startswith('Plan '):
-            p_id = text.replace('Plan ', 'plan').lower()
-            btn_metadata[full_path]['assigned_plan'] = p_id
-            bot.send_message(message.chat.id, f"✅ Button assigned to **{bot_plans[p_id]['name']}**!", parse_mode="Markdown")
-        
-        user_state[user_id] = 'button_settings'
-        bot.send_message(message.chat.id, "Returned to Button Settings.", reply_markup=get_keyboard(user_id))
-        return
-
-    # --- STATE: ASSIGN COMMAND MENU ---
-    if state == 'assign_command':
-        if text == '🚫 Cancel':
-            user_state[user_id] = 'button_settings'
-            bot.send_message(message.chat.id, "Cancelled command assignment.", reply_markup=get_keyboard(user_id))
-        elif text == '✖️ Delete':
-            btn_metadata[full_path]['command'] = None
-            user_state[user_id] = 'button_settings'
-            bot.send_message(message.chat.id, "Command deleted.", reply_markup=get_keyboard(user_id))
-        elif text == '✅ Confirm':
-            user_state[user_id] = 'button_settings'
-            curr_cmd = btn_metadata[full_path].get('command', 'None')
-            bot.send_message(message.chat.id, f"Command confirmed as: `{curr_cmd}`", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
-        elif text.startswith('Move by Command'):
-            btn_metadata[full_path]['move_by_command'] = not btn_metadata[full_path].get('move_by_command')
-            bot.send_message(message.chat.id, "Move by Command toggled.", reply_markup=get_keyboard(user_id))
-        else:
-            btn_metadata[full_path]['command'] = text
-            bot.send_message(message.chat.id, f"Stored: `{text}`\nNow press ✅ Confirm to save.", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
-        return
-
-    # --- STATE: BUTTON SETTINGS MENU ---
-    if state == 'button_settings':
-        if full_path not in btn_metadata: btn_metadata[full_path] = get_default_metadata()
-            
-        if text == '🔙 Exit Button Settings':
-            user_state[user_id] = 'editing'
-            bot.send_message(message.chat.id, f"Exited settings for **{selected_btn}**.", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
-        elif text == 'Assign Command':
-            user_state[user_id] = 'assign_command'
-            curr = btn_metadata[full_path].get('command', 'None assigned yet')
-            bot.send_message(message.chat.id, f"Send the command for this button (Current: `{curr}`)", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
-        elif text == 'Assign Plan':
-            user_state[user_id] = 'assign_plan'
-            markup = ReplyKeyboardMarkup(resize_keyboard=True)
-            markup.row(KeyboardButton('Plan 0'), KeyboardButton('Plan 1'), KeyboardButton('Plan 2'))
-            markup.row(KeyboardButton('Plan 3'), KeyboardButton('Plan 4'), KeyboardButton('Plan 5'))
-            markup.row(KeyboardButton('➖ Remove Plan'), KeyboardButton('❌ Cancel Action'))
-            bot.send_message(message.chat.id, "Select a Plan to assign directly to this button:", reply_markup=markup)
-        elif text.startswith('Assign Withdrawal'):
-            btn_metadata[full_path]['withdrawal'] = not btn_metadata[full_path].get('withdrawal', False)
-            bot.send_message(message.chat.id, "Withdrawal function toggled.", reply_markup=get_keyboard(user_id))
-        elif text.startswith('Random Message'):
-            btn_metadata[full_path]['random_message'] = not btn_metadata[full_path]['random_message']
-            bot.send_message(message.chat.id, "Random Message toggled.", reply_markup=get_keyboard(user_id))
-        elif text.startswith('Admin Only'):
-            btn_metadata[full_path]['admin_only'] = not btn_metadata[full_path]['admin_only']
-            bot.send_message(message.chat.id, "Admin Only toggled.", reply_markup=get_keyboard(user_id))
-        elif text.startswith('Invisible'):
-            btn_metadata[full_path]['invisible'] = not btn_metadata[full_path]['invisible']
-            bot.send_message(message.chat.id, "Invisible toggled.", reply_markup=get_keyboard(user_id))
-        elif text.startswith('Assign Calculator'):
-            btn_metadata[full_path]['is_calculator'] = not btn_metadata[full_path].get('is_calculator', False)
-            bot.send_message(message.chat.id, "Calculator function toggled.", reply_markup=get_keyboard(user_id))
-        elif text.startswith('Assign History'):
-            btn_metadata[full_path]['is_history'] = not btn_metadata[full_path].get('is_history', False)
-            bot.send_message(message.chat.id, "History function toggled.", reply_markup=get_keyboard(user_id))
-        else:
-            bot.send_message(message.chat.id, f"🛠 **{text}** selected.\nReady for logic!", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
-        return
-
     # --- HANDLE BUTTONS EDITOR ADD / RENAME ---
     if state == 'adding_button':
         if current_path not in menus: menus[current_path] = []
+        
+        # FIX: Prevent UI collision by rejecting system commands as button names
+        forbidden_names = ['🏠 Home', '🔙 Back'] + admin_commands
+        if text in forbidden_names:
+            bot.send_message(message.chat.id, "⚠️ You cannot use a system command as a button name. Please type a unique name, or click '❌ Cancel Action'.", reply_markup=get_cancel_action_keyboard())
+            return
+            
         if text not in menus[current_path]:
             max_r_idx = 0
             for b_name in menus[current_path]:
@@ -1754,9 +1528,17 @@ def handle_messages(message):
 
     if state == 'renaming_button':
         old_name = user_selected_button.get(user_id)
+        
+        # FIX: Prevent UI collision
+        forbidden_names = ['🏠 Home', '🔙 Back'] + admin_commands
+        if text in forbidden_names:
+            bot.send_message(message.chat.id, "⚠️ You cannot use a system command as a button name. Please type a unique name, or click '❌ Cancel Action'.", reply_markup=get_cancel_action_keyboard())
+            return
+            
         if not old_name or text in menus[current_path]:
             bot.send_message(message.chat.id, "⚠️ Invalid or duplicate name. Try another, or Cancel.", reply_markup=get_keyboard(user_id))
             return
+            
         idx = menus[current_path].index(old_name)
         menus[current_path][idx] = text
         change_menu_paths(f"{current_path}/{old_name}", f"{current_path}/{text}")
@@ -1764,24 +1546,6 @@ def handle_messages(message):
         user_selected_button[user_id] = None
         bot.send_message(message.chat.id, f"✅ Renamed to '{text}'!", reply_markup=get_keyboard(user_id))
         return
-
-    # --- NAVIGATION COMMANDS (Back & Home) ---
-    if state in ['normal', 'posts_editing', 'editing']:
-        if text == '🏠 Home':
-            user_current_path[user_id] = 'root'
-            user_selected_button[user_id] = None
-            send_path_content(message.chat.id, user_id, 'root', is_editing=(state == 'posts_editing'))
-            bot.send_message(message.chat.id, "📍 Returned to Main Menu:", reply_markup=get_keyboard(user_id))
-            return
-            
-        elif text == '🔙 Back' and current_path != 'root':
-            parts = current_path.split('/')[:-1]
-            new_path = '/'.join(parts) if len(parts) > 1 else 'root'
-            user_current_path[user_id] = new_path
-            user_selected_button[user_id] = None
-            send_path_content(message.chat.id, user_id, new_path, is_editing=(state == 'posts_editing'))
-            bot.send_message(message.chat.id, "📍 Navigation Controls:", reply_markup=get_keyboard(user_id))
-            return
 
     # --- HANDLE NORMAL / POSTS EDITING TRAVERSAL ---
     if state == 'normal' or state == 'posts_editing':
