@@ -787,25 +787,27 @@ def get_keyboard(user_id):
                 rows_dict[r_idx] = []
             rows_dict[r_idx].append(KeyboardButton(name))
 
+        # FIX: UNLIMITED BUTTONS PER ROW. Dynamically unpacks all buttons mapped to that row.
         for r_idx in sorted(rows_dict.keys()):
             row_btns = rows_dict[r_idx]
-            for i in range(0, len(row_btns), 2):
-                if i + 1 < len(row_btns): markup.row(row_btns[i], row_btns[i+1])
-                else: markup.row(row_btns[i])
+            if row_btns:
+                markup.row(*row_btns)
 
     if current_path != 'root' and state in ['normal', 'editing', 'posts_editing', 'dep_wait_amount', 'dep_wait_proof']:
         markup.row(KeyboardButton('🔙 Back'), KeyboardButton('🏠 Home'))
 
     if not is_admin: return markup
 
+    # FIX: PERSISTENT EDITORS ANYWHERE
     if state == 'editing':
         markup.row(KeyboardButton('➕ Add Button'))
         if user_clipboard.get(user_id):
             markup.row(KeyboardButton(f'📋 Paste "{user_clipboard[user_id]["name"]}"'))
         markup.row(KeyboardButton('🛑 Stop Editor'), KeyboardButton('📝 Posts Editor'))
-    elif state == 'normal' and current_path == 'root':
+    elif state == 'normal':
         markup.row(KeyboardButton('🎛️ Buttons Editor'), KeyboardButton('📝 Posts Editor'))
-        markup.row(KeyboardButton('💵 Balance'), KeyboardButton('🔐 Admin'))
+        if current_path == 'root':
+            markup.row(KeyboardButton('💵 Balance'), KeyboardButton('🔐 Admin'))
         
     return markup
 
@@ -939,6 +941,66 @@ def handle_messages(message):
     if text == '🔙 Exit Balance':
         user_state[user_id] = 'normal'
         bot.send_message(message.chat.id, "Exited balance management.", reply_markup=get_keyboard(user_id))
+        return
+
+    # --- FIX: POSTS ADDING / EDITING PROCESSORS ---
+    if state == 'posts_adding':
+        if current_path not in menu_posts: menu_posts[current_path] = []
+        new_post = {
+            'id': str(uuid.uuid4())[:8],
+            'type': 'photo' if message.photo else 'text',
+            'text': message.caption if message.photo else text,
+            'photo': message.photo[-1].file_id if message.photo else None,
+            'custom_inlines': []
+        }
+        menu_posts[current_path].append(new_post)
+        user_state[user_id] = 'posts_editing'
+        bot.send_message(message.chat.id, "✅ Message added successfully!", reply_markup=get_keyboard(user_id))
+        send_path_content(message.chat.id, user_id, current_path, True)
+        return
+
+    if state == 'posts_rep_text':
+        p_id = user_action_data[user_id]['post_id']
+        post = next((p for p in menu_posts.get(current_path, []) if p['id'] == p_id), None)
+        if post:
+            post['text'] = text
+        user_state[user_id] = 'posts_editing'
+        bot.send_message(message.chat.id, "✅ Text updated successfully!", reply_markup=get_keyboard(user_id))
+        send_path_content(message.chat.id, user_id, current_path, True)
+        return
+        
+    if state == 'posts_rep_all':
+        p_id = user_action_data[user_id]['post_id']
+        post = next((p for p in menu_posts.get(current_path, []) if p['id'] == p_id), None)
+        if post:
+            post['type'] = 'photo' if message.photo else 'text'
+            post['text'] = message.caption if message.photo else text
+            post['photo'] = message.photo[-1].file_id if message.photo else None
+        user_state[user_id] = 'posts_editing'
+        bot.send_message(message.chat.id, "✅ Message completely replaced!", reply_markup=get_keyboard(user_id))
+        send_path_content(message.chat.id, user_id, current_path, True)
+        return
+
+    if state == 'posts_insert_after':
+        p_id = user_action_data[user_id]['post_id']
+        posts_list = menu_posts.get(current_path, [])
+        idx = next((i for i, p in enumerate(posts_list) if p['id'] == p_id), -1)
+        
+        new_post = {
+            'id': str(uuid.uuid4())[:8],
+            'type': 'photo' if message.photo else 'text',
+            'text': message.caption if message.photo else text,
+            'photo': message.photo[-1].file_id if message.photo else None,
+            'custom_inlines': []
+        }
+        if idx != -1:
+            posts_list.insert(idx + 1, new_post)
+        else:
+            posts_list.append(new_post)
+            
+        user_state[user_id] = 'posts_editing'
+        bot.send_message(message.chat.id, "✅ Message inserted successfully!", reply_markup=get_keyboard(user_id))
+        send_path_content(message.chat.id, user_id, current_path, True)
         return
 
     # --- FIX 2: BUTTON ASSIGNMENTS HANDLER ---
@@ -1206,7 +1268,7 @@ def handle_messages(message):
         found = False
         markup = InlineKeyboardMarkup()
         for p_id, p_data in bot_plans.items():
-            if p_id == 'plan0': continue # FIX: Calculator ignores Plan 0
+            if p_id == 'plan0': continue 
             if p_data['min'] <= amount <= p_data['max']:
                 found = True
                 hourly = amount * (p_data['profit'] / 100.0)
@@ -1219,7 +1281,6 @@ def handle_messages(message):
                 else:
                     msg += f"Total Return: Lifetime\n\n"
                 
-                # FIX: Calculator Pulls Inline Purchase Buttons
                 markup.row(InlineKeyboardButton(f"🛒 Buy {p_data['name']}", callback_data=f"cb_calcbuy_{p_id}_{amount}"))
                 
         if not found:
