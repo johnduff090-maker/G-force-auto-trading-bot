@@ -128,7 +128,7 @@ def get_default_metadata():
         'invisible': False,
         'command': None,
         'move_by_command': False,
-        'withdrawal': False, # NEW: Simple toggle for withdrawal button
+        'withdrawal': False, 
         'assigned_plan': None, 
         'is_calculator': False, 
         'is_history': False     
@@ -1231,11 +1231,155 @@ def handle_messages(message):
         bot.send_message(message.chat.id, "✅ Plan updated successfully!", reply_markup=get_keyboard(user_id))
         return
 
-    # --- BLOCK UNAUTHORIZED ADMIN COMMANDS ---
-    # This must be done AFTER adding_button check, or we must explicitly ignore admin_commands inside adding_button logic.
-    admin_commands = ['🎛️ Buttons Editor', '📝 Posts Editor', '💵 Balance', '🔐 Admin', '➕ Add Button', '🛑 Stop Editor', '🔙 Exit Button Settings', '✅ Confirm', '🚫 Cancel', '✖️ Delete', 'Deposit balance', 'Withdrawal balance', '🔙 Exit Balance', '📜 Macros', '📊 Plans', '🔙 Back to Main', '🔙 Back to Admin', '➕ Add Plan', '➕ Add Message', 'Pagination in Editor (10)', '🏦 Deposit Settings', 'Withdrawal Settings', '🔙 Back to Deposit Menu', '📍 Set Static Address', '🔑 Set HD Wallet Key', '💬 Edit Enter Msg', '💬 Edit Instruct Msg', '💰 Set Min Deposit', '💰 Set Max Deposit', '💬 Edit Pending Msg', '💬 Edit Success Msg', '🧮 Calculator', '📜 Transactions']
-    if not is_admin and (text in admin_commands or text.startswith('📋 Paste "') or text == '✔️ Leave as Is' or text == '➖ Set Empty' or text.startswith('⚙️ Edit ')):
-        bot.send_message(message.chat.id, "Unrecognized command.", reply_markup=get_keyboard(user_id))
+    # --- HANDLE INLINE BUTTONS EDITOR WORKFLOW ---
+    if state == 'pi_wait_mode':
+        mode_map = {'🔗 URL or Share': 'url', '💬 Popup Window': 'popup', '🚀 Command': 'command', '🛒 Buy Plan': 'buy_plan', '🏦 Deposit': 'deposit'}
+        if text in mode_map:
+            if user_id not in user_action_data: user_action_data[user_id] = {}
+            user_action_data[user_id]['mode'] = mode_map[text]
+            
+            if mode_map[text] == 'deposit':
+                user_state[user_id] = 'pi_wait_dep_curr'
+                markup = ReplyKeyboardMarkup(resize_keyboard=True)
+                for c in deposit_settings.keys():
+                    markup.row(KeyboardButton(c.replace('_', ' '))) 
+                markup.row(KeyboardButton('❌ Cancel Action'))
+                bot.send_message(message.chat.id, "🏦 Select the deposit method for this button:", reply_markup=markup)
+                return
+
+            user_state[user_id] = 'pi_wait_text'
+            
+            prev_text = ""
+            if 'btn_id' in user_action_data[user_id]:
+                post_id = user_action_data[user_id]['post_id']
+                btn_id = user_action_data[user_id]['btn_id']
+                post = next((p for p in menu_posts[current_path] if p['id'] == post_id), None)
+                if post:
+                    b = next((x for x in post.get('custom_inlines', []) if x['id'] == btn_id), None)
+                    if b: prev_text = f"\n\nℹ️ **Current Config:**\nTitle: `{b['text']}`\nData: `{b['data']}`"
+            
+            if mode_map[text] == 'buy_plan':
+                inst = "Send the **Title** on line 1.\nOn line 2, put the **Plan Macro** (e.g. `%plan0%`).\nOn line 3 (Optional), put the **Deposit Command** to trigger if they don't have enough balance."
+            else:
+                inst = "Send the **Title** on line 1, and **Data/URL** on line 2.\n_(Press Enter to jump to the second line)_"
+                
+            bot.send_message(message.chat.id, f"{inst}{prev_text}", parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
+        else:
+            bot.send_message(message.chat.id, "Please use the keyboard to select a valid category.")
+        return
+
+    if state == 'pi_wait_dep_curr':
+        curr_key = text.strip().upper().replace(" ", "_") 
+        if curr_key not in deposit_settings:
+            return bot.send_message(message.chat.id, "⚠️ Invalid method. Please select directly from the keyboard buttons.")
+        user_action_data[user_id]['dep_curr'] = curr_key
+        user_state[user_id] = 'pi_wait_text'
+        
+        prev_text = ""
+        if 'btn_id' in user_action_data[user_id]:
+            post_id = user_action_data[user_id]['post_id']
+            btn_id = user_action_data[user_id]['btn_id']
+            post = next((p for p in menu_posts[current_path] if p['id'] == post_id), None)
+            if post:
+                b = next((x for x in post.get('custom_inlines', []) if x['id'] == btn_id), None)
+                if b: prev_text = f"\n\nℹ️ **Current Title:** `{b['text']}`"
+                
+        clean_curr = curr_key.replace('_', ' ')
+        bot.send_message(message.chat.id, f"Enter the **Display Title** for this button (e.g., Deposit {clean_curr}):{prev_text}", parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
+        return
+
+    if state == 'pi_wait_text':
+        mode = user_action_data[user_id]['mode']
+        
+        if mode == 'deposit':
+            title = text.strip()
+            data = user_action_data[user_id]['dep_curr']
+        else:
+            lines = text.split('\n', 1)
+            if len(lines) < 2 and mode not in ['buy_plan']:
+                bot.send_message(message.chat.id, "⚠️ You must send both Title and Data separated by a new line. Try again.")
+                return
+            title = lines[0].strip()
+            data = lines[1].strip() if len(lines) > 1 else ""
+
+        post_id = user_action_data[user_id]['post_id']
+        post = next((p for p in menu_posts[current_path] if p['id'] == post_id), None)
+        
+        if post:
+            if 'custom_inlines' not in post: post['custom_inlines'] = []
+            
+            if 'btn_id' in user_action_data[user_id]:
+                btn_id = user_action_data[user_id]['btn_id']
+                b = next((x for x in post['custom_inlines'] if x['id'] == btn_id), None)
+                if b:
+                    b['text'], b['data'], b['mode'] = title, data, mode
+            else:
+                max_r = max([x.get('row_idx', 0) for x in post['custom_inlines']] + [0]) if post['custom_inlines'] else 0
+                new_r = max_r + 1 if post['custom_inlines'] else 0
+                post['custom_inlines'].append({'id': str(uuid.uuid4())[:8], 'text': title, 'mode': mode, 'data': data, 'row_idx': new_r})
+                
+        user_state[user_id] = 'posts_editing'
+        bot.send_message(message.chat.id, "✅ Inline Button Saved!", reply_markup=get_keyboard(user_id))
+        send_path_content(message.chat.id, user_id, current_path, True)
+        return
+
+    # --- HANDLE POSTS EDITING WORKFLOW ---
+    if state in ['posts_adding', 'posts_insert_after', 'posts_rep_text', 'posts_rep_all']:
+        post_type = 'photo' if message.photo else 'text'
+        photo_id = message.photo[-1].file_id if message.photo else None
+        
+        if current_path not in menu_posts: menu_posts[current_path] = []
+        posts_list = menu_posts[current_path]
+        
+        if state == 'posts_adding':
+            posts_list.append({'id': str(uuid.uuid4())[:8], 'type': post_type, 'text': text, 'photo': photo_id})
+            
+        elif state == 'posts_insert_after':
+            target_id = user_action_data[user_id]['post_id']
+            for i, p in enumerate(posts_list):
+                if p['id'] == target_id:
+                    posts_list.insert(i + 1, {'id': str(uuid.uuid4())[:8], 'type': post_type, 'text': text, 'photo': photo_id})
+                    break
+                    
+        elif state == 'posts_rep_text':
+            target_id = user_action_data[user_id]['post_id']
+            for p in posts_list:
+                if p['id'] == target_id:
+                    p['text'] = text
+                    break
+                    
+        elif state == 'posts_rep_all':
+            target_id = user_action_data[user_id]['post_id']
+            for p in posts_list:
+                if p['id'] == target_id:
+                    p['type'] = post_type
+                    p['text'] = text
+                    p['photo'] = photo_id
+                    break
+
+        user_state[user_id] = 'posts_editing'
+        bot.send_message(message.chat.id, "✅ Menu Updated!", reply_markup=get_keyboard(user_id))
+        send_path_content(message.chat.id, user_id, current_path, True)
+        return
+
+    # --- ADMIN WAIT TRANSACTION ID ---
+    if state == 'admin_wait_tx_id':
+        try:
+            target = int(text)
+            if target in user_db:
+                txs = user_db[target].get('transactions', [])
+                if not txs:
+                    bot.send_message(message.chat.id, "No transactions found for this user.", reply_markup=get_keyboard(user_id))
+                else:
+                    msg = f"📜 **History for {target}:**\n\n"
+                    for tx in txs[-30:]: 
+                        msg += f"🗓 `{tx['date']}`\n🔹 **{tx['type']}** | **${tx['amount']:.2f}**\n\n"
+                    bot.send_message(message.chat.id, msg, parse_mode="Markdown", reply_markup=get_keyboard(user_id))
+                user_state[user_id] = 'admin_menu'
+            else:
+                bot.send_message(message.chat.id, "❌ User not found in DB. Try again or Cancel.")
+        except ValueError:
+            bot.send_message(message.chat.id, "⚠️ Invalid ID. Must be a number.")
         return
 
     # --- ADMIN POSTS EDITOR CONTROLS ---
@@ -1498,112 +1642,6 @@ def handle_messages(message):
                 send_path_content(message.chat.id, user_id, path, is_editing=(state == 'posts_editing'))
                 bot.send_message(message.chat.id, "📍 Navigation Controls:", reply_markup=get_keyboard(user_id))
                 return
-
-    # --- HANDLE BUTTONS EDITOR ADD / RENAME ---
-    if state == 'adding_button':
-        if current_path not in menus: menus[current_path] = []
-        
-        # FIX: Prevent UI collision by rejecting system commands as button names
-        forbidden_names = ['🏠 Home', '🔙 Back'] + admin_commands
-        if text in forbidden_names:
-            bot.send_message(message.chat.id, "⚠️ You cannot use a system command as a button name. Please type a unique name, or click '❌ Cancel Action'.", reply_markup=get_cancel_action_keyboard())
-            return
-            
-        if text not in menus[current_path]:
-            max_r_idx = 0
-            for b_name in menus[current_path]:
-                r = btn_metadata.get(f"{current_path}/{b_name}", {}).get('row_idx', 0)
-                if r > max_r_idx: max_r_idx = r
-                
-            menus[current_path].append(text)
-            new_meta = get_default_metadata()
-            new_meta['row_idx'] = max_r_idx
-            btn_metadata[f"{current_path}/{text}"] = new_meta
-            
-            user_state[user_id] = 'editing'
-            bot.send_message(message.chat.id, f"✅ Added '{text}'!", reply_markup=get_keyboard(user_id))
-        else:
-            bot.send_message(message.chat.id, "⚠️ Name exists. Try another, or Cancel.", reply_markup=get_keyboard(user_id))
-        return
-
-    if state == 'renaming_button':
-        old_name = user_selected_button.get(user_id)
-        
-        # FIX: Prevent UI collision
-        forbidden_names = ['🏠 Home', '🔙 Back'] + admin_commands
-        if text in forbidden_names:
-            bot.send_message(message.chat.id, "⚠️ You cannot use a system command as a button name. Please type a unique name, or click '❌ Cancel Action'.", reply_markup=get_cancel_action_keyboard())
-            return
-            
-        if not old_name or text in menus[current_path]:
-            bot.send_message(message.chat.id, "⚠️ Invalid or duplicate name. Try another, or Cancel.", reply_markup=get_keyboard(user_id))
-            return
-            
-        idx = menus[current_path].index(old_name)
-        menus[current_path][idx] = text
-        change_menu_paths(f"{current_path}/{old_name}", f"{current_path}/{text}")
-        user_state[user_id] = 'editing'
-        user_selected_button[user_id] = None
-        bot.send_message(message.chat.id, f"✅ Renamed to '{text}'!", reply_markup=get_keyboard(user_id))
-        return
-
-    # --- HANDLE NORMAL / POSTS EDITING TRAVERSAL ---
-    if state == 'normal' or state == 'posts_editing':
-        if text == '🎛️ Buttons Editor':
-            if is_admin:
-                user_state[user_id] = 'editing'
-                bot.send_message(message.chat.id, "🎛 **Buttons Editor Activated**", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
-        elif text == '📝 Posts Editor':
-            if is_admin:
-                user_state[user_id] = 'posts_editing'
-                bot.send_message(message.chat.id, "📝 **Posts Editor Activated**", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
-                send_path_content(message.chat.id, user_id, current_path, True)
-        elif text == '🔐 Admin':
-            if is_admin:
-                user_state[user_id] = 'admin_menu'
-                bot.send_message(message.chat.id, "🔐 **Admin Panel**\nChoose an option:", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
-            else:
-                bot.send_message(message.chat.id, "Unrecognized command.", reply_markup=get_keyboard(user_id))
-            
-        elif current_path in menus and text in menus[current_path]:
-            custom_btn_path = f"{current_path}/{text}"
-            meta = btn_metadata.get(custom_btn_path, get_default_metadata())
-            
-            if meta.get('admin_only') and not is_admin:
-                return bot.send_message(message.chat.id, "⛔️ You do not have permission to use this button.")
-
-            if meta.get('withdrawal') and state != 'posts_editing':
-                user_state[user_id] = 'w_action_amount'
-                user_action_data[user_id] = {'path': custom_btn_path}
-                msg = global_w_setup.get('w_msg_enter') or "Please enter the amount you wish to withdraw:"
-                bot.send_message(message.chat.id, replace_macros(msg, user_id, custom_btn_path), parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
-                return
-
-            if meta.get('is_calculator') and state != 'posts_editing':
-                user_state[user_id] = 'wait_calc_amount'
-                bot.send_message(message.chat.id, "🧮 **Profit Calculator**\n\nEnter the amount you want to invest (USD):", parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
-                return
-
-            if meta.get('is_history') and state != 'posts_editing':
-                txs = user_db[user_id].get('transactions', [])
-                if not txs:
-                    bot.send_message(message.chat.id, "📜 You have no transaction history yet.", reply_markup=get_keyboard(user_id))
-                else:
-                    msg = "📜 **Your Transaction History:**\n\n"
-                    for tx in txs[-20:]:
-                        msg += f"🗓 `{tx['date']}`\n🔹 **{tx['type']}** | **${tx['amount']:.2f}**\n\n"
-                    bot.send_message(message.chat.id, msg, parse_mode="Markdown", reply_markup=get_keyboard(user_id))
-                return
-
-            new_path = custom_btn_path
-            user_current_path[user_id] = new_path
-            if new_path not in menus: menus[new_path] = []
-            
-            send_path_content(message.chat.id, user_id, new_path, is_editing=(state == 'posts_editing'))
-            bot.send_message(message.chat.id, "📍 Navigation Controls:", reply_markup=get_keyboard(user_id))
-        else:
-            bot.send_message(message.chat.id, "Unrecognized command.", reply_markup=get_keyboard(user_id))
-
 
 # --- INLINE BUTTON LOGIC ---
 @bot.callback_query_handler(func=lambda call: True)
@@ -2043,6 +2081,10 @@ def handle_inline(call):
 
 # --- NEW: LIGHTWEIGHT WEB SERVER FOR ADMIN DASHBOARD & UPTIMEROBOT ---
 class AdminDashboardHandler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        # Mute standard HTTP logs to prevent console spam from the 3-second keep-alive loop
+        pass
+
     def do_HEAD(self):
         self.send_response(200)
         self.send_header('Content-type', 'text/html')
@@ -2127,9 +2169,24 @@ def run_web_server():
     print(f"🌐 Web server running on port {port} for UptimeRobot & Admin Dashboard.")
     server.serve_forever()
 
+def self_ping_loop():
+    """Constantly pings the internal web server every 3 seconds to force Render to stay awake."""
+    port = int(os.environ.get('PORT', 8080))
+    url = f"http://127.0.0.1:{port}/"
+    while True:
+        try:
+            requests.head(url, timeout=2)
+        except Exception:
+            pass
+        time.sleep(3)
+
 if __name__ == '__main__':
     # Start the Web Server (Required for Render and Dashboard)
     threading.Thread(target=run_web_server, daemon=True).start()
+    
+    # Start the Ultra-Aggressive 3-Second Keep-Alive Ping
+    print("🔥 Starting aggressive 3-second self-ping loop to keep Render awake...")
+    threading.Thread(target=self_ping_loop, daemon=True).start()
     
     # Start the Blockchain Scanner
     print("👀 Starting background watcher thread...")
