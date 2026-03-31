@@ -98,7 +98,7 @@ if not bot_plans:
             'name': f'Plan {i}', 'min': 10.0, 'max': 1000.0, 'length': 24.0, 'profit': 5.0,
             'text': f'✨ **Plan {i} Description** ✨\n\nEdit this in Admin -> Plans.',
             'photo': None, 'inline_text': '🛒 Purchase Plan', 'inline_active_text': '(Active ✅ Buy Again)', 
-            'redirect_cmd': None, 'is_free': False
+            'redirect_cmd': '/deposit', 'is_free': (i == 0), 'free_amount': 2.0
         }
 
 # --- GLOBAL WITHDRAWAL SETTINGS ---
@@ -148,8 +148,8 @@ def get_default_metadata():
         'command': None,
         'move_by_command': False,
         'withdrawal': False, 
-        'is_wallet': False,  # NEW
-        'is_bonus': False,   # NEW
+        'is_wallet': False, 
+        'is_bonus': False,   
         'assigned_plan': None, 
         'is_calculator': False, 
         'is_history': False    
@@ -161,7 +161,7 @@ def init_user_db(message):
         user_db[user_id] = {
             'balance': 1000.00, 'bonus': 500.00, 'deposit': 200.00, 
             'hourly': 0.00, 'plan': 0.00, 'address': 'Not Set',
-            'wallet': 'Not Set', 'wallet_net': 'Not Set', 'email': 'Not Set', 'last_bonus_time': 0.0, # NEW
+            'wallet': 'Not Set', 'wallet_net': 'Not Set', 'email': 'Not Set', 'last_bonus_time': 0.0, 
             'first_name': message.from_user.first_name or 'Unknown',
             'last_name': message.from_user.last_name or '',
             'username': message.from_user.username or 'No Username',
@@ -389,20 +389,26 @@ def replace_macros(text, user_id, full_path, action_data=None):
     t = t.replace('%min%', str(global_w_setup.get('w_min') or 0))
     t = t.replace('%max%', str(global_w_setup.get('w_max') or 'No Limit'))
     
-    if '%my_plans%' in t:
-        plans_str = ""
-        active = [p for p in bals.get('active_plans', []) if p['status'] == 'active']
-        if not active:
-            plans_str = "_(No active plans)_"
-        else:
-            for p in active:
-                plans_str += f"🔹 **{bot_plans.get(p['macro'], {}).get('name', 'Plan')}**\n"
-                plans_str += f"Invested: ${p['amount']:.2f}\nEarned: ${p['earned']:.4f}\n\n"
-        t = t.replace('%my_plans%', plans_str)
+    # Plan string builder
+    plans_str = ""
+    active = [p for p in bals.get('active_plans', []) if p['status'] == 'active']
+    if not active:
+        plans_str = "_(No active plans)_"
+    else:
+        for p in active:
+            plans_str += f"🔹 **{bot_plans.get(p['macro'], {}).get('name', 'Plan')}**\n"
+            plans_str += f"Invested: ${p['amount']:.2f}\nEarned: ${p['earned']:.4f}\n\n"
+            
+    t = t.replace('%my_plans%', plans_str)
+    t = t.replace('%activeplan%', plans_str)
         
     for p_macro, p_data in bot_plans.items():
         if p_macro in t:
-            p_details = f"**{p_data['name']}**\nMin: ${p_data['min']} | Max: ${p_data['max']}\nProfit: {p_data['profit']}% / Hour"
+            if p_data.get('is_free', False):
+                p_details = f"**{p_data['name']}**\nVirtual Capital: ${p_data.get('free_amount', 2.0)}\nProfit: {p_data['profit']}% / Hour"
+            else:
+                p_details = f"**{p_data['name']}**\nMin: ${p_data['min']} | Max: ${p_data['max']}\nProfit: {p_data['profit']}% / Hour"
+                
             if p_data.get('length') and p_data['length'] > 0:
                 p_details += f"\nContract: {p_data['length']} Hours"
             else:
@@ -518,7 +524,15 @@ def send_path_content(chat_id, user_id, path, is_editing=False):
                     elif b['mode'] == 'command':
                         row_btns.append(InlineKeyboardButton(b['text'], callback_data=f"cb_cmd_{b['id']}"))
                     elif b['mode'] == 'buy_plan':
-                        row_btns.append(InlineKeyboardButton(b['text'], callback_data=f"cb_buy_{b['id']}"))
+                        # DYNAMIC ACTIVE TEXT FOR CUSTOM INLINES
+                        plan_macro = b['data'].split('\n')[0].strip()
+                        p_d = bot_plans.get(plan_macro)
+                        display_text = b['text']
+                        if p_d:
+                            has_active = any(act_p['macro'] == plan_macro and act_p['status'] == 'active' for act_p in user_db.get(user_id, {}).get('active_plans', []))
+                            if has_active:
+                                display_text = p_d.get('inline_active_text', '(Active ✅ Buy Again)')
+                        row_btns.append(InlineKeyboardButton(display_text, callback_data=f"cb_buy_{b['id']}"))
                     elif b['mode'] == 'deposit':
                         row_btns.append(InlineKeyboardButton(b['text'], callback_data=f"cb_dep_{b['id']}"))
                 if row_btns:
@@ -640,7 +654,7 @@ def get_keyboard(user_id):
             markup.row(KeyboardButton('🎛️ Buttons Editor'), KeyboardButton('🛑 Stop Editor'))
             return markup
 
-        if state in ['posts_adding', 'posts_insert_after', 'posts_rep_text', 'posts_rep_all']:
+        if state in ['posts_adding', 'posts_insert_after', 'posts_rep_text', 'posts_rep_all', 'assign_command_wait', 'assign_plan_wait']:
             markup.row(KeyboardButton('❌ Cancel Action'))
             return markup
 
@@ -692,7 +706,11 @@ def get_keyboard(user_id):
             is_free = bot_plans.get(p_id, {}).get('is_free', False)
             free_txt = "☑️ On" if is_free else "⬜️ Off"
             
-            markup.row(KeyboardButton('💰 Set Min Deposit'), KeyboardButton('💰 Set Max Deposit'))
+            if p_id == 'plan0':
+                markup.row(KeyboardButton('💰 Set Free Bonus Amount'))
+            else:
+                markup.row(KeyboardButton('💰 Set Min Deposit'), KeyboardButton('💰 Set Max Deposit'))
+                
             markup.row(KeyboardButton('⏱ Contract Length'), KeyboardButton('📈 Plan Percentage'))
             markup.row(KeyboardButton('🖼 Plan Display'), KeyboardButton('💬 Set Inline Text'))
             markup.row(KeyboardButton('💬 Set Active Inline Text'), KeyboardButton(f'🆓 Toggle Free Plan ({free_txt})'))
@@ -835,6 +853,25 @@ def handle_messages(message):
     if user_id not in user_current_path: user_current_path[user_id] = 'root'
     if user_id not in user_state: user_state[user_id] = 'normal'
     
+    # Check for Home and Back universally first to fix the Unrecognized Command issue
+    if text == '🏠 Home':
+        user_state[user_id] = 'normal'
+        user_current_path[user_id] = 'root'
+        send_path_content(message.chat.id, user_id, 'root', is_editing=False)
+        bot.send_message(message.chat.id, "📍 Navigation Controls:", reply_markup=get_keyboard(user_id))
+        return
+        
+    if text == '🔙 Back':
+        current_path = user_current_path[user_id]
+        if current_path != 'root':
+            parts = current_path.split('/')[:-1]
+            new_path = '/'.join(parts) if len(parts) > 1 else 'root'
+            user_current_path[user_id] = new_path
+            user_state[user_id] = 'normal'
+            send_path_content(message.chat.id, user_id, new_path, is_editing=False)
+            bot.send_message(message.chat.id, "📍 Navigation Controls:", reply_markup=get_keyboard(user_id))
+        return
+
     # Reset normal users if stuck in certain states
     if not is_admin and user_state[user_id] not in ['w_action_amount', 'w_action_addr', 'dep_wait_amount', 'dep_wait_proof', 'buyplan_wait_amount', 'wait_calc_amount', 'wallet_wait_email', 'wallet_wait_address']: 
         user_state[user_id] = 'normal'
@@ -859,10 +896,11 @@ def handle_messages(message):
             bot.send_message(message.chat.id, "Inline editor action cancelled.", reply_markup=get_keyboard(user_id))
             send_path_content(message.chat.id, user_id, current_path, True)
             return
-        elif state.startswith('bal_') or state in ['adding_button', 'renaming_button', 'assign_plan', 'admin_wait_tx_id']:
+        elif state.startswith('bal_') or state in ['adding_button', 'renaming_button', 'assign_plan', 'admin_wait_tx_id', 'assign_command_wait', 'assign_plan_wait']:
             fallback = 'bal_menu' if state.startswith('bal_') else 'editing'
+            if state in ['assign_command_wait', 'assign_plan_wait']: fallback = 'button_settings'
             user_state[user_id] = fallback
-            bot.send_message(message.chat.id, "Action cancelled.", reply_markup=get_keyboard(user_id))
+            bot.send_message(message.chat.id, "Action cancelled.", reply_markup=get_keyboard(user_id) if fallback != 'button_settings' else get_settings_keyboard(full_path))
             return
         elif state.startswith('dep_setup_'):
             user_state[user_id] = 'admin_dep_settings'
@@ -1074,16 +1112,87 @@ def handle_messages(message):
         bot.send_message(message.chat.id, "✅ Setting updated successfully!", reply_markup=get_keyboard(user_id))
         return
 
+    # --- BUTTON SETTINGS ASSIGNMENTS ---
+    if state == 'button_settings':
+        if text == 'Assign Command':
+            user_state[user_id] = 'assign_command_wait'
+            bot.send_message(message.chat.id, "Enter the command (e.g., /deposit) to trigger this button:", reply_markup=get_cancel_action_keyboard())
+            return
+        elif text == 'Assign Plan':
+            user_state[user_id] = 'assign_plan_wait'
+            markup = ReplyKeyboardMarkup(resize_keyboard=True)
+            for p in bot_plans: markup.row(KeyboardButton(p))
+            markup.row(KeyboardButton('❌ Cancel Action'))
+            bot.send_message(message.chat.id, "Select a plan to assign:", reply_markup=markup)
+            return
+        elif text.startswith('Assign Withdrawal'):
+            meta = btn_metadata.get(full_path, get_default_metadata())
+            meta['withdrawal'] = not meta.get('withdrawal', False)
+            btn_metadata[full_path] = meta
+            bot.send_message(message.chat.id, "Withdrawal assigned toggled.", reply_markup=get_settings_keyboard(full_path))
+            return
+        elif text.startswith('Assign Calculator'):
+            meta = btn_metadata.get(full_path, get_default_metadata())
+            meta['is_calculator'] = not meta.get('is_calculator', False)
+            btn_metadata[full_path] = meta
+            bot.send_message(message.chat.id, "Calculator assigned toggled.", reply_markup=get_settings_keyboard(full_path))
+            return
+        elif text.startswith('Assign History'):
+            meta = btn_metadata.get(full_path, get_default_metadata())
+            meta['is_history'] = not meta.get('is_history', False)
+            btn_metadata[full_path] = meta
+            bot.send_message(message.chat.id, "History assigned toggled.", reply_markup=get_settings_keyboard(full_path))
+            return
+        elif text.startswith('Assign Wallet'):
+            meta = btn_metadata.get(full_path, get_default_metadata())
+            meta['is_wallet'] = not meta.get('is_wallet', False)
+            btn_metadata[full_path] = meta
+            bot.send_message(message.chat.id, "Wallet assigned toggled.", reply_markup=get_settings_keyboard(full_path))
+            return
+        elif text.startswith('Assign Bonus'):
+            meta = btn_metadata.get(full_path, get_default_metadata())
+            meta['is_bonus'] = not meta.get('is_bonus', False)
+            btn_metadata[full_path] = meta
+            bot.send_message(message.chat.id, "Bonus assigned toggled.", reply_markup=get_settings_keyboard(full_path))
+            return
+        elif text == '🔙 Exit Button Settings':
+            user_state[user_id] = 'editing'
+            bot.send_message(message.chat.id, "Exited settings.", reply_markup=get_keyboard(user_id))
+            return
+
+    if state == 'assign_command_wait':
+        meta = btn_metadata.get(full_path, get_default_metadata())
+        meta['command'] = text
+        meta['move_by_command'] = True
+        btn_metadata[full_path] = meta
+        user_state[user_id] = 'button_settings'
+        bot.send_message(message.chat.id, f"✅ Command {text} assigned!", reply_markup=get_settings_keyboard(full_path))
+        return
+        
+    if state == 'assign_plan_wait':
+        if text in bot_plans:
+            meta = btn_metadata.get(full_path, get_default_metadata())
+            meta['assigned_plan'] = text
+            btn_metadata[full_path] = meta
+            user_state[user_id] = 'button_settings'
+            bot.send_message(message.chat.id, f"✅ Plan {text} assigned!", reply_markup=get_settings_keyboard(full_path))
+        else:
+            bot.send_message(message.chat.id, "⚠️ Invalid plan.", reply_markup=get_settings_keyboard(full_path))
+            user_state[user_id] = 'button_settings'
+        return
+
     # --- PROFIT CALCULATOR ENGINE ---
     if state == 'wait_calc_amount':
         try: amount = float(text)
         except ValueError: return bot.send_message(message.chat.id, "⚠️ Invalid amount. Numbers only.")
         
         msg = f"🧮 **Calculator Results for ${amount:.2f}**\n\n"
-        found = False
+        found_plan = None
         for p_id, p_data in bot_plans.items():
+            if p_data.get('is_free', False): continue
+            
             if p_data['min'] <= amount <= p_data['max']:
-                found = True
+                found_plan = p_id
                 hourly = amount * (p_data['profit'] / 100.0)
                 daily = hourly * 24
                 msg += f"🔹 **{p_data['name']}**\n"
@@ -1093,10 +1202,16 @@ def handle_messages(message):
                     msg += f"Total Return ({p_data['length']}h): ${total:.2f}\n\n"
                 else:
                     msg += f"Total Return: Lifetime\n\n"
-        if not found:
+                    
+        if not found_plan:
             msg += "No plans available for this exact amount."
+            bot.send_message(message.chat.id, msg, parse_mode="Markdown", reply_markup=get_keyboard(user_id))
+        else:
+            inline_markup = InlineKeyboardMarkup()
+            inline_markup.row(InlineKeyboardButton("🛒 Buy Now", callback_data=f"cb_fastbuy_{found_plan}_{amount}"))
+            bot.send_message(message.chat.id, msg, parse_mode="Markdown", reply_markup=inline_markup)
+            bot.send_message(message.chat.id, "Calculation complete.", reply_markup=get_keyboard(user_id))
             
-        bot.send_message(message.chat.id, msg, parse_mode="Markdown", reply_markup=get_keyboard(user_id))
         user_state[user_id] = 'normal'
         return
 
@@ -1140,6 +1255,7 @@ def handle_messages(message):
         user_db[user_id]['active_plans'].append(new_plan)
         
         user_state[user_id] = 'normal'
+        # Send center-screen popup equivalent (via simple message since it's text input, but let's notify cleanly)
         bot.send_message(message.chat.id, f"🎉 **Success!**\nYou invested **${invest_amount:.2f}** into **{p_data['name']}**!\nYour profit is accruing automatically.", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
         return
 
@@ -1378,6 +1494,9 @@ def handle_messages(message):
         if text == '🔙 Back to Plans List':
             user_state[user_id] = 'admin_plans'
             bot.send_message(message.chat.id, "📊 **Plans Manager**", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
+        elif text == '💰 Set Free Bonus Amount':
+            user_state[user_id] = 'plan_setup_free_amt'
+            bot.send_message(message.chat.id, f"Enter Free Bonus Amount for **{bot_plans[p_id]['name']}**:\n\nℹ️ Current: ${bot_plans[p_id].get('free_amount', 2.0)}", parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
         elif text == '💰 Set Min Deposit':
             user_state[user_id] = 'plan_setup_min'
             bot.send_message(message.chat.id, f"Enter Minimum Deposit for **{bot_plans[p_id]['name']}**:\n\nℹ️ Current: ${bot_plans[p_id]['min']}", parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
@@ -1414,7 +1533,10 @@ def handle_messages(message):
 
     if state.startswith('plan_setup_'):
         p_id = user_action_data[user_id].get('edit_plan')
-        if state == 'plan_setup_min':
+        if state == 'plan_setup_free_amt':
+            try: bot_plans[p_id]['free_amount'] = float(text)
+            except ValueError: return bot.send_message(message.chat.id, "⚠️ Invalid amount. Numbers only.")
+        elif state == 'plan_setup_min':
             try: bot_plans[p_id]['min'] = float(text)
             except ValueError: return bot.send_message(message.chat.id, "⚠️ Invalid amount. Numbers only.")
         elif state == 'plan_setup_max':
@@ -1522,6 +1644,7 @@ def handle_messages(message):
                 "`%balance%` - Withdrawal balance (profits)\n"
                 "`%deposit%` - Deposit balance\n"
                 "`%my_plans%` - Shows user their active plans\n"
+                "`%activeplan%` - Same as %my_plans%\n"
                 "`%userid%` - Telegram numeric ID\n"
                 "`%username%` - Telegram @username\n"
                 "`%firstname%` - User's first name\n"
@@ -1879,6 +2002,49 @@ def handle_inline(call):
             bot.send_message(call.message.chat.id, global_wallet_setup['msg_prompt'], parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
         return
 
+    # --- ENHANCED CALCULATOR INLINE FAST BUY ---
+    if call.data.startswith('cb_fastbuy_'):
+        parts = call.data.split('_')
+        plan_id = parts[2]
+        invest_amount = float(parts[3])
+        
+        if plan_id not in bot_plans:
+            return bot.answer_callback_query(call.id, "Plan not found.", show_alert=True)
+            
+        p_data = bot_plans[plan_id]
+        u_dep = user_db[user_id].get('deposit', 0)
+        u_bal = user_db[user_id].get('balance', 0)
+        total_avail = u_dep + u_bal
+        
+        if total_avail < invest_amount:
+            bot.answer_callback_query(call.id, "⚠️ Insufficient balance! Redirecting...", show_alert=True)
+            redirect_cmd = p_data.get('redirect_cmd')
+            if redirect_cmd:
+                try: bot.delete_message(call.message.chat.id, call.message.message_id)
+                except Exception: pass
+                msg = call.message
+                msg.from_user = call.from_user
+                msg.text = redirect_cmd
+                handle_messages(msg)
+            return
+            
+        if u_dep >= invest_amount: user_db[user_id]['deposit'] -= invest_amount
+        else:
+            rem = invest_amount - u_dep
+            user_db[user_id]['deposit'] = 0
+            user_db[user_id]['balance'] -= rem
+            
+        log_tx(user_id, f"Bought {p_data['name']}", -invest_amount)
+        new_plan = {
+            'id': str(uuid.uuid4())[:8], 'macro': plan_id, 'amount': invest_amount,
+            'profit_pct': p_data['profit'], 'length_hours': p_data.get('length', 0),
+            'start_time': time.time(), 'last_accrual': time.time(), 'earned': 0.0, 'status': 'active'
+        }
+        user_db[user_id]['active_plans'].append(new_plan)
+        try: bot.delete_message(call.message.chat.id, call.message.message_id)
+        except: pass
+        return bot.answer_callback_query(call.id, f"🎉 Success! You invested ${invest_amount:.2f} into {p_data['name']}!", show_alert=True)
+
     # --- ENHANCED DYNAMIC PLAN BUYER INLINE ACTION ---
     if call.data.startswith('cb_buyplan_'):
         plan_id = call.data.split('_')[2]
@@ -1891,7 +2057,7 @@ def handle_inline(call):
             if any(p['macro'] == plan_id and p['status'] == 'active' for p in user_db[user_id].get('active_plans', [])):
                 return bot.answer_callback_query(call.id, "You already have this free plan active!", show_alert=True)
             
-            invest_amount = p_data['min']
+            invest_amount = p_data.get('free_amount', 2.0)
             new_plan = {
                 'id': str(uuid.uuid4())[:8],
                 'macro': plan_id,
@@ -1906,8 +2072,7 @@ def handle_inline(call):
             user_db[user_id]['active_plans'].append(new_plan)
             log_tx(user_id, f"Activated Free {p_data['name']}", invest_amount)
             
-            bot.send_message(call.message.chat.id, f"🎉 **Success!**\nYou activated the free **{p_data['name']}** with ${invest_amount:.2f} virtual capital!", parse_mode="Markdown")
-            return bot.answer_callback_query(call.id)
+            return bot.answer_callback_query(call.id, f"🎉 Success! You activated {p_data['name']} with ${invest_amount:.2f} virtual capital!", show_alert=True)
         
         # Check Total Available Funds (Deposit + Withdrawal Balance)
         u_dep = user_db[user_id].get('deposit', 0)
@@ -1917,7 +2082,7 @@ def handle_inline(call):
         # Insufficient Funds -> Check Redirect Command
         if total_avail < p_data['min']:
             user_db[user_id]['pending_plan'] = plan_id
-            bot.answer_callback_query(call.id, "Insufficient balance.", show_alert=True)
+            bot.answer_callback_query(call.id, "Insufficient balance! Redirecting...", show_alert=True)
             
             redirect_cmd = p_data.get('redirect_cmd')
             if redirect_cmd:
@@ -1964,8 +2129,7 @@ def handle_inline(call):
                 'status': 'active'
             }
             user_db[user_id]['active_plans'].append(new_plan)
-            bot.send_message(call.message.chat.id, f"🎉 **Success!**\nYou invested **${invest_amount:.2f}** into **{p_data['name']}**!\nYour profit is accruing automatically.", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
-            return bot.answer_callback_query(call.id)
+            return bot.answer_callback_query(call.id, f"🎉 Success! You invested ${invest_amount:.2f} into {p_data['name']}!", show_alert=True)
             
         user_state[user_id] = 'buyplan_wait_amount'
         bot.send_message(call.message.chat.id, f"📈 **{p_data['name']}**\nMin: ${p_data['min']} | Max: ${p_data['max']}\n\nAvailable Balance: ${total_avail:.2f}\n\nEnter the amount you wish to invest:", reply_markup=get_cancel_action_keyboard())
@@ -2075,18 +2239,18 @@ def handle_inline(call):
                         bot.answer_callback_query(call.id, "Processing request...")
                         lines = b['data'].split('\n')
                         plan_macro = lines[0].strip()
-                        dep_cmd = lines[1].strip() if len(lines) > 1 else None
                         
                         if plan_macro not in bot_plans:
                             return bot.send_message(call.message.chat.id, "⚠️ Error: This plan no longer exists in the system.")
                             
                         p_data = bot_plans[plan_macro]
+                        dep_cmd = lines[1].strip() if len(lines) > 1 else p_data.get('redirect_cmd')
                         
                         # Handle Free plan directly via custom inline wrapper
                         if p_data.get('is_free', False):
                             if any(p['macro'] == plan_macro and p['status'] == 'active' for p in user_db[user_id].get('active_plans', [])):
-                                return bot.send_message(call.message.chat.id, "You already have this free plan active!")
-                            invest_amt = p_data['min']
+                                return bot.answer_callback_query(call.id, "You already have this free plan active!", show_alert=True)
+                            invest_amt = p_data.get('free_amount', 2.0)
                             new_plan = {
                                 'id': str(uuid.uuid4())[:8], 'macro': plan_macro, 'amount': invest_amt,
                                 'profit_pct': p_data['profit'], 'length_hours': p_data.get('length', 0),
@@ -2094,12 +2258,15 @@ def handle_inline(call):
                             }
                             user_db[user_id]['active_plans'].append(new_plan)
                             log_tx(user_id, f"Activated Free {p_data['name']}", invest_amt)
-                            return bot.send_message(call.message.chat.id, f"🎉 **Success!**\nYou successfully activated **{p_data['name']}**!", parse_mode="Markdown")
+                            return bot.answer_callback_query(call.id, f"🎉 Success! You activated {p_data['name']} with ${invest_amt:.2f} virtual capital!", show_alert=True)
                         
                         u_dep = user_db[user_id]['deposit']
-                        if u_dep < p_data['min']:
+                        u_bal = user_db[user_id]['balance']
+                        total_avail = u_dep + u_bal
+
+                        if total_avail < p_data['min']:
                             user_db[user_id]['pending_plan'] = plan_macro
-                            bot.send_message(call.message.chat.id, f"⚠️ Insufficient deposit balance (Min: ${p_data['min']}). Redirecting to Deposit...", parse_mode="Markdown")
+                            bot.answer_callback_query(call.id, "⚠️ Insufficient balance! Redirecting...", show_alert=True)
                             if dep_cmd:
                                 try: bot.delete_message(call.message.chat.id, call.message.message_id)
                                 except Exception: pass
@@ -2109,8 +2276,14 @@ def handle_inline(call):
                                 handle_messages(msg)
                             return
                             
-                        invest_amt = min(u_dep, p_data['max'])
-                        user_db[user_id]['deposit'] -= invest_amt
+                        invest_amt = p_data['min'] if p_data['min'] == p_data['max'] else min(total_avail, p_data['max'])
+                        
+                        if u_dep >= invest_amt: user_db[user_id]['deposit'] -= invest_amt
+                        else:
+                            rem = invest_amt - u_dep
+                            user_db[user_id]['deposit'] = 0
+                            user_db[user_id]['balance'] -= rem
+                            
                         log_tx(user_id, f"Bought {p_data['name']}", -invest_amt)
                         
                         new_plan = {
@@ -2125,8 +2298,7 @@ def handle_inline(call):
                             'status': 'active'
                         }
                         user_db[user_id]['active_plans'].append(new_plan)
-                        bot.send_message(call.message.chat.id, f"🎉 **Success!**\n\nYou successfully invested **${invest_amt:.2f}** into **{p_data['name']}**!\nYour profit is accruing automatically.", parse_mode="Markdown")
-                        return
+                        return bot.answer_callback_query(call.id, f"🎉 Success! You invested ${invest_amt:.2f} into {p_data['name']}!", show_alert=True)
         return bot.answer_callback_query(call.id)
 
     # --- ADMIN POSTS INLINE TOOLS ---
