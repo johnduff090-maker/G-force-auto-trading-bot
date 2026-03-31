@@ -14,7 +14,6 @@ from bip_utils import Bip39SeedGenerator, Bip44, Bip44Coins, Bip44Changes
 # --- 1. SECURITY VAULT (Environment Variables) ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Check for both possible names Windows might have used
 env_file = os.path.join(BASE_DIR, '.env')
 txt_env_file = os.path.join(BASE_DIR, '.env.txt')
 
@@ -29,12 +28,10 @@ elif os.path.exists(txt_env_file):
     load_dotenv(dotenv_path=txt_env_file)
 else:
     print("❌ CRITICAL ERROR: No environment file found at all!")
-    print(f"📄 Files Python actually sees in this folder: {os.listdir(BASE_DIR)}")
 
 BOT_TOKEN = os.getenv('BOT_TOKEN', '')
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# BULLETPROOF ADMIN ID PARSING
 raw_admins = os.getenv('ADMIN_IDS', '')
 raw_admins = raw_admins.replace('"', '').replace("'", "")
 
@@ -51,7 +48,6 @@ MASTER_SEED = os.getenv('MASTER_SEED_PHRASE', '')
 if MASTER_SEED:
     MASTER_SEED = MASTER_SEED.replace('"', '').replace("'", "")
 
-# API KEYS FOR BLOCKCHAIN TRACKING
 TRONGRID_API_KEY = os.getenv('TRONGRID_API_KEY', '')
 ETHERSCAN_API_KEY = os.getenv('ETHERSCAN_API_KEY', '')
 
@@ -64,7 +60,6 @@ user_state = {}
 user_selected_button = {} 
 user_clipboard = {}        
 
-# User Database
 user_db = {}
 user_action_data = {} 
 btn_metadata = {}
@@ -79,11 +74,9 @@ admin_bal_comment_text = {}
 bot_plans = {}                
 user_plan_setup = {}          
 
-# --- DEPOSIT ENGINE SETTINGS ---
 pending_deposits = {}
 admin_dep_setup = {}
 
-# Expanded to include min, max, pending, and success messages
 deposit_settings = {
     'USDT_TRC20': {'mode': 'auto', 'address': 'Not Set', 'hd_key': 'Not Set', 'min': 10.0, 'max': 10000.0, 'msg_enter': 'Enter amount of USDT TRC20 (in USD) to deposit:', 'msg_instruct': 'Please send exactly `%crypto_amount%` USDT to:\n\n`%address%`\n\n_The system is monitoring the blockchain and will credit you automatically._', 'msg_pending': '✅ Your deposit request for $%usd_amount% has been submitted to the administrators.', 'msg_success': '✅ **Deposit Approved!**\n**$%usd_amount%** has been successfully added to your deposit balance.'},
     'USDT_BEP20': {'mode': 'auto', 'address': 'Not Set', 'hd_key': 'Not Set', 'min': 10.0, 'max': 10000.0, 'msg_enter': 'Enter amount of USDT BEP20 (in USD) to deposit:', 'msg_instruct': 'Please send exactly `%crypto_amount%` USDT to:\n\n`%address%`\n\n_The system is monitoring the blockchain and will credit you automatically._', 'msg_pending': '✅ Your deposit request for $%usd_amount% has been submitted to the administrators.', 'msg_success': '✅ **Deposit Approved!**\n**$%usd_amount%** has been successfully added to your deposit balance.'},
@@ -92,16 +85,23 @@ deposit_settings = {
     'BTC': {'mode': 'auto', 'address': 'Not Set', 'hd_key': 'Not Set', 'min': 50.0, 'max': 50000.0, 'msg_enter': 'Enter amount of BTC (in USD) to deposit:', 'msg_instruct': 'Please send exactly `%crypto_amount%` BTC to:\n\n`%address%`\n\n_The system is monitoring the blockchain and will credit you automatically._', 'msg_pending': '✅ Your deposit request for $%usd_amount% has been submitted to the administrators.', 'msg_success': '✅ **Deposit Approved!**\n**$%usd_amount%** has been successfully added to your deposit balance.'}
 }
 
-# --- NEW: SYSTEM PLANS INITIALIZATION ---
-if not bot_plans:
-    for i in range(6):
-        bot_plans[f'plan{i}'] = {
-            'name': f'Plan {i}', 'min': 10.0, 'max': 1000.0, 'length': 24.0, 'profit': 5.0,
-            'text': f'✨ **Plan {i} Description** ✨\n\nEdit this in Admin -> Plans.',
-            'photo': None, 'inline_text': '🛒 Purchase Plan', 'redirect_cmd': None
-        }
+# --- NEW: GLOBAL SETTINGS ---
+wallet_settings = {
+    'msg_main': "💡 Your currently set USDT Wallet Address is: %wallet%\n\nEmail: %email%\n\n💹 It will be used for all future withdrawals.\n\nNOTE🔴: Supported, USDT Network Address are: TRC20 and BEP20 Set Only one..",
+    'btn_new': "Set wallet",
+    'btn_change': "Change wallet",
+    'msg_prompt': "✏️ Send now your USDT TRC 20 OR BEP 20 Address to use it in future transactions ..",
+    'ask_email': False,
+    'msg_success': "🖊 Done: Your new wallet address is %wallet% (%network%)"
+}
 
-# --- NEW: GLOBAL WITHDRAWAL SETTINGS ---
+bonus_settings = {
+    'amount': 2.0,
+    'cooldown_hours': 12.0,
+    'msg_success': "🎉 You have received $%bonus%!",
+    'msg_fail': "⏳ You need to wait %time_left% before claiming again."
+}
+
 global_w_setup = {
     'w_var': 'balance',
     'w_min': 10.0,
@@ -112,9 +112,17 @@ global_w_setup = {
     'do_not_ask_address': False
 }
 
-processed_txids = set() # Stores Hashes to prevent double-crediting
+if not bot_plans:
+    for i in range(6):
+        bot_plans[f'plan{i}'] = {
+            'name': f'Plan {i}', 'min': 10.0, 'max': 1000.0, 'length': 24.0, 'profit': 5.0,
+            'text': f'✨ **Plan {i} Description** ✨\n\nEdit this in Admin -> Plans.',
+            'photo': None, 'inline_text': '🛒 Buy Now', 'inline_text_active': 'Active ✅ Buy Again', 
+            'redirect_cmd': None, 'is_free': False, 'free_capital': 2.0
+        }
 
-# --- NEW: TRANSACTION LEDGER LOGGER ---
+processed_txids = set()
+
 def log_tx(uid, t_type, amt):
     if uid in user_db:
         date_str = time.strftime('%Y-%m-%d %H:%M', time.gmtime())
@@ -128,10 +136,12 @@ def get_default_metadata():
         'invisible': False,
         'command': None,
         'move_by_command': False,
-        'withdrawal': False, # NEW: Simple toggle for withdrawal button
+        'withdrawal': False,
         'assigned_plan': None, 
         'is_calculator': False, 
-        'is_history': False     
+        'is_history': False,
+        'is_wallet': False,
+        'is_bonus': False
     }
 
 def init_user_db(message):
@@ -146,7 +156,11 @@ def init_user_db(message):
             'active_plans': [], 
             'pending_plan': None,
             'wallets': {},
-            'transactions': [] 
+            'transactions': [],
+            'set_wallet': 'Not Set',
+            'set_email': 'Not Set',
+            'set_network': 'Unknown',
+            'last_bonus': 0.0
         }
     else:
         user_db[user_id]['first_name'] = message.from_user.first_name or 'Unknown'
@@ -156,10 +170,12 @@ def init_user_db(message):
         if 'pending_plan' not in user_db[user_id]: user_db[user_id]['pending_plan'] = None
         if 'wallets' not in user_db[user_id]: user_db[user_id]['wallets'] = {}
         if 'transactions' not in user_db[user_id]: user_db[user_id]['transactions'] = []
+        if 'set_wallet' not in user_db[user_id]: user_db[user_id]['set_wallet'] = 'Not Set'
+        if 'set_email' not in user_db[user_id]: user_db[user_id]['set_email'] = 'Not Set'
+        if 'set_network' not in user_db[user_id]: user_db[user_id]['set_network'] = 'Unknown'
+        if 'last_bonus' not in user_db[user_id]: user_db[user_id]['last_bonus'] = 0.0
 
-# --- 2. LIVE PRICE ORACLE ENGINE (WITH FALLBACKS) ---
 def get_crypto_price(currency_code):
-    """Fetches live USD price for the requested currency from CoinGecko with hard fallbacks."""
     mapping = {
         'USDT_TRC20': 'tether', 'USDT_BEP20': 'tether', 'USDT_ERC20': 'tether',
         'TRX': 'tron', 'BTC': 'bitcoin'
@@ -172,69 +188,48 @@ def get_crypto_price(currency_code):
         data = response.json()
         return float(data[coin_id]['usd'])
     except Exception as e:
-        print(f"Oracle Error or Rate Limit: {e}")
         if 'USDT' in currency_code: return 1.0
         if 'TRX' in currency_code: return 0.12
         if 'BTC' in currency_code: return 65000.0
         return 1.0
 
-# --- 3. HD WALLET ENGINE (BIP39/44) ---
 def generate_user_wallet(user_id, currency):
-    """Generates a unique deterministic wallet for a user based on their Telegram ID."""
-    if not MASTER_SEED:
-        return "ERROR_NO_SEED", "ERROR_NO_SEED"
-        
+    if not MASTER_SEED: return "ERROR_NO_SEED", "ERROR_NO_SEED"
     try:
         seed_bytes = Bip39SeedGenerator(MASTER_SEED).Generate()
-        
-        if currency == 'BTC':
-            coin_type = Bip44Coins.BITCOIN
-        elif 'TRC20' in currency or currency == 'TRX':
-            coin_type = Bip44Coins.TRON
-        else:
-            coin_type = Bip44Coins.ETHEREUM
+        if currency == 'BTC': coin_type = Bip44Coins.BITCOIN
+        elif 'TRC20' in currency or currency == 'TRX': coin_type = Bip44Coins.TRON
+        else: coin_type = Bip44Coins.ETHEREUM
 
         bip44_mst = Bip44.FromSeed(seed_bytes, coin_type)
-        
         address_index = user_id % 2147483647
         bip44_acc = bip44_mst.Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(address_index)
         
         public_address = bip44_acc.PublicKey().ToAddress()
         private_key = bip44_acc.PrivateKey().Raw().ToHex()
-        
         return public_address, private_key
-    except Exception as e:
-        print(f"Wallet Gen Error: {e}")
+    except Exception:
         return "GEN_ERROR", "GEN_ERROR"
 
-# --- 4. AUTO-DETECTION WATCHER ENGINE ---
 def blockchain_watcher_loop():
-    """Continuously checks the blockchain for new deposits to generated wallets."""
     USDT_TRC20_CONTRACT = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
-    
     while True:
         try:
             for uid, data in user_db.items():
                 for curr, w_data in data.get('wallets', {}).items():
                     addr = w_data['address']
-                    
                     if curr in ['TRX', 'USDT_TRC20']:
                         headers = {"TRON-PRO-API-KEY": TRONGRID_API_KEY} if TRONGRID_API_KEY else {}
-                        
-                        if curr == 'USDT_TRC20':
-                            url = f"https://api.trongrid.io/v1/accounts/{addr}/transactions/trc20"
-                        else:
-                            url = f"https://api.trongrid.io/v1/accounts/{addr}/transactions"
+                        if curr == 'USDT_TRC20': url = f"https://api.trongrid.io/v1/accounts/{addr}/transactions/trc20"
+                        else: url = f"https://api.trongrid.io/v1/accounts/{addr}/transactions"
                         
                         resp = requests.get(url, headers=headers, timeout=10)
                         if resp.status_code == 200:
                             txs = resp.json().get('data', [])
                             for tx in txs:
                                 txid = tx.get('transaction_id') or tx.get('txID')
+                                if txid in processed_txids: continue
                                 
-                                if txid in processed_txids:
-                                    continue
-                                    
                                 is_incoming = False
                                 crypto_amount = 0.0
                                 
@@ -249,32 +244,22 @@ def blockchain_watcher_loop():
                                 
                                 if is_incoming and crypto_amount > 0:
                                     processed_txids.add(txid)
-                                    
                                     live_price = get_crypto_price(curr) or 1.0
                                     usd_value = crypto_amount * live_price
-                                    
                                     user_db[uid]['deposit'] += usd_value
                                     log_tx(uid, f"Auto-Deposit ({curr})", usd_value)
                                     
                                     try:
                                         conf = deposit_settings[curr]
-                                        msg_success = conf.get('msg_success', "✅ **Deposit Detected!**\n\nThe blockchain confirmed a deposit of **%crypto_amount% %currency%**.\n**$%usd_amount% USD** has been automatically added to your balance!")
-                                        msg_success = msg_success.replace('%usd_amount%', f"{usd_value:.2f}").replace('%crypto_amount%', f"{crypto_amount:.2f}").replace('%currency%', curr.replace('_', ' '))
+                                        msg_success = conf.get('msg_success', "✅ **Deposit Detected!**\n\n**$%usd_amount% USD** has been automatically added to your balance!")
+                                        msg_success = msg_success.replace('%usd_amount%', f"{usd_value:.2f}").replace('%crypto_amount%', f"{crypto_amount:.2f}")
                                         bot.send_message(uid, msg_success, parse_mode="Markdown")
                                     except Exception: pass
                                     
-                                    admin_msg = f"🟢 **AUTO-DEPOSIT APPROVED**\nUser: `{uid}`\nCurrency: {curr.replace('_', ' ')}\nCrypto Amount: {crypto_amount}\nUSD Credited: ${usd_value:.2f}\nHash (TXID): `{txid}`"
-                                    for admin in ADMIN_IDS:
-                                        try: bot.send_message(admin, admin_msg, parse_mode="Markdown")
-                                        except Exception: pass
-                                        
                                     check_and_trigger_auto_buy(uid)
-
-        except Exception as e:
-            pass
+        except Exception: pass
         time.sleep(30)
 
-# --- UNIVERSAL AUTO-BUY ENGINE ---
 def check_and_trigger_auto_buy(user_id):
     if not user_db[user_id].get('pending_plan'): return
     p_macro = user_db[user_id]['pending_plan']
@@ -286,19 +271,13 @@ def check_and_trigger_auto_buy(user_id):
             log_tx(user_id, f"Bought {p_data['name']}", -invest_amt)
             
             new_plan = {
-                'id': str(uuid.uuid4())[:8],
-                'macro': p_macro,
-                'amount': invest_amt,
-                'profit_pct': p_data['profit'],
-                'length_hours': p_data.get('length', 0),
-                'start_time': time.time(),
-                'last_accrual': time.time(),
-                'earned': 0.0,
-                'status': 'active'
+                'id': str(uuid.uuid4())[:8], 'macro': p_macro, 'amount': invest_amt,
+                'profit_pct': p_data['profit'], 'length_hours': p_data.get('length', 0),
+                'start_time': time.time(), 'last_accrual': time.time(),
+                'earned': 0.0, 'status': 'active'
             }
             user_db[user_id]['active_plans'].append(new_plan)
             user_db[user_id]['pending_plan'] = None
-            
             try:
                 bot.send_message(user_id, f"🎉 **Auto-Purchase Successful!**\n\nYour deposit triggered your pending plan.\n**{p_data['name']}** is now active with an investment of **${invest_amt:.2f}**!", parse_mode="Markdown")
             except Exception: pass
@@ -306,14 +285,11 @@ def check_and_trigger_auto_buy(user_id):
 def process_accruals(user_id):
     u = user_db.get(user_id)
     if not u or not u.get('active_plans'): return
-    
     now = time.time()
     for p in u['active_plans']:
         if p['status'] != 'active': continue
-        
         elapsed_sec = now - p['last_accrual']
         elapsed_hours = elapsed_sec / 3600.0
-        
         if elapsed_hours > 0:
             earned = p['amount'] * (p['profit_pct'] / 100.0) * elapsed_hours
             u['balance'] += earned  
@@ -330,12 +306,10 @@ def change_menu_paths(old_base, new_base):
         if k == old_base or k.startswith(old_base + '/'):
             new_k = k.replace(old_base, new_base, 1)
             menus[new_k] = menus.pop(k)
-            
     for mk in list(btn_metadata.keys()):
         if mk == old_base or mk.startswith(old_base + '/'):
             new_mk = mk.replace(old_base, new_base, 1)
             btn_metadata[new_mk] = btn_metadata.pop(mk)
-            
     for pk in list(menu_posts.keys()):
         if pk == old_base or pk.startswith(old_base + '/'):
             new_pk = pk.replace(old_base, new_base, 1)
@@ -344,7 +318,6 @@ def change_menu_paths(old_base, new_base):
 def replace_macros(text, user_id, full_path, action_data=None):
     if not text: return "Not set."
     process_accruals(user_id) 
-    
     bals = user_db.get(user_id, {})
     
     t = text.replace('%userid%', str(user_id))
@@ -355,7 +328,11 @@ def replace_macros(text, user_id, full_path, action_data=None):
     t = t.replace('%bonus%', f"{bals.get('bonus', 0):.2f}")
     t = t.replace('%deposit%', f"{bals.get('deposit', 0):.2f}")
     
-    # Use GLOBAL withdrawal settings for macros
+    t = t.replace('%wallet%', bals.get('set_wallet', 'Not Set'))
+    t = t.replace('%email%', bals.get('set_email', 'Not Set'))
+    t = t.replace('%network%', bals.get('set_network', 'Unknown'))
+    t = t.replace('%bonus%', f"{bonus_settings['amount']:.2f}")
+
     t = t.replace('%min%', str(global_w_setup.get('w_min') or 0))
     t = t.replace('%max%', str(global_w_setup.get('w_max') or 'No Limit'))
     
@@ -388,7 +365,6 @@ def replace_macros(text, user_id, full_path, action_data=None):
         
     return t
 
-# --- POSTS ENGINE ---
 def get_post_inline_tools(post_id):
     markup = InlineKeyboardMarkup()
     markup.row(
@@ -423,10 +399,8 @@ def render_pi_manager(chat_id, post, message_id=None):
     markup.row(InlineKeyboardButton('🔙 Done', callback_data='cb_pi_done'))
     
     text = "🛠 **Inline Keyboard Editor**\n\nClick a button to Edit/Move/Delete it, or click Add New."
-    if message_id:
-        bot.edit_message_text(text, chat_id, message_id, parse_mode="Markdown", reply_markup=markup)
-    else:
-        bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=markup)
+    if message_id: bot.edit_message_text(text, chat_id, message_id, parse_mode="Markdown", reply_markup=markup)
+    else: bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=markup)
 
 def send_path_content(chat_id, user_id, path, is_editing=False):
     if is_editing and user_id in editor_msg_ids:
@@ -436,6 +410,39 @@ def send_path_content(chat_id, user_id, path, is_editing=False):
         editor_msg_ids[user_id] = []
 
     meta = btn_metadata.get(path, get_default_metadata())
+    
+    # --- BONUS LOGIC ---
+    if meta.get('is_bonus') and not is_editing:
+        last_b = user_db[user_id].get('last_bonus', 0.0)
+        cooldown_sec = bonus_settings['cooldown_hours'] * 3600
+        now = time.time()
+        
+        if now - last_b >= cooldown_sec:
+            user_db[user_id]['balance'] += bonus_settings['amount']
+            user_db[user_id]['last_bonus'] = now
+            log_tx(user_id, "Bonus", bonus_settings['amount'])
+            msg = bonus_settings['msg_success'].replace('%bonus%', str(bonus_settings['amount']))
+            bot.send_message(chat_id, msg, parse_mode="Markdown")
+        else:
+            time_left = cooldown_sec - (now - last_b)
+            h = int(time_left // 3600)
+            m = int((time_left % 3600) // 60)
+            s = int(time_left % 60)
+            tl_str = f"{h}hrs {m}mins {s}secs"
+            msg = bonus_settings['msg_fail'].replace('%time_left%', tl_str)
+            bot.send_message(chat_id, msg, parse_mode="Markdown")
+        return
+
+    # --- WALLET LOGIC ---
+    if meta.get('is_wallet') and not is_editing:
+        user_state[user_id] = 'normal'
+        msg = replace_macros(wallet_settings['msg_main'], user_id, path)
+        markup = InlineKeyboardMarkup()
+        btn_text = wallet_settings['btn_change'] if user_db[user_id]['set_wallet'] != 'Not Set' else wallet_settings['btn_new']
+        markup.row(InlineKeyboardButton(btn_text, callback_data='cb_setwallet'))
+        bot.send_message(chat_id, msg, parse_mode="Markdown", reply_markup=markup)
+        return
+
     assigned_plan = meta.get('assigned_plan')
     
     if assigned_plan and assigned_plan in bot_plans:
@@ -443,14 +450,15 @@ def send_path_content(chat_id, user_id, path, is_editing=False):
         p_text = replace_macros(p_data.get('text', ''), user_id, path)
         p_photo = p_data.get('photo')
         
+        has_active = any(p['macro'] == assigned_plan and p['status'] == 'active' for p in user_db[user_id].get('active_plans', []))
+        btn_text = p_data.get('inline_text_active', 'Active ✅ Buy Again') if has_active else p_data.get('inline_text', '🛒 Buy Now')
+        
         markup = InlineKeyboardMarkup()
-        markup.row(InlineKeyboardButton(p_data.get('inline_text', '🛒 Purchase Plan'), callback_data=f"cb_buyplan_{assigned_plan}"))
+        markup.row(InlineKeyboardButton(btn_text, callback_data=f"cb_buyplan_{assigned_plan}"))
         
         try:
-            if p_photo:
-                sent = bot.send_photo(chat_id, p_photo, caption=p_text, parse_mode="Markdown", reply_markup=markup)
-            else:
-                sent = bot.send_message(chat_id, p_text, parse_mode="Markdown", reply_markup=markup)
+            if p_photo: sent = bot.send_photo(chat_id, p_photo, caption=p_text, parse_mode="Markdown", reply_markup=markup)
+            else: sent = bot.send_message(chat_id, p_text, parse_mode="Markdown", reply_markup=markup)
             if is_editing: editor_msg_ids.setdefault(user_id, []).append(sent.message_id)
         except Exception as e:
             sent = bot.send_message(chat_id, f"⚠️ Error rendering plan: {e}")
@@ -465,7 +473,6 @@ def send_path_content(chat_id, user_id, path, is_editing=False):
         
     for p in posts:
         text = replace_macros(p['text'], user_id, path)
-        
         markup = InlineKeyboardMarkup()
         custom_inlines = p.get('custom_inlines', [])
         
@@ -478,49 +485,35 @@ def send_path_content(chat_id, user_id, path, is_editing=False):
             for r_idx in sorted(rows_dict.keys()):
                 row_btns = []
                 for b in rows_dict[r_idx]:
-                    if b['mode'] == 'url':
-                        row_btns.append(InlineKeyboardButton(b['text'], url=b['data']))
-                    elif b['mode'] == 'popup':
-                        row_btns.append(InlineKeyboardButton(b['text'], callback_data=f"cb_pop_{b['id']}"))
-                    elif b['mode'] == 'command':
-                        row_btns.append(InlineKeyboardButton(b['text'], callback_data=f"cb_cmd_{b['id']}"))
-                    elif b['mode'] == 'buy_plan':
-                        row_btns.append(InlineKeyboardButton(b['text'], callback_data=f"cb_buy_{b['id']}"))
-                    elif b['mode'] == 'deposit':
-                        row_btns.append(InlineKeyboardButton(b['text'], callback_data=f"cb_dep_{b['id']}"))
-                if row_btns:
-                    markup.row(*row_btns)
+                    if b['mode'] == 'url': row_btns.append(InlineKeyboardButton(b['text'], url=b['data']))
+                    elif b['mode'] == 'popup': row_btns.append(InlineKeyboardButton(b['text'], callback_data=f"cb_pop_{b['id']}"))
+                    elif b['mode'] == 'command': row_btns.append(InlineKeyboardButton(b['text'], callback_data=f"cb_cmd_{b['id']}"))
+                    elif b['mode'] == 'buy_plan': row_btns.append(InlineKeyboardButton(b['text'], callback_data=f"cb_buy_{b['id']}"))
+                    elif b['mode'] == 'deposit': row_btns.append(InlineKeyboardButton(b['text'], callback_data=f"cb_dep_{b['id']}"))
+                if row_btns: markup.row(*row_btns)
                     
         if is_editing:
             editor_markup = get_post_inline_tools(p['id'])
-            for row in editor_markup.keyboard:
-                markup.row(*row)
+            for row in editor_markup.keyboard: markup.row(*row)
                 
-        if not markup.keyboard: 
-            markup = None
+        if not markup.keyboard: markup = None
         
         try:
-            if p['type'] == 'photo':
-                sent = bot.send_photo(chat_id, p['photo'], caption=text, parse_mode="Markdown", reply_markup=markup)
-            else:
-                sent = bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=markup)
-                
+            if p['type'] == 'photo': sent = bot.send_photo(chat_id, p['photo'], caption=text, parse_mode="Markdown", reply_markup=markup)
+            else: sent = bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=markup)
             if is_editing: editor_msg_ids.setdefault(user_id, []).append(sent.message_id)
         except Exception as e:
             sent = bot.send_message(chat_id, f"⚠️ Error rendering post: {e}")
             if is_editing: editor_msg_ids.setdefault(user_id, []).append(sent.message_id)
 
-# --- KEYBOARD BUILDERS ---
 def get_wizard_keyboard(current_val, options=None, allow_empty=False):
     markup = ReplyKeyboardMarkup(resize_keyboard=True)
     row1 = []
     if current_val is not None: row1.append(KeyboardButton('✔️ Leave as Is'))
     if allow_empty: row1.append(KeyboardButton('➖ Set Empty'))
     if row1: markup.row(*row1)
-
     if options:
         for o in options: markup.row(KeyboardButton(o))
-
     markup.row(KeyboardButton('🚫 Cancel Action'))
     return markup
 
@@ -534,13 +527,15 @@ def get_settings_keyboard(full_path):
     calc_text = "☑️ On" if meta.get('is_calculator') else "⬜️ Off"
     hist_text = "☑️ On" if meta.get('is_history') else "⬜️ Off"
     w_text = "☑️ On" if meta.get('withdrawal') else "⬜️ Off"
+    wall_text = "☑️ On" if meta.get('is_wallet') else "⬜️ Off"
+    bon_text = "☑️ On" if meta.get('is_bonus') else "⬜️ Off"
     
     markup.row(KeyboardButton(f'Random Message ({rm_text})'), KeyboardButton(f'Admin Only ({ao_text})'))
     markup.row(KeyboardButton(f'Invisible ({inv_text})'), KeyboardButton('Subscription (Join)'))
     markup.row(KeyboardButton('Assign Command'), KeyboardButton('Assign Plan')) 
     markup.row(KeyboardButton(f'Assign Calculator ({calc_text})'), KeyboardButton(f'Assign History ({hist_text})'))
     markup.row(KeyboardButton(f'Assign Withdrawal ({w_text})'), KeyboardButton('Assign Editor'))
-    markup.row(KeyboardButton('Assign Bonus'), KeyboardButton('Set Fixed Exchange'))
+    markup.row(KeyboardButton(f'Assign Bonus ({bon_text})'), KeyboardButton(f'Assign Wallet ({wall_text})'))
     markup.row(KeyboardButton('Form Settings'), KeyboardButton('Shop Editor'))
     markup.row(KeyboardButton('🔙 Exit Button Settings'))
     return markup
@@ -548,7 +543,6 @@ def get_settings_keyboard(full_path):
 def get_global_withdrawal_keyboard():
     markup = ReplyKeyboardMarkup(resize_keyboard=True)
     addr_text = "☑️ On" if global_w_setup.get('do_not_ask_address') else "⬜️ Off"
-    
     markup.row(KeyboardButton('Set Withdrawal Var'), KeyboardButton('Set Min/Max'))
     markup.row(KeyboardButton('Edit Enter Msg'), KeyboardButton('Edit Address Msg'))
     markup.row(KeyboardButton('Edit Confirm Msg'), KeyboardButton('Success Message'))
@@ -560,11 +554,26 @@ def get_global_withdrawal_keyboard():
     markup.row(KeyboardButton('🔙 Back to Admin'))
     return markup
 
+def get_admin_wallet_keyboard():
+    markup = ReplyKeyboardMarkup(resize_keyboard=True)
+    e_txt = "☑️ On" if wallet_settings['ask_email'] else "⬜️ Off"
+    markup.row(KeyboardButton('Edit Main Msg'), KeyboardButton('Edit Prompt Msg'))
+    markup.row(KeyboardButton('Edit Btn (New)'), KeyboardButton('Edit Btn (Change)'))
+    markup.row(KeyboardButton('Edit Success Msg'), KeyboardButton(f'Ask Email ({e_txt})'))
+    markup.row(KeyboardButton('🔙 Back to Admin'))
+    return markup
+
+def get_admin_bonus_keyboard():
+    markup = ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.row(KeyboardButton('Set Bonus Amount'), KeyboardButton('Set Cooldown Time'))
+    markup.row(KeyboardButton('Edit Success Msg'), KeyboardButton('Edit Fail Msg'))
+    markup.row(KeyboardButton('🔙 Back to Admin'))
+    return markup
+
 def get_assign_command_keyboard(full_path):
     markup = ReplyKeyboardMarkup(resize_keyboard=True)
     meta = btn_metadata.get(full_path, get_default_metadata())
     cmd_text = "▶️ On" if meta.get('move_by_command') else "⏸ Off"
-    
     markup.row(KeyboardButton('✖️ Delete'))
     markup.row(KeyboardButton(f'Move by Command ({cmd_text})'))
     markup.row(KeyboardButton('✅ Confirm'), KeyboardButton('🚫 Cancel Action'))
@@ -588,23 +597,24 @@ def get_keyboard(user_id):
             markup.row(KeyboardButton('🎛️ Buttons Editor'), KeyboardButton('🛑 Stop Editor'))
             return markup
 
-        if state in ['posts_adding', 'posts_insert_after', 'posts_rep_text', 'posts_rep_all']:
+        if state in ['posts_adding', 'posts_insert_after', 'posts_rep_text', 'posts_rep_all', 'pi_wait_mode', 'pi_wait_data', 'pi_wait_text']:
             markup.row(KeyboardButton('❌ Cancel Action'))
             return markup
 
         if state == 'admin_menu':
             markup.row(KeyboardButton('📜 Macros'), KeyboardButton('📊 Plans'))
             markup.row(KeyboardButton('🏦 Deposit Settings'), KeyboardButton('Withdrawal Settings')) 
+            markup.row(KeyboardButton('👝 Wallet Settings'), KeyboardButton('🎁 Bonus Settings'))
             markup.row(KeyboardButton('🧮 Calculator'), KeyboardButton('📜 Transactions'))
             markup.row(KeyboardButton('🔙 Back to Main'))
             return markup
 
-        if state == 'admin_w_menu':
-            return get_global_withdrawal_keyboard()
+        if state == 'admin_w_menu': return get_global_withdrawal_keyboard()
+        if state == 'admin_wallet_menu': return get_admin_wallet_keyboard()
+        if state == 'admin_bonus_menu': return get_admin_bonus_keyboard()
 
         if state == 'admin_dep_menu':
-            for c in deposit_settings.keys():
-                markup.row(KeyboardButton(c.replace('_', ' '))) 
+            for c in deposit_settings.keys(): markup.row(KeyboardButton(c.replace('_', ' '))) 
             markup.row(KeyboardButton('🔙 Back to Admin'))
             return markup
 
@@ -613,7 +623,6 @@ def get_keyboard(user_id):
             if not c or c not in deposit_settings:
                 markup.row(KeyboardButton('🔙 Back to Deposit Menu'))
                 return markup
-                
             c_mode = deposit_settings[c]['mode'].upper()
             markup.row(KeyboardButton(f"🔄 Mode: {c_mode}"))
             markup.row(KeyboardButton('💰 Set Min Deposit'), KeyboardButton('💰 Set Max Deposit'))
@@ -623,7 +632,7 @@ def get_keyboard(user_id):
             markup.row(KeyboardButton('🔙 Back to Deposit Menu'))
             return markup
 
-        if state.startswith('dep_setup_'):
+        if state.startswith('dep_setup_') or state.startswith('w_set_') or state.startswith('b_set_'):
             return get_cancel_action_keyboard()
 
         if state == 'admin_plans':
@@ -634,16 +643,19 @@ def get_keyboard(user_id):
             return markup
 
         if state == 'admin_plan_settings':
+            p_id = user_action_data[user_id].get('edit_plan')
+            p_data = bot_plans[p_id]
+            f_text = "🆓 Disable Free Plan" if p_data.get('is_free') else "🆓 Set as Free Plan"
             markup.row(KeyboardButton('💰 Set Min Deposit'), KeyboardButton('💰 Set Max Deposit'))
             markup.row(KeyboardButton('⏱ Contract Length'), KeyboardButton('📈 Plan Percentage'))
             markup.row(KeyboardButton('🖼 Plan Display'), KeyboardButton('💬 Set Inline Text'))
+            markup.row(KeyboardButton('💬 Set Active Text'), KeyboardButton(f_text))
             markup.row(KeyboardButton('🔗 Set Redirect Cmd'), KeyboardButton('🔙 Back to Plans List')) 
             return markup
 
         if state.startswith('plan_setup_'):
             p_id = user_action_data.get(user_id, {}).get('edit_plan')
-            if state == 'plan_setup_redirect':
-                return get_wizard_keyboard(bot_plans.get(p_id, {}).get('redirect_cmd'), allow_empty=True)
+            if state == 'plan_setup_redirect': return get_wizard_keyboard(bot_plans.get(p_id, {}).get('redirect_cmd'), allow_empty=True)
             return get_cancel_action_keyboard()
 
         if state == 'bal_select':
@@ -688,7 +700,7 @@ def get_keyboard(user_id):
             markup.row(KeyboardButton('❌ Cancel Action'))
             return markup
 
-    if state in ['buyplan_wait_amount', 'wait_calc_amount']:
+    if state in ['buyplan_wait_amount', 'wait_calc_amount', 'wait_wallet_address', 'wait_wallet_email']:
         return get_cancel_action_keyboard()
 
     if current_path in menus and menus[current_path]:
@@ -696,13 +708,9 @@ def get_keyboard(user_id):
         for name in menus[current_path]:
             btn_full_path = f"{current_path}/{name}"
             meta = btn_metadata.get(btn_full_path, get_default_metadata())
-            
-            if meta.get('invisible') and not (is_admin and state in ['editing', 'posts_editing']):
-                continue
-                
+            if meta.get('invisible') and not (is_admin and state in ['editing', 'posts_editing']): continue
             r_idx = meta.get('row_idx', 0)
-            if r_idx not in rows_dict:
-                rows_dict[r_idx] = []
+            if r_idx not in rows_dict: rows_dict[r_idx] = []
             rows_dict[r_idx].append(KeyboardButton(name))
 
         for r_idx in sorted(rows_dict.keys()):
@@ -718,8 +726,7 @@ def get_keyboard(user_id):
 
     if state == 'editing':
         markup.row(KeyboardButton('➕ Add Button'))
-        if user_clipboard.get(user_id):
-            markup.row(KeyboardButton(f'📋 Paste "{user_clipboard[user_id]["name"]}"'))
+        if user_clipboard.get(user_id): markup.row(KeyboardButton(f'📋 Paste "{user_clipboard[user_id]["name"]}"'))
         markup.row(KeyboardButton('🛑 Stop Editor'), KeyboardButton('📝 Posts Editor'))
     elif state == 'normal' and current_path == 'root':
         markup.row(KeyboardButton('🎛️ Buttons Editor'), KeyboardButton('📝 Posts Editor'))
@@ -743,11 +750,6 @@ def get_edit_inline_tools():
     )
     return markup
 
-def get_back_button():
-    markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton('🔙 Go Back to Previous Menu', callback_data='go_back'))
-    return markup
-
 def get_withdrawal_conf_inline():
     markup = InlineKeyboardMarkup()
     markup.row(InlineKeyboardButton('✅ Confirm', callback_data='cb_w_yes'), InlineKeyboardButton('🚫 Cancel', callback_data='cb_w_no'))
@@ -760,7 +762,6 @@ def send_welcome(message):
     user_current_path[user_id] = 'root'
     user_state[user_id] = 'normal'
     user_selected_button[user_id] = None
-    
     send_path_content(message.chat.id, user_id, 'root', is_editing=False)
     bot.send_message(message.chat.id, "📍 Navigation Controls:", reply_markup=get_keyboard(user_id))
 
@@ -775,7 +776,9 @@ def handle_messages(message):
     
     if user_id not in user_current_path: user_current_path[user_id] = 'root'
     if user_id not in user_state: user_state[user_id] = 'normal'
-    if not is_admin and user_state[user_id] not in ['w_action_amount', 'w_action_addr', 'dep_wait_amount', 'dep_wait_proof', 'buyplan_wait_amount', 'wait_calc_amount']: 
+    
+    allowed_states = ['w_action_amount', 'w_action_addr', 'dep_wait_amount', 'dep_wait_proof', 'buyplan_wait_amount', 'wait_calc_amount', 'wait_wallet_address', 'wait_wallet_email']
+    if not is_admin and user_state[user_id] not in allowed_states: 
         user_state[user_id] = 'normal'
         
     current_path = user_current_path[user_id]
@@ -783,24 +786,15 @@ def handle_messages(message):
     selected_btn = user_selected_button.get(user_id)
     full_path = f"{current_path}/{selected_btn}" if selected_btn else None
 
-    # --- BLOCK UNAUTHORIZED ADMIN COMMANDS ---
-    admin_commands = ['🎛️ Buttons Editor', '📝 Posts Editor', '💵 Balance', '🔐 Admin', '➕ Add Button', '🛑 Stop Editor', '🔙 Exit Button Settings', '✅ Confirm', '🚫 Cancel', '✖️ Delete', 'Deposit balance', 'Withdrawal balance', '🔙 Exit Balance', '📜 Macros', '📊 Plans', '🔙 Back to Main', '🔙 Back to Admin', '➕ Add Plan', '➕ Add Message', 'Pagination in Editor (10)', '🏦 Deposit Settings', 'Withdrawal Settings', '🔙 Back to Deposit Menu', '📍 Set Static Address', '🔑 Set HD Wallet Key', '💬 Edit Enter Msg', '💬 Edit Instruct Msg', '💰 Set Min Deposit', '💰 Set Max Deposit', '💬 Edit Pending Msg', '💬 Edit Success Msg', '🧮 Calculator', '📜 Transactions']
-
-    # --- HANDLE USER ABORTING ANY LIVE ACTION ---
+    # --- HANDLE CANCEL ACTIONS ---
     if text in ['❌ Cancel Action', '❌ Cancel', '🚫 Cancel Action']:
-        if state in ['posts_adding', 'posts_insert_after', 'posts_rep_text', 'posts_rep_all']:
+        if state in ['posts_adding', 'posts_insert_after', 'posts_rep_text', 'posts_rep_all', 'pi_wait_mode', 'pi_wait_data', 'pi_wait_text']:
             user_state[user_id] = 'posts_editing'
             bot.send_message(message.chat.id, "Action cancelled.", reply_markup=get_keyboard(user_id))
             send_path_content(message.chat.id, user_id, current_path, True)
             return
-        elif state in ['pi_wait_mode', 'pi_wait_dep_curr', 'pi_wait_text']:
-            user_state[user_id] = 'posts_editing'
-            bot.send_message(message.chat.id, "Inline editor action cancelled.", reply_markup=get_keyboard(user_id))
-            send_path_content(message.chat.id, user_id, current_path, True)
-            return
         elif state.startswith('bal_') or state in ['adding_button', 'renaming_button', 'assign_plan', 'admin_wait_tx_id']:
-            fallback = 'bal_menu' if state.startswith('bal_') else 'editing'
-            user_state[user_id] = fallback
+            user_state[user_id] = 'bal_menu' if state.startswith('bal_') else 'editing'
             bot.send_message(message.chat.id, "Action cancelled.", reply_markup=get_keyboard(user_id))
             return
         elif state.startswith('dep_setup_'):
@@ -815,31 +809,187 @@ def handle_messages(message):
             user_state[user_id] = 'admin_w_menu'
             bot.send_message(message.chat.id, "Withdrawal setup cancelled.", reply_markup=get_keyboard(user_id))
             return
+        elif state.startswith('w_set_'):
+            user_state[user_id] = 'admin_wallet_menu'
+            bot.send_message(message.chat.id, "Wallet setup cancelled.", reply_markup=get_keyboard(user_id))
+            return
+        elif state.startswith('b_set_'):
+            user_state[user_id] = 'admin_bonus_menu'
+            bot.send_message(message.chat.id, "Bonus setup cancelled.", reply_markup=get_keyboard(user_id))
+            return
         else:
             user_state[user_id] = 'normal'
             bot.send_message(message.chat.id, "❌ Action Cancelled.", reply_markup=get_keyboard(user_id))
             return
 
-    # --- HANDLE BUTTONS EDITOR ADD / RENAME ---
+    # --- INLINE CUSTOM BUTTON EDITOR FLOW ---
+    if state == 'pi_wait_mode':
+        mode_map = {'🔗 URL or Share': 'url', '💬 Popup Window': 'popup', '🚀 Command': 'command', '🛒 Buy Plan': 'buy_plan', '🏦 Deposit': 'deposit'}
+        if text not in mode_map:
+            return bot.send_message(message.chat.id, "Please select from keyboard.", reply_markup=get_cancel_action_keyboard())
+        mode = mode_map[text]
+        user_action_data[user_id]['pi_mode'] = mode
+        if mode == 'url': msg = "Enter URL:"
+        elif mode == 'popup': msg = "Enter Popup Text:"
+        elif mode == 'command': msg = "Enter Command:"
+        elif mode == 'buy_plan': msg = "Enter Plan Macro (e.g. plan0):"
+        elif mode == 'deposit': msg = "Enter Currency (e.g. USDT_TRC20):"
+        
+        user_state[user_id] = 'pi_wait_data'
+        bot.send_message(message.chat.id, msg, reply_markup=get_cancel_action_keyboard())
+        return
+
+    if state == 'pi_wait_data':
+        user_action_data[user_id]['pi_data'] = text
+        user_state[user_id] = 'pi_wait_text'
+        bot.send_message(message.chat.id, "Enter the Text for the Button:", reply_markup=get_cancel_action_keyboard())
+        return
+        
+    if state == 'pi_wait_text':
+        mode = user_action_data[user_id].get('pi_mode', 'popup')
+        data = user_action_data[user_id].get('pi_data', 'none')
+        post_id = user_action_data[user_id].get('post_id')
+        
+        new_btn = {'id': str(uuid.uuid4())[:8], 'text': text, 'mode': mode, 'data': data, 'row_idx': 0}
+        
+        post = next((p for p in menu_posts.get(current_path, []) if p['id'] == post_id), None)
+        if post:
+            if 'custom_inlines' not in post: post['custom_inlines'] = []
+            max_r = 0
+            for b in post['custom_inlines']:
+                if b.get('row_idx', 0) > max_r: max_r = b['row_idx']
+            new_btn['row_idx'] = max_r + 1
+            post['custom_inlines'].append(new_btn)
+            
+        user_state[user_id] = 'posts_editing'
+        render_pi_manager(message.chat.id, post)
+        return
+
+    # --- USER WALLET CREATION ---
+    if state == 'wait_wallet_address':
+        addr = text.strip()
+        network = "Unknown"
+        if addr.startswith('T') and len(addr) == 34: network = "TRC20"
+        elif addr.startswith('0x') and len(addr) == 42: network = "BEP20"
+        else: return bot.send_message(message.chat.id, "⚠️ Invalid Address. Must be a valid USDT TRC20 (starts with T) or BEP20 (starts with 0x) address.")
+        
+        user_db[user_id]['set_wallet'] = addr
+        user_db[user_id]['set_network'] = network
+        
+        if wallet_settings['ask_email']:
+            user_state[user_id] = 'wait_wallet_email'
+            bot.send_message(message.chat.id, "📧 Please enter your Email address:", reply_markup=get_cancel_action_keyboard())
+        else:
+            user_state[user_id] = 'normal'
+            msg = wallet_settings['msg_success'].replace('%wallet%', addr).replace('%network%', network)
+            bot.send_message(message.chat.id, msg, parse_mode="Markdown", reply_markup=get_keyboard(user_id))
+        return
+
+    if state == 'wait_wallet_email':
+        user_db[user_id]['set_email'] = text.strip()
+        user_state[user_id] = 'normal'
+        addr = user_db[user_id]['set_wallet']
+        network = user_db[user_id]['set_network']
+        msg = wallet_settings['msg_success'].replace('%wallet%', addr).replace('%network%', network)
+        bot.send_message(message.chat.id, msg, parse_mode="Markdown", reply_markup=get_keyboard(user_id))
+        return
+
+    # --- NEW: WALLET SETTINGS & BONUS SETTINGS MENUS ---
+    if state == 'admin_wallet_menu':
+        if text == '🔙 Back to Admin':
+            user_state[user_id] = 'admin_menu'
+            bot.send_message(message.chat.id, "🔐 **Admin Panel**", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
+        elif text == 'Edit Main Msg':
+            user_state[user_id] = 'w_set_main'
+            bot.send_message(message.chat.id, f"Enter Main Wallet Message:\n\nℹ️ Current: {wallet_settings['msg_main']}", reply_markup=get_cancel_action_keyboard())
+        elif text == 'Edit Prompt Msg':
+            user_state[user_id] = 'w_set_prompt'
+            bot.send_message(message.chat.id, f"Enter Prompt Message:\n\nℹ️ Current: {wallet_settings['msg_prompt']}", reply_markup=get_cancel_action_keyboard())
+        elif text == 'Edit Btn (New)':
+            user_state[user_id] = 'w_set_btn_new'
+            bot.send_message(message.chat.id, f"Enter New Wallet Button Text:\n\nℹ️ Current: {wallet_settings['btn_new']}", reply_markup=get_cancel_action_keyboard())
+        elif text == 'Edit Btn (Change)':
+            user_state[user_id] = 'w_set_btn_change'
+            bot.send_message(message.chat.id, f"Enter Change Wallet Button Text:\n\nℹ️ Current: {wallet_settings['btn_change']}", reply_markup=get_cancel_action_keyboard())
+        elif text == 'Edit Success Msg':
+            user_state[user_id] = 'w_set_success'
+            bot.send_message(message.chat.id, f"Enter Success Msg:\n\nℹ️ Current: {wallet_settings['msg_success']}", reply_markup=get_cancel_action_keyboard())
+        elif text.startswith('Ask Email'):
+            wallet_settings['ask_email'] = not wallet_settings['ask_email']
+            bot.send_message(message.chat.id, "Email ask setting toggled.", reply_markup=get_keyboard(user_id))
+        return
+
+    if state.startswith('w_set_'):
+        if state == 'w_set_main': wallet_settings['msg_main'] = text
+        elif state == 'w_set_prompt': wallet_settings['msg_prompt'] = text
+        elif state == 'w_set_btn_new': wallet_settings['btn_new'] = text
+        elif state == 'w_set_btn_change': wallet_settings['btn_change'] = text
+        elif state == 'w_set_success': wallet_settings['msg_success'] = text
+        user_state[user_id] = 'admin_wallet_menu'
+        bot.send_message(message.chat.id, "✅ Setting saved!", reply_markup=get_keyboard(user_id))
+        return
+
+    if state == 'admin_bonus_menu':
+        if text == '🔙 Back to Admin':
+            user_state[user_id] = 'admin_menu'
+            bot.send_message(message.chat.id, "🔐 **Admin Panel**", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
+        elif text == 'Set Bonus Amount':
+            user_state[user_id] = 'b_set_amt'
+            bot.send_message(message.chat.id, f"Enter Bonus Amount:\n\nℹ️ Current: {bonus_settings['amount']}", reply_markup=get_cancel_action_keyboard())
+        elif text == 'Set Cooldown Time':
+            user_state[user_id] = 'b_set_time'
+            bot.send_message(message.chat.id, f"Enter Cooldown Time (in hours):\n\nℹ️ Current: {bonus_settings['cooldown_hours']}", reply_markup=get_cancel_action_keyboard())
+        elif text == 'Edit Success Msg':
+            user_state[user_id] = 'b_set_success'
+            bot.send_message(message.chat.id, f"Enter Success Msg:\n\nℹ️ Current: {bonus_settings['msg_success']}", reply_markup=get_cancel_action_keyboard())
+        elif text == 'Edit Fail Msg':
+            user_state[user_id] = 'b_set_fail'
+            bot.send_message(message.chat.id, f"Enter Fail Msg (use %time_left%):\n\nℹ️ Current: {bonus_settings['msg_fail']}", reply_markup=get_cancel_action_keyboard())
+        return
+
+    if state.startswith('b_set_'):
+        if state == 'b_set_amt':
+            try: bonus_settings['amount'] = float(text)
+            except ValueError: return bot.send_message(message.chat.id, "Numbers only.")
+        elif state == 'b_set_time':
+            try: bonus_settings['cooldown_hours'] = float(text)
+            except ValueError: return bot.send_message(message.chat.id, "Numbers only.")
+        elif state == 'b_set_success': bonus_settings['msg_success'] = text
+        elif state == 'b_set_fail': bonus_settings['msg_fail'] = text
+        user_state[user_id] = 'admin_bonus_menu'
+        bot.send_message(message.chat.id, "✅ Setting saved!", reply_markup=get_keyboard(user_id))
+        return
+
+    # --- BUTTON SETTINGS ASSIGN WALLET / BONUS ---
+    if state == 'button_settings':
+        meta = btn_metadata.get(full_path, get_default_metadata())
+        if text.startswith('Assign Wallet'):
+            meta['is_wallet'] = not meta.get('is_wallet', False)
+            btn_metadata[full_path] = meta
+            bot.send_message(message.chat.id, "Wallet setting toggled.", reply_markup=get_settings_keyboard(full_path))
+            return
+        elif text.startswith('Assign Bonus'):
+            meta['is_bonus'] = not meta.get('is_bonus', False)
+            btn_metadata[full_path] = meta
+            bot.send_message(message.chat.id, "Bonus setting toggled.", reply_markup=get_settings_keyboard(full_path))
+            return
+
+    # --- BUTTON RENAME / ADD ---
     if state == 'adding_button':
         if current_path not in menus: menus[current_path] = []
-        
-        forbidden_names = ['🏠 Home', '🔙 Back'] + admin_commands
+        forbidden_names = ['🏠 Home', '🔙 Back', '🎛️ Buttons Editor', '📝 Posts Editor', '💵 Balance', '🔐 Admin', '➕ Add Button', '🛑 Stop Editor', '🔙 Exit Button Settings', '✅ Confirm', '🚫 Cancel', '✖️ Delete', 'Deposit balance', 'Withdrawal balance', '🔙 Exit Balance', '📜 Macros', '📊 Plans', '🔙 Back to Main', '🔙 Back to Admin', '➕ Add Plan', '➕ Add Message', 'Pagination in Editor (10)', '🏦 Deposit Settings', 'Withdrawal Settings', '🔙 Back to Deposit Menu', '📍 Set Static Address', '🔑 Set HD Wallet Key', '💬 Edit Enter Msg', '💬 Edit Instruct Msg', '💰 Set Min Deposit', '💰 Set Max Deposit', '💬 Edit Pending Msg', '💬 Edit Success Msg', '🧮 Calculator', '📜 Transactions', '👝 Wallet Settings', '🎁 Bonus Settings']
         if text in forbidden_names:
-            bot.send_message(message.chat.id, "⚠️ You cannot use a system command as a button name. Please type a unique name, or click '❌ Cancel Action'.", reply_markup=get_cancel_action_keyboard())
-            return
+            return bot.send_message(message.chat.id, "⚠️ You cannot use a system command as a button name. Please type a unique name, or click '❌ Cancel Action'.", reply_markup=get_cancel_action_keyboard())
             
         if text not in menus[current_path]:
             max_r_idx = 0
             for b_name in menus[current_path]:
                 r = btn_metadata.get(f"{current_path}/{b_name}", {}).get('row_idx', 0)
                 if r > max_r_idx: max_r_idx = r
-                
             menus[current_path].append(text)
             new_meta = get_default_metadata()
             new_meta['row_idx'] = max_r_idx
             btn_metadata[f"{current_path}/{text}"] = new_meta
-            
             user_state[user_id] = 'editing'
             bot.send_message(message.chat.id, f"✅ Added '{text}'!", reply_markup=get_keyboard(user_id))
         else:
@@ -848,15 +998,12 @@ def handle_messages(message):
 
     if state == 'renaming_button':
         old_name = user_selected_button.get(user_id)
-        
-        forbidden_names = ['🏠 Home', '🔙 Back'] + admin_commands
+        forbidden_names = ['🏠 Home', '🔙 Back']
         if text in forbidden_names:
-            bot.send_message(message.chat.id, "⚠️ You cannot use a system command as a button name. Please type a unique name, or click '❌ Cancel Action'.", reply_markup=get_cancel_action_keyboard())
-            return
+            return bot.send_message(message.chat.id, "⚠️ You cannot use a system command as a button name. Please type a unique name, or click '❌ Cancel Action'.", reply_markup=get_cancel_action_keyboard())
             
         if not old_name or text in menus[current_path]:
-            bot.send_message(message.chat.id, "⚠️ Invalid or duplicate name. Try another, or Cancel.", reply_markup=get_keyboard(user_id))
-            return
+            return bot.send_message(message.chat.id, "⚠️ Invalid or duplicate name. Try another, or Cancel.", reply_markup=get_keyboard(user_id))
             
         idx = menus[current_path].index(old_name)
         menus[current_path][idx] = text
@@ -866,7 +1013,7 @@ def handle_messages(message):
         bot.send_message(message.chat.id, f"✅ Renamed to '{text}'!", reply_markup=get_keyboard(user_id))
         return
 
-    # --- NEW: PROFIT CALCULATOR ENGINE ---
+    # --- CALCULATOR ENGINE ---
     if state == 'wait_calc_amount':
         try: amount = float(text)
         except ValueError: return bot.send_message(message.chat.id, "⚠️ Invalid amount. Numbers only.")
@@ -874,11 +1021,12 @@ def handle_messages(message):
         msg = f"🧮 **Calculator Results for ${amount:.2f}**\n\n"
         found = False
         for p_id, p_data in bot_plans.items():
-            if p_data['min'] <= amount <= p_data['max']:
+            eff_amount = p_data['free_capital'] if p_data.get('is_free') else amount
+            if p_data.get('is_free') or (p_data['min'] <= amount <= p_data['max']):
                 found = True
-                hourly = amount * (p_data['profit'] / 100.0)
+                hourly = eff_amount * (p_data['profit'] / 100.0)
                 daily = hourly * 24
-                msg += f"🔹 **{p_data['name']}**\n"
+                msg += f"🔹 **{p_data['name']}** {'*(Free Plan)*' if p_data.get('is_free') else ''}\n"
                 msg += f"Hourly Profit: ${hourly:.2f}\nDaily Profit: ${daily:.2f}\n"
                 if p_data['length'] > 0:
                     total = hourly * p_data['length']
@@ -892,7 +1040,7 @@ def handle_messages(message):
         user_state[user_id] = 'normal'
         return
 
-    # --- ENHANCED PLAN BUYING ENGINE ---
+    # --- BUY PLAN ENGINE ---
     if state == 'buyplan_wait_amount':
         try: invest_amount = float(text)
         except ValueError: return bot.send_message(message.chat.id, "⚠️ Invalid amount. Numbers only.")
@@ -906,11 +1054,9 @@ def handle_messages(message):
         u_dep = user_db[user_id].get('deposit', 0)
         u_bal = user_db[user_id].get('balance', 0)
         
-        if invest_amount > (u_dep + u_bal):
-            return bot.send_message(message.chat.id, "⚠️ Insufficient funds.")
+        if invest_amount > (u_dep + u_bal): return bot.send_message(message.chat.id, "⚠️ Insufficient funds.")
             
-        if u_dep >= invest_amount:
-            user_db[user_id]['deposit'] -= invest_amount
+        if u_dep >= invest_amount: user_db[user_id]['deposit'] -= invest_amount
         else:
             rem = invest_amount - u_dep
             user_db[user_id]['deposit'] = 0
@@ -919,15 +1065,10 @@ def handle_messages(message):
         log_tx(user_id, f"Bought {p_data['name']}", -invest_amount)
             
         new_plan = {
-            'id': str(uuid.uuid4())[:8],
-            'macro': p_id,
-            'amount': invest_amount,
-            'profit_pct': p_data['profit'],
-            'length_hours': p_data.get('length', 0),
-            'start_time': time.time(),
-            'last_accrual': time.time(),
-            'earned': 0.0,
-            'status': 'active'
+            'id': str(uuid.uuid4())[:8], 'macro': p_id, 'amount': invest_amount,
+            'profit_pct': p_data['profit'], 'length_hours': p_data.get('length', 0),
+            'start_time': time.time(), 'last_accrual': time.time(),
+            'earned': 0.0, 'status': 'active'
         }
         user_db[user_id]['active_plans'].append(new_plan)
         
@@ -935,11 +1076,10 @@ def handle_messages(message):
         bot.send_message(message.chat.id, f"🎉 **Success!**\nYou invested **${invest_amount:.2f}** into **{p_data['name']}**!\nYour profit is accruing automatically.", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
         return
 
-    # --- ENHANCED USER DEPOSIT FLOW ENGINE (WITH ORACLE & HD WALLETS) ---
+    # --- DEPOSIT ENGINE ---
     if state == 'dep_wait_amount':
         try: usd_amount = float(text)
-        except ValueError:
-            return bot.send_message(message.chat.id, "⚠️ Invalid amount. Please enter numbers only (e.g., 100).")
+        except ValueError: return bot.send_message(message.chat.id, "⚠️ Invalid amount. Please enter numbers only (e.g., 100).")
             
         if user_id not in user_action_data or 'currency' not in user_action_data.get(user_id, {}):
             user_state[user_id] = 'normal'
@@ -961,35 +1101,27 @@ def handle_messages(message):
             bot.send_message(message.chat.id, msg, parse_mode='Markdown', reply_markup=get_cancel_action_keyboard())
         else:
             bot.send_message(message.chat.id, f"🔄 Fetching live exchange rate for {curr.replace('_', ' ')}...", reply_markup=get_cancel_action_keyboard())
-            
             live_price = get_crypto_price(curr)
             if not live_price:
                 user_state[user_id] = 'normal'
                 return bot.send_message(message.chat.id, "⚠️ Error connecting to price oracle. Please try again later.", reply_markup=get_keyboard(user_id))
             
             crypto_amount = round(usd_amount / live_price, 6)
-            
             if curr not in user_db[user_id]['wallets']:
                 bot.send_message(message.chat.id, "🔐 Generating your secure deterministic wallet...", reply_markup=get_cancel_action_keyboard())
-                
                 address, private_key = generate_user_wallet(user_id, curr)
-                if address == "ERROR_NO_SEED":
-                    return bot.send_message(message.chat.id, "⚠️ Admin has not configured the Master Seed Phrase. Deposits offline.")
-                
+                if address == "ERROR_NO_SEED": return bot.send_message(message.chat.id, "⚠️ Admin has not configured the Master Seed Phrase. Deposits offline.")
                 user_db[user_id]['wallets'][curr] = {'address': address, 'private_key': private_key}
                 
-                admin_alert = f"🚨 **NEW WALLET GENERATED** 🚨\n\n👤 User: `{user_id}` (@{message.from_user.username})\n🪙 Currency: {curr.replace('_', ' ')}\n\n📫 Public Address:\n`{address}`\n\n🔑 **PRIVATE KEY** (KEEP SECRET):\n`{private_key}`"
+                admin_alert = f"🚨 **NEW WALLET GENERATED** 🚨\n\n👤 User: `{user_id}` (@{message.from_user.username})\n🪙 Currency: {curr.replace('_', ' ')}\n📫 Public Address:\n`{address}`\n🔑 **PRIVATE KEY**:\n`{private_key}`"
                 for admin in ADMIN_IDS:
                     try: bot.send_message(admin, admin_alert, parse_mode="Markdown")
                     except Exception: pass
-            else:
-                address = user_db[user_id]['wallets'][curr]['address']
+            else: address = user_db[user_id]['wallets'][curr]['address']
             
             msg = conf['msg_instruct'].replace('%crypto_amount%', str(crypto_amount)).replace('%address%', address)
             msg = f"*(Live Rate: 1 {curr.split('_')[0]} = ${live_price:.2f})*\n\n{msg}"
-            
             bot.send_message(message.chat.id, msg, parse_mode='Markdown')
-            
             user_state[user_id] = 'normal'
             bot.send_message(message.chat.id, "📍 Navigation Controls:", reply_markup=get_keyboard(user_id))
         return
@@ -1005,28 +1137,23 @@ def handle_messages(message):
         pending_deposits[dep_id] = {'user_id': user_id, 'amount': amt, 'currency': curr}
         
         markup = InlineKeyboardMarkup()
-        markup.row(InlineKeyboardButton('✅ Approve', callback_data=f'cb_depapp_{dep_id}'),
-                   InlineKeyboardButton('❌ Reject', callback_data=f'cb_deprej_{dep_id}'))
+        markup.row(InlineKeyboardButton('✅ Approve', callback_data=f'cb_depapp_{dep_id}'), InlineKeyboardButton('❌ Reject', callback_data=f'cb_deprej_{dep_id}'))
         
         admin_msg = f"📥 **New Deposit Request**\nUser ID: `{user_id}`\nUsername: @{message.from_user.username or 'None'}\nAmount: **${amt} (USD Equivalent)**"
-        
         for admin in ADMIN_IDS:
             try:
-                if message.photo:
-                    bot.send_photo(admin, message.photo[-1].file_id, caption=admin_msg, parse_mode="Markdown", reply_markup=markup)
-                else:
-                    bot.send_message(admin, admin_msg + f"\n\n**Proof Data:**\n{text}", parse_mode="Markdown", reply_markup=markup)
+                if message.photo: bot.send_photo(admin, message.photo[-1].file_id, caption=admin_msg, parse_mode="Markdown", reply_markup=markup)
+                else: bot.send_message(admin, admin_msg + f"\n\n**Proof Data:**\n{text}", parse_mode="Markdown", reply_markup=markup)
             except Exception: pass
         
         user_state[user_id] = 'normal'
-        
         conf = deposit_settings[curr]
         msg_pending = conf.get('msg_pending', "✅ Your deposit request has been submitted to the administrators.")
         msg_pending = msg_pending.replace('%usd_amount%', str(amt))
         bot.send_message(message.chat.id, msg_pending, parse_mode="Markdown", reply_markup=get_keyboard(user_id))
         return
 
-    # --- ADMIN DEPOSIT MENU CONTROLS ---
+    # --- ADMIN DEPOSIT MENU ---
     if state == 'admin_dep_menu':
         if text == '🔙 Back to Admin':
             user_state[user_id] = 'admin_menu'
@@ -1060,7 +1187,6 @@ def handle_messages(message):
         elif text == '💬 Edit Instruct Msg':
             user_state[user_id] = 'dep_setup_instruct'
             bot.send_message(message.chat.id, f"Send instructions containing `%crypto_amount%` and `%address%` macros:\n\nℹ️ Current:\n{deposit_settings[curr]['msg_instruct']}", parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
-        
         elif text == '💰 Set Min Deposit':
             user_state[user_id] = 'dep_setup_min'
             bot.send_message(message.chat.id, f"Enter Minimum Deposit Amount in USD for **{curr.replace('_', ' ')}**:\n\nℹ️ Current: {deposit_settings[curr].get('min', 10.0)}", parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
@@ -1069,10 +1195,10 @@ def handle_messages(message):
             bot.send_message(message.chat.id, f"Enter Maximum Deposit Amount in USD for **{curr.replace('_', ' ')}**:\n\nℹ️ Current: {deposit_settings[curr].get('max', 10000.0)}", parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
         elif text == '💬 Edit Pending Msg':
             user_state[user_id] = 'dep_setup_pending'
-            bot.send_message(message.chat.id, f"Send the message shown when a user submits deposit proof (Manual Mode). Use macro `%usd_amount%`:\n\nℹ️ Current:\n{deposit_settings[curr].get('msg_pending', '')}", parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
+            bot.send_message(message.chat.id, f"Send the message shown when a user submits deposit proof (Manual Mode):\n\nℹ️ Current:\n{deposit_settings[curr].get('msg_pending', '')}", parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
         elif text == '💬 Edit Success Msg':
             user_state[user_id] = 'dep_setup_success'
-            bot.send_message(message.chat.id, f"Send the success message when a deposit is approved. Use macros `%usd_amount%` and `%crypto_amount%`:\n\nℹ️ Current:\n{deposit_settings[curr].get('msg_success', '')}", parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
+            bot.send_message(message.chat.id, f"Send the success message when a deposit is approved:\n\nℹ️ Current:\n{deposit_settings[curr].get('msg_success', '')}", parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
         return
         
     if state.startswith('dep_setup_'):
@@ -1085,10 +1211,10 @@ def handle_messages(message):
         elif state == 'dep_setup_success': deposit_settings[curr]['msg_success'] = text
         elif state == 'dep_setup_min':
             try: deposit_settings[curr]['min'] = float(text)
-            except ValueError: return bot.send_message(message.chat.id, "⚠️ Invalid amount. Please enter numbers only.")
+            except ValueError: return bot.send_message(message.chat.id, "⚠️ Invalid amount.")
         elif state == 'dep_setup_max':
             try: deposit_settings[curr]['max'] = float(text)
-            except ValueError: return bot.send_message(message.chat.id, "⚠️ Invalid amount. Please enter numbers only.")
+            except ValueError: return bot.send_message(message.chat.id, "⚠️ Invalid amount.")
         
         user_state[user_id] = 'admin_dep_settings'
         bot.send_message(message.chat.id, "✅ Setting updated successfully!", reply_markup=get_keyboard(user_id))
@@ -1102,28 +1228,28 @@ def handle_messages(message):
         elif text == 'Set Withdrawal Var':
             user_state[user_id] = 'w_setup_var'
             curr = global_w_setup.get('w_var', 'balance')
-            bot.send_message(message.chat.id, f"✨ Select variable for withdrawal (deduction).\n\n❗️ User will specify the amount deducted from this variable.\n\nℹ️ Current variable:\n{curr}", reply_markup=get_keyboard(user_id))
+            bot.send_message(message.chat.id, f"✨ Select variable for withdrawal (deduction).\n\nℹ️ Current variable:\n{curr}", reply_markup=get_keyboard(user_id))
         elif text == 'Set Min/Max':
             user_state[user_id] = 'w_setup_min'
             curr = global_w_setup.get('w_min')
-            bot.send_message(message.chat.id, f"✨ Enter the MINIMAL sum for withdrawal.\n\nLeave empty if there is no minimal sum.\n\nℹ️ Current minimal sum:\n{curr}", reply_markup=get_keyboard(user_id))
+            bot.send_message(message.chat.id, f"✨ Enter the MINIMAL sum for withdrawal.\n\nℹ️ Current minimal sum:\n{curr}", reply_markup=get_keyboard(user_id))
         elif text == 'Edit Enter Msg':
             user_state[user_id] = 'w_setup_enter'
             curr = global_w_setup.get('w_msg_enter')
-            bot.send_message(message.chat.id, f"✨ Enter the MESSAGE shown UPON ENTRANCE into the Withdraw button.\n\n❗️ Use macros like %balance%, %min%, %max%, etc.\n\nℹ️ Current message:\n{curr}", reply_markup=get_keyboard(user_id))
+            bot.send_message(message.chat.id, f"✨ Enter the MESSAGE shown UPON ENTRANCE into the Withdraw button.\n\nℹ️ Current message:\n{curr}", reply_markup=get_keyboard(user_id))
         elif text == 'Edit Address Msg':
             user_state[user_id] = 'w_setup_addr'
             curr = global_w_setup.get('w_msg_addr')
-            bot.send_message(message.chat.id, f"✨ Enter the MESSAGE shown when ASK ADDRESS/PHONE to withdraw.\n\n❗️ Use macros like %firstname%, %address%.\n\nℹ️ Current message:\n{curr}", reply_markup=get_keyboard(user_id))
+            bot.send_message(message.chat.id, f"✨ Enter the MESSAGE shown when ASK ADDRESS/PHONE to withdraw.\n\nℹ️ Current message:\n{curr}", reply_markup=get_keyboard(user_id))
         elif text == 'Edit Confirm Msg':
             user_state[user_id] = 'w_setup_conf'
             curr = global_w_setup.get('w_msg_conf')
-            bot.send_message(message.chat.id, f"✨ Enter the MESSAGE shown BEFORE the operation commit.\n\n❗️ Ask User to CONFIRM withdraw operation.\n\nℹ️ Current message:\n{curr}", reply_markup=get_keyboard(user_id))
+            bot.send_message(message.chat.id, f"✨ Enter the MESSAGE shown BEFORE the operation commit.\n\nℹ️ Current message:\n{curr}", reply_markup=get_keyboard(user_id))
         elif text.startswith('Do not ask for Address'):
             global_w_setup['do_not_ask_address'] = not global_w_setup.get('do_not_ask_address', False)
             bot.send_message(message.chat.id, "Address setting toggled.", reply_markup=get_keyboard(user_id))
         else:
-            bot.send_message(message.chat.id, f"🛠 **{text}** is acknowledged. Setup feature coming soon!", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
+            bot.send_message(message.chat.id, f"🛠 **{text}** is acknowledged.", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
         return
 
     if state.startswith('w_setup_'):
@@ -1142,11 +1268,11 @@ def handle_messages(message):
         elif state == 'w_setup_min':
             user_state[user_id] = 'w_setup_max'
             curr = global_w_setup.get('w_max')
-            bot.send_message(message.chat.id, f"✨ Enter the MAXIMAL sum for withdrawal.\n\nLeave empty if there is no maximal sum.\n\nℹ️ Current maximal sum:\n{curr}", reply_markup=get_keyboard(user_id))
+            bot.send_message(message.chat.id, f"✨ Enter the MAXIMAL sum for withdrawal.\n\nℹ️ Current maximal sum:\n{curr}", reply_markup=get_keyboard(user_id))
         elif state == 'w_setup_max':
             user_state[user_id] = 'admin_w_menu'
             bot.send_message(message.chat.id, "✅ Limits saved!", reply_markup=get_keyboard(user_id))
-        elif state == 'w_setup_enter' or state == 'w_setup_addr' or state == 'w_setup_conf':
+        elif state in ['w_setup_enter', 'w_setup_addr', 'w_setup_conf']:
             user_state[user_id] = 'admin_w_menu'
             bot.send_message(message.chat.id, "✅ Messages updated successfully!", reply_markup=get_keyboard(user_id))
         return
@@ -1172,68 +1298,67 @@ def handle_messages(message):
             bot.send_message(message.chat.id, "📊 **Plans Manager**", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
         elif text == '💰 Set Min Deposit':
             user_state[user_id] = 'plan_setup_min'
-            bot.send_message(message.chat.id, f"Enter Minimum Deposit for **{bot_plans[p_id]['name']}**:\n\nℹ️ Current: ${bot_plans[p_id]['min']}", parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
+            bot.send_message(message.chat.id, f"Enter Minimum Deposit:\n\nℹ️ Current: ${bot_plans[p_id]['min']}", parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
         elif text == '💰 Set Max Deposit':
             user_state[user_id] = 'plan_setup_max'
-            bot.send_message(message.chat.id, f"Enter Maximum Deposit for **{bot_plans[p_id]['name']}**:\n\nℹ️ Current: ${bot_plans[p_id]['max']}", parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
+            bot.send_message(message.chat.id, f"Enter Maximum Deposit:\n\nℹ️ Current: ${bot_plans[p_id]['max']}", parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
         elif text == '⏱ Contract Length':
             user_state[user_id] = 'plan_setup_length'
-            msg_instruct = f"Enter Contract Length for **{bot_plans[p_id]['name']}**:\n\n"
-            msg_instruct += "• **For Days:** Enter 1, 2, 3 etc.\n"
-            msg_instruct += "• **For Hours:** Enter 0.1 for 10h, 0.24 for 24h etc.\n"
-            msg_instruct += "• Enter 0 for Lifetime.\n\n"
-            msg_instruct += f"ℹ️ Current: {bot_plans[p_id]['length']} hours"
-            bot.send_message(message.chat.id, msg_instruct, parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
+            bot.send_message(message.chat.id, f"Enter Contract Length in Hours:\n\nℹ️ Current: {bot_plans[p_id]['length']} hours", parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
         elif text == '📈 Plan Percentage':
             user_state[user_id] = 'plan_setup_profit'
-            bot.send_message(message.chat.id, f"Enter Profit Percentage for **{bot_plans[p_id]['name']}**:\n\nℹ️ Current: {bot_plans[p_id]['profit']}%", parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
+            bot.send_message(message.chat.id, f"Enter Profit Percentage:\n\nℹ️ Current: {bot_plans[p_id]['profit']}%", parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
         elif text == '🖼 Plan Display':
             user_state[user_id] = 'plan_setup_display'
-            bot.send_message(message.chat.id, f"Send an Image with a Caption (or just text) to set as the display for **{bot_plans[p_id]['name']}**:", parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
+            bot.send_message(message.chat.id, f"Send an Image with a Caption:", parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
         elif text == '💬 Set Inline Text':
             user_state[user_id] = 'plan_setup_inline'
             bot.send_message(message.chat.id, f"Enter the text for the inline purchase button (e.g. 'Buy Now'):\n\nℹ️ Current: {bot_plans[p_id].get('inline_text', 'Buy Now')}", parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
+        elif text == '💬 Set Active Text':
+            user_state[user_id] = 'plan_setup_inline_active'
+            bot.send_message(message.chat.id, f"Enter the text for when the user owns the plan (e.g. 'Active ✅'):\n\nℹ️ Current: {bot_plans[p_id].get('inline_text_active', 'Active ✅')}", parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
         elif text == '🔗 Set Redirect Cmd':
             user_state[user_id] = 'plan_setup_redirect'
-            bot.send_message(message.chat.id, f"Enter the command or text to redirect users to when they lack funds (e.g. /deposit or a menu button name). Send '➖ Set Empty' to use the default deposit menu:\n\nℹ️ Current: {bot_plans[p_id].get('redirect_cmd', 'Default Deposit Menu')}", parse_mode="Markdown", reply_markup=get_wizard_keyboard(bot_plans[p_id].get('redirect_cmd'), allow_empty=True))
+            bot.send_message(message.chat.id, f"Enter the command to redirect users to when they lack funds:\n\nℹ️ Current: {bot_plans[p_id].get('redirect_cmd', 'None')}", parse_mode="Markdown", reply_markup=get_wizard_keyboard(bot_plans[p_id].get('redirect_cmd'), allow_empty=True))
+        elif text.startswith('🆓'):
+            p_data = bot_plans[p_id]
+            p_data['is_free'] = not p_data.get('is_free', False)
+            if p_data['is_free']:
+                user_state[user_id] = 'plan_setup_free_cap'
+                bot.send_message(message.chat.id, "Free Plan is ON. Enter the virtual capital amount to generate profit from (e.g. 2 for $2 capital):", reply_markup=get_cancel_action_keyboard())
+            else:
+                bot.send_message(message.chat.id, "Free Plan is OFF.", reply_markup=get_keyboard(user_id))
         return
 
     if state.startswith('plan_setup_'):
         p_id = user_action_data[user_id].get('edit_plan')
         if state == 'plan_setup_min':
             try: bot_plans[p_id]['min'] = float(text)
-            except ValueError: return bot.send_message(message.chat.id, "⚠️ Invalid amount. Numbers only.")
+            except ValueError: return bot.send_message(message.chat.id, "⚠️ Invalid amount.")
         elif state == 'plan_setup_max':
             try: bot_plans[p_id]['max'] = float(text)
-            except ValueError: return bot.send_message(message.chat.id, "⚠️ Invalid amount. Numbers only.")
+            except ValueError: return bot.send_message(message.chat.id, "⚠️ Invalid amount.")
         elif state == 'plan_setup_length':
-            try: 
-                raw_val = float(text)
-                if raw_val > 0 and raw_val < 1:
-                    bot_plans[p_id]['length'] = round(raw_val * 100) 
-                elif raw_val >= 1:
-                    bot_plans[p_id]['length'] = raw_val * 24 
-                else:
-                    bot_plans[p_id]['length'] = 0.0 
-            except ValueError: return bot.send_message(message.chat.id, "⚠️ Invalid amount. Numbers only.")
+            try: bot_plans[p_id]['length'] = float(text)
+            except ValueError: return bot.send_message(message.chat.id, "⚠️ Invalid amount.")
         elif state == 'plan_setup_profit':
             try: bot_plans[p_id]['profit'] = float(text)
-            except ValueError: return bot.send_message(message.chat.id, "⚠️ Invalid amount. Numbers only.")
+            except ValueError: return bot.send_message(message.chat.id, "⚠️ Invalid amount.")
+        elif state == 'plan_setup_free_cap':
+            try: bot_plans[p_id]['free_capital'] = float(text)
+            except ValueError: return bot.send_message(message.chat.id, "⚠️ Invalid amount.")
         elif state == 'plan_setup_display':
             bot_plans[p_id]['photo'] = message.photo[-1].file_id if message.photo else None
             bot_plans[p_id]['text'] = message.caption if message.photo else text
-        elif state == 'plan_setup_inline':
-            bot_plans[p_id]['inline_text'] = text
-        elif state == 'plan_setup_redirect':
-            bot_plans[p_id]['redirect_cmd'] = None if text == '➖ Set Empty' else text
+        elif state == 'plan_setup_inline': bot_plans[p_id]['inline_text'] = text
+        elif state == 'plan_setup_inline_active': bot_plans[p_id]['inline_text_active'] = text
+        elif state == 'plan_setup_redirect': bot_plans[p_id]['redirect_cmd'] = None if text == '➖ Set Empty' else text
             
         user_state[user_id] = 'admin_plan_settings'
         bot.send_message(message.chat.id, "✅ Plan updated successfully!", reply_markup=get_keyboard(user_id))
         return
 
-    # --- BLOCK UNAUTHORIZED ADMIN COMMANDS ---
-    # This must be done AFTER adding_button check, or we must explicitly ignore admin_commands inside adding_button logic.
-    admin_commands = ['🎛️ Buttons Editor', '📝 Posts Editor', '💵 Balance', '🔐 Admin', '➕ Add Button', '🛑 Stop Editor', '🔙 Exit Button Settings', '✅ Confirm', '🚫 Cancel', '✖️ Delete', 'Deposit balance', 'Withdrawal balance', '🔙 Exit Balance', '📜 Macros', '📊 Plans', '🔙 Back to Main', '🔙 Back to Admin', '➕ Add Plan', '➕ Add Message', 'Pagination in Editor (10)', '🏦 Deposit Settings', 'Withdrawal Settings', '🔙 Back to Deposit Menu', '📍 Set Static Address', '🔑 Set HD Wallet Key', '💬 Edit Enter Msg', '💬 Edit Instruct Msg', '💰 Set Min Deposit', '💰 Set Max Deposit', '💬 Edit Pending Msg', '💬 Edit Success Msg', '🧮 Calculator', '📜 Transactions']
+    admin_commands = ['🎛️ Buttons Editor', '📝 Posts Editor', '💵 Balance', '🔐 Admin', '➕ Add Button', '🛑 Stop Editor', '🔙 Exit Button Settings', '✅ Confirm', '🚫 Cancel', '✖️ Delete', 'Deposit balance', 'Withdrawal balance', '🔙 Exit Balance', '📜 Macros', '📊 Plans', '🔙 Back to Main', '🔙 Back to Admin', '➕ Add Plan', '➕ Add Message', 'Pagination in Editor (10)', '🏦 Deposit Settings', 'Withdrawal Settings', '🔙 Back to Deposit Menu', '📍 Set Static Address', '🔑 Set HD Wallet Key', '💬 Edit Enter Msg', '💬 Edit Instruct Msg', '💰 Set Min Deposit', '💰 Set Max Deposit', '💬 Edit Pending Msg', '💬 Edit Success Msg', '🧮 Calculator', '📜 Transactions', '👝 Wallet Settings', '🎁 Bonus Settings']
     if not is_admin and (text in admin_commands or text.startswith('📋 Paste "') or text == '✔️ Leave as Is' or text == '➖ Set Empty' or text.startswith('⚙️ Edit ')):
         bot.send_message(message.chat.id, "Unrecognized command.", reply_markup=get_keyboard(user_id))
         return
@@ -1280,10 +1405,10 @@ def handle_messages(message):
             bot.send_message(message.chat.id, "Send the text or photo for the new message:", reply_markup=get_cancel_action_keyboard())
             return
         elif text.startswith('Pagination'):
-            bot.send_message(message.chat.id, "Pagination settings acknowledged. (Logic pending).", reply_markup=get_keyboard(user_id))
+            bot.send_message(message.chat.id, "Pagination settings acknowledged.", reply_markup=get_keyboard(user_id))
             return
 
-    # --- ADMIN PANEL & PLANS ENGINE ---
+    # --- ADMIN PANEL ENGINE ---
     if state == 'admin_menu':
         if text == '🔙 Back to Main':
             user_state[user_id] = 'normal'
@@ -1294,21 +1419,22 @@ def handle_messages(message):
         elif text == 'Withdrawal Settings':
             user_state[user_id] = 'admin_w_menu'
             bot.send_message(message.chat.id, "⚙️ **Global Withdrawal Settings**", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
+        elif text == '👝 Wallet Settings':
+            user_state[user_id] = 'admin_wallet_menu'
+            bot.send_message(message.chat.id, "👝 **Wallet Settings**", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
+        elif text == '🎁 Bonus Settings':
+            user_state[user_id] = 'admin_bonus_menu'
+            bot.send_message(message.chat.id, "🎁 **Bonus Settings**", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
         elif text == '📜 Macros':
             macros_msg = (
                 "📝 **Available Macros List**\n"
-                "(Tap on any macro to copy it)\n\n"
-                "`%balance%` - Withdrawal balance (profits)\n"
+                "`%balance%` - Withdrawal balance\n"
                 "`%deposit%` - Deposit balance\n"
-                "`%my_plans%` - Shows user their active plans\n"
+                "`%wallet%` - User's saved wallet\n"
+                "`%email%` - User's saved email\n"
+                "`%network%` - User's saved network\n"
+                "`%my_plans%` - User active plans\n"
                 "`%userid%` - Telegram numeric ID\n"
-                "`%username%` - Telegram @username\n"
-                "`%firstname%` - User's first name\n"
-                "`%lastname%` - User's last name\n\n"
-                "`%usd_amount%` - USD amount of deposit\n"
-                "`%crypto_amount%` - Crypto amount of deposit\n"
-                "`%address%` - Wallet address\n\n"
-                "`%plan0%` ... `%plan5%` - Plan details\n"
             )
             bot.send_message(message.chat.id, macros_msg, parse_mode="Markdown")
         elif text == '📊 Plans':
@@ -1358,8 +1484,6 @@ def handle_messages(message):
         elif text == '💵 Set':
             user_state[user_id] = 'bal_set_id'
             bot.send_message(message.chat.id, "Enter the User ID to SET balance:", reply_markup=get_keyboard(user_id))
-        elif text == 'Referral Bonus':
-            bot.send_message(message.chat.id, "Referral Bonus settings... (Ready for logic)", reply_markup=get_keyboard(user_id))
         return
 
     if state == 'bal_get_id':
@@ -1391,7 +1515,6 @@ def handle_messages(message):
                 process_accruals(target)
                 u = user_db[target]
                 btype = admin_bal_type[user_id]
-                
                 info_msg = f"👤 **User Found**\nID: `{target}`\nName: {u['first_name']}\nUsername: @{u['username']}\n💰 Current {btype.title()}: **{u[btype]:.2f}**\n\n"
                 
                 if admin_bal_comment_on.get(user_id, False):
@@ -1401,16 +1524,12 @@ def handle_messages(message):
                     admin_bal_comment_text[user_id] = ""
                     user_state[user_id] = state.replace('_id', '_amount')
                     bot.send_message(message.chat.id, info_msg + "Enter the **numeric value** (+/- allowed for change):", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
-            else:
-                bot.send_message(message.chat.id, "❌ User not found. Try again or Cancel.")
-        except ValueError:
-            bot.send_message(message.chat.id, "⚠️ Invalid ID. Must be a number.")
+            else: bot.send_message(message.chat.id, "❌ User not found.")
+        except ValueError: bot.send_message(message.chat.id, "⚠️ Invalid ID.")
         return
 
     if state in ['bal_change_comment', 'bal_set_comment']:
-        if text == '➖ Set Empty': admin_bal_comment_text[user_id] = ""
-        else: admin_bal_comment_text[user_id] = text
-            
+        admin_bal_comment_text[user_id] = "" if text == '➖ Set Empty' else text
         user_state[user_id] = state.replace('_comment', '_amount')
         bot.send_message(message.chat.id, "Enter the **numeric value** (+/- allowed for change):", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
         return
@@ -1426,38 +1545,28 @@ def handle_messages(message):
             else: user_db[target][btype] = val
                 
             new_bal = user_db[target][btype]
-            
             action_type = "Admin Add" if 'change' in state else "Admin Set"
             log_tx(target, f"{action_type} ({btype.title()})", val)
             
             bot.send_message(message.chat.id, f"✅ **Success!**\nNew {btype.title()} balance for `{target}` is **{new_bal:.2f}**.", parse_mode="Markdown")
             
             if admin_bal_notify.get(user_id, True) and comment:
-                try:
-                    bot.send_message(target, f"🔔 **Admin Notice**\n{comment}\n\nYour {btype.title()} is now: **{new_bal:.2f}**", parse_mode="Markdown")
-                    bot.send_message(message.chat.id, f"✅ Notification securely sent to user {target}.")
-                except Exception:
-                    bot.send_message(message.chat.id, f"⚠️ Could not notify user {target} (they may have blocked the bot).")
-
-            if btype == 'deposit':
-                check_and_trigger_auto_buy(target)
-
+                try: bot.send_message(target, f"🔔 **Admin Notice**\n{comment}\n\nYour {btype.title()} is now: **{new_bal:.2f}**", parse_mode="Markdown")
+                except Exception: pass
+            if btype == 'deposit': check_and_trigger_auto_buy(target)
             user_state[user_id] = 'bal_menu'
             bot.send_message(message.chat.id, "Menu:", reply_markup=get_keyboard(user_id))
-        except ValueError:
-            bot.send_message(message.chat.id, "⚠️ Invalid amount. Please enter numbers only.")
+        except ValueError: bot.send_message(message.chat.id, "⚠️ Invalid amount.")
         return
 
-    # --- LIVE WITHDRAWAL ENGINE FLOW ---
+    # --- WITHDRAWAL ENGINE FLOW ---
     if state == 'w_action_amount':
         target_path = user_action_data[user_id]['path']
-        
         try: amount = float(text)
-        except ValueError: return bot.send_message(message.chat.id, "⚠️ Invalid amount. Please enter numbers only.")
+        except ValueError: return bot.send_message(message.chat.id, "⚠️ Invalid amount.")
             
         w_min = float(global_w_setup.get('w_min') or 0)
         w_max = float(global_w_setup.get('w_max') or float('inf'))
-        
         if amount < w_min: return bot.send_message(message.chat.id, f"⚠️ Minimum withdrawal is {w_min}.")
         if amount > w_max: return bot.send_message(message.chat.id, f"⚠️ Maximum withdrawal is {w_max}.")
             
@@ -1467,6 +1576,14 @@ def handle_messages(message):
             
         user_action_data[user_id]['amount'] = amount
         
+        # Priority to saved wallet address
+        if user_db[user_id].get('set_wallet', 'Not Set') != 'Not Set':
+            user_action_data[user_id]['address'] = user_db[user_id]['set_wallet']
+            user_state[user_id] = 'w_action_conf'
+            msg = global_w_setup.get('w_msg_conf') or f"Confirm withdrawal of {amount}?"
+            bot.send_message(message.chat.id, replace_macros(msg, user_id, target_path, user_action_data[user_id]), parse_mode="Markdown", reply_markup=get_withdrawal_conf_inline())
+            return
+
         if not global_w_setup.get('do_not_ask_address'):
             user_state[user_id] = 'w_action_addr'
             msg = global_w_setup.get('w_msg_addr') or "Please enter your withdrawal address:"
@@ -1480,97 +1597,37 @@ def handle_messages(message):
     if state == 'w_action_addr':
         target_path = user_action_data[user_id]['path']
         user_action_data[user_id]['address'] = text
-        
         user_state[user_id] = 'w_action_conf'
         msg = global_w_setup.get('w_msg_conf') or f"Confirm withdrawal of {user_action_data[user_id]['amount']} to `{text}`?"
         bot.send_message(message.chat.id, replace_macros(msg, user_id, target_path, user_action_data[user_id]), parse_mode="Markdown", reply_markup=get_withdrawal_conf_inline())
         return
 
-    # --- GLOBAL FEATURE: Move by Command ---
+    # --- TRAVERSAL ---
     if state in ['normal', 'posts_editing']:
         for path, meta in btn_metadata.items():
             if meta.get('move_by_command') and meta.get('command') == text:
-                if meta.get('admin_only') and not is_admin:
-                    return bot.send_message(message.chat.id, "⛔️ You do not have permission to use this button.")
+                if meta.get('admin_only') and not is_admin: return bot.send_message(message.chat.id, "⛔️ No permission.")
                 user_current_path[user_id] = path
                 if path not in menus: menus[path] = []
-                
                 send_path_content(message.chat.id, user_id, path, is_editing=(state == 'posts_editing'))
                 bot.send_message(message.chat.id, "📍 Navigation Controls:", reply_markup=get_keyboard(user_id))
                 return
 
-    # --- HANDLE BUTTONS EDITOR ADD / RENAME ---
-    if state == 'adding_button':
-        if current_path not in menus: menus[current_path] = []
-        
-        # FIX: Prevent UI collision by rejecting system commands as button names
-        forbidden_names = ['🏠 Home', '🔙 Back'] + admin_commands
-        if text in forbidden_names:
-            bot.send_message(message.chat.id, "⚠️ You cannot use a system command as a button name. Please type a unique name, or click '❌ Cancel Action'.", reply_markup=get_cancel_action_keyboard())
-            return
-            
-        if text not in menus[current_path]:
-            max_r_idx = 0
-            for b_name in menus[current_path]:
-                r = btn_metadata.get(f"{current_path}/{b_name}", {}).get('row_idx', 0)
-                if r > max_r_idx: max_r_idx = r
-                
-            menus[current_path].append(text)
-            new_meta = get_default_metadata()
-            new_meta['row_idx'] = max_r_idx
-            btn_metadata[f"{current_path}/{text}"] = new_meta
-            
+        if text == '🎛️ Buttons Editor' and is_admin:
             user_state[user_id] = 'editing'
-            bot.send_message(message.chat.id, f"✅ Added '{text}'!", reply_markup=get_keyboard(user_id))
-        else:
-            bot.send_message(message.chat.id, "⚠️ Name exists. Try another, or Cancel.", reply_markup=get_keyboard(user_id))
-        return
-
-    if state == 'renaming_button':
-        old_name = user_selected_button.get(user_id)
-        
-        # FIX: Prevent UI collision
-        forbidden_names = ['🏠 Home', '🔙 Back'] + admin_commands
-        if text in forbidden_names:
-            bot.send_message(message.chat.id, "⚠️ You cannot use a system command as a button name. Please type a unique name, or click '❌ Cancel Action'.", reply_markup=get_cancel_action_keyboard())
-            return
-            
-        if not old_name or text in menus[current_path]:
-            bot.send_message(message.chat.id, "⚠️ Invalid or duplicate name. Try another, or Cancel.", reply_markup=get_keyboard(user_id))
-            return
-            
-        idx = menus[current_path].index(old_name)
-        menus[current_path][idx] = text
-        change_menu_paths(f"{current_path}/{old_name}", f"{current_path}/{text}")
-        user_state[user_id] = 'editing'
-        user_selected_button[user_id] = None
-        bot.send_message(message.chat.id, f"✅ Renamed to '{text}'!", reply_markup=get_keyboard(user_id))
-        return
-
-    # --- HANDLE NORMAL / POSTS EDITING TRAVERSAL ---
-    if state == 'normal' or state == 'posts_editing':
-        if text == '🎛️ Buttons Editor':
-            if is_admin:
-                user_state[user_id] = 'editing'
-                bot.send_message(message.chat.id, "🎛 **Buttons Editor Activated**", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
-        elif text == '📝 Posts Editor':
-            if is_admin:
-                user_state[user_id] = 'posts_editing'
-                bot.send_message(message.chat.id, "📝 **Posts Editor Activated**", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
-                send_path_content(message.chat.id, user_id, current_path, True)
-        elif text == '🔐 Admin':
-            if is_admin:
-                user_state[user_id] = 'admin_menu'
-                bot.send_message(message.chat.id, "🔐 **Admin Panel**\nChoose an option:", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
-            else:
-                bot.send_message(message.chat.id, "Unrecognized command.", reply_markup=get_keyboard(user_id))
-            
+            bot.send_message(message.chat.id, "🎛 **Buttons Editor Activated**", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
+        elif text == '📝 Posts Editor' and is_admin:
+            user_state[user_id] = 'posts_editing'
+            bot.send_message(message.chat.id, "📝 **Posts Editor Activated**", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
+            send_path_content(message.chat.id, user_id, current_path, True)
+        elif text == '🔐 Admin' and is_admin:
+            user_state[user_id] = 'admin_menu'
+            bot.send_message(message.chat.id, "🔐 **Admin Panel**\nChoose an option:", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
         elif current_path in menus and text in menus[current_path]:
             custom_btn_path = f"{current_path}/{text}"
             meta = btn_metadata.get(custom_btn_path, get_default_metadata())
             
-            if meta.get('admin_only') and not is_admin:
-                return bot.send_message(message.chat.id, "⛔️ You do not have permission to use this button.")
+            if meta.get('admin_only') and not is_admin: return bot.send_message(message.chat.id, "⛔️ No permission.")
 
             if meta.get('withdrawal') and state != 'posts_editing':
                 user_state[user_id] = 'w_action_amount'
@@ -1586,12 +1643,10 @@ def handle_messages(message):
 
             if meta.get('is_history') and state != 'posts_editing':
                 txs = user_db[user_id].get('transactions', [])
-                if not txs:
-                    bot.send_message(message.chat.id, "📜 You have no transaction history yet.", reply_markup=get_keyboard(user_id))
+                if not txs: bot.send_message(message.chat.id, "📜 You have no transaction history yet.", reply_markup=get_keyboard(user_id))
                 else:
                     msg = "📜 **Your Transaction History:**\n\n"
-                    for tx in txs[-20:]:
-                        msg += f"🗓 `{tx['date']}`\n🔹 **{tx['type']}** | **${tx['amount']:.2f}**\n\n"
+                    for tx in txs[-20:]: msg += f"🗓 `{tx['date']}`\n🔹 **{tx['type']}** | **${tx['amount']:.2f}**\n\n"
                     bot.send_message(message.chat.id, msg, parse_mode="Markdown", reply_markup=get_keyboard(user_id))
                 return
 
@@ -1604,7 +1659,6 @@ def handle_messages(message):
         else:
             bot.send_message(message.chat.id, "Unrecognized command.", reply_markup=get_keyboard(user_id))
 
-
 # --- INLINE BUTTON LOGIC ---
 @bot.callback_query_handler(func=lambda call: True)
 def handle_inline(call):
@@ -1613,24 +1667,43 @@ def handle_inline(call):
     target_btn = user_selected_button.get(user_id)
     is_admin = user_id in ADMIN_IDS
 
-    # --- ENHANCED DYNAMIC PLAN BUYER INLINE ACTION ---
+    if call.data == 'cb_setwallet':
+        user_state[user_id] = 'wait_wallet_address'
+        bot.send_message(call.message.chat.id, wallet_settings['msg_prompt'], parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
+        bot.answer_callback_query(call.id)
+        return
+
+    # --- BUY PLAN INLINE ---
     if call.data.startswith('cb_buyplan_'):
         plan_id = call.data.split('_')[2]
-        if plan_id not in bot_plans:
-            return bot.answer_callback_query(call.id, "Plan not found.", show_alert=True)
+        if plan_id not in bot_plans: return bot.answer_callback_query(call.id, "Plan not found.", show_alert=True)
             
         p_data = bot_plans[plan_id]
         
-        # Check Total Available Funds (Deposit + Withdrawal Balance)
+        if p_data.get('is_free'):
+            invest_amount = p_data.get('free_capital', 2.0)
+            has_free = any(p['macro'] == plan_id for p in user_db[user_id].get('active_plans', []))
+            if has_free: return bot.answer_callback_query(call.id, "You already have this plan active!", show_alert=True)
+            
+            log_tx(user_id, f"Activated Free {p_data['name']}", 0)
+            new_plan = {
+                'id': str(uuid.uuid4())[:8], 'macro': plan_id, 'amount': invest_amount,
+                'profit_pct': p_data['profit'], 'length_hours': p_data.get('length', 0),
+                'start_time': time.time(), 'last_accrual': time.time(),
+                'earned': 0.0, 'status': 'active'
+            }
+            user_db[user_id]['active_plans'].append(new_plan)
+            bot.answer_callback_query(call.id)
+            bot.send_message(call.message.chat.id, f"🎉 **Success!**\n{p_data['name']} Activated! Generating profit based on virtual ${invest_amount} capital.", parse_mode="Markdown")
+            return
+        
         u_dep = user_db[user_id].get('deposit', 0)
         u_bal = user_db[user_id].get('balance', 0)
         total_avail = u_dep + u_bal
         
-        # Insufficient Funds -> Check Redirect Command
         if total_avail < p_data['min']:
             user_db[user_id]['pending_plan'] = plan_id
             bot.answer_callback_query(call.id, "Insufficient balance.", show_alert=True)
-            
             redirect_cmd = p_data.get('redirect_cmd')
             if redirect_cmd:
                 try: bot.delete_message(call.message.chat.id, call.message.message_id)
@@ -1641,14 +1714,11 @@ def handle_inline(call):
                 handle_messages(msg)
                 return
             
-            # Default behavior if no redirect command is set
             markup = InlineKeyboardMarkup()
-            for c in deposit_settings.keys():
-                markup.row(InlineKeyboardButton(c.replace('_', ' '), callback_data=f"cb_dep_{c}"))
+            for c in deposit_settings.keys(): markup.row(InlineKeyboardButton(c.replace('_', ' '), callback_data=f"cb_dep_{c}"))
             bot.send_message(call.message.chat.id, "💰 **Insufficient Funds!**\nPlease select a deposit method below to fund your account and automatically activate your plan:", parse_mode="Markdown", reply_markup=markup)
             return
             
-        # Funds OK -> Move to Amount Entry State
         if user_id not in user_action_data: user_action_data[user_id] = {}
         user_action_data[user_id]['buy_plan_id'] = plan_id
         user_state[user_id] = 'buyplan_wait_amount'
@@ -1656,7 +1726,7 @@ def handle_inline(call):
         bot.answer_callback_query(call.id)
         return
 
-    # --- ADMIN MANUAL DEPOSIT APPROVAL RECEIPTS ---
+    # --- ADMIN DEPOSIT APPROVAL ---
     if call.data.startswith('cb_depapp_'):
         if not is_admin: return bot.answer_callback_query(call.id, "Action not permitted.", show_alert=True)
         dep_id = call.data.split('_')[2]
@@ -1671,8 +1741,6 @@ def handle_inline(call):
         if target in user_db:
             user_db[target]['deposit'] += amt
             log_tx(target, f"Deposit ({curr.replace('_', ' ')})", amt)
-            
-            # DYNAMIC SUCCESS MESSAGE (Manual Mode)
             msg_success = conf.get('msg_success', "✅ **Deposit Approved!**\n**$%usd_amount%** has been successfully added to your deposit balance.")
             msg_success = msg_success.replace('%usd_amount%', f"{amt:.2f}").replace('%crypto_amount%', '')
             bot.send_message(target, msg_success, parse_mode="Markdown")
@@ -1683,7 +1751,6 @@ def handle_inline(call):
             except Exception: pass
             
             check_and_trigger_auto_buy(target) 
-            
         return bot.answer_callback_query(call.id, "Approved successfully.")
 
     elif call.data.startswith('cb_deprej_'):
@@ -1693,7 +1760,6 @@ def handle_inline(call):
         
         dep = pending_deposits.pop(dep_id)
         target = dep['user_id']
-        
         try:
             bot.send_message(target, f"❌ **Deposit Rejected**\nYour deposit request for **${dep['amount']}** could not be verified.", parse_mode="Markdown")
             if call.message.photo: bot.edit_message_caption(f"{call.message.caption}\n\n❌ **REJECTED**", call.message.chat.id, call.message.message_id, reply_markup=None)
@@ -1701,14 +1767,13 @@ def handle_inline(call):
         except Exception: pass
         return bot.answer_callback_query(call.id, "Rejected successfully.")
 
-    # --- NATIVE INLINE ACTIONS FOR ALL USERS ---
+    # --- INLINE ACTIONS ---
     if call.data.startswith('cb_pop_'):
         btn_id = call.data.split('_')[2]
         for path, posts in menu_posts.items():
             for p in posts:
                 for b in p.get('custom_inlines', []):
-                    if b['id'] == btn_id:
-                        return bot.answer_callback_query(call.id, b['data'], show_alert=True)
+                    if b['id'] == btn_id: return bot.answer_callback_query(call.id, b['data'], show_alert=True)
         return bot.answer_callback_query(call.id)
         
     elif call.data.startswith('cb_cmd_'):
@@ -1728,27 +1793,22 @@ def handle_inline(call):
         
     elif call.data.startswith('cb_dep_'):
         btn_id = call.data.split('_')[2]
-        # Allow checking if it was generated directly from the Buy Plan redirect
         if len(call.data.split('_')) > 2 and call.data.split('_')[2] in deposit_settings:
              curr = call.data.replace('cb_dep_', '')
         else:
             for path, posts in menu_posts.items():
                 for p in posts:
                     for b in p.get('custom_inlines', []):
-                        if b['id'] == btn_id:
-                            curr = b['data'].strip().upper().replace(" ", "_")
+                        if b['id'] == btn_id: curr = b['data'].strip().upper().replace(" ", "_")
         
-        if curr not in deposit_settings:
-            return bot.answer_callback_query(call.id, "Error: Currency not configured.", show_alert=True)
+        if curr not in deposit_settings: return bot.answer_callback_query(call.id, "Error: Currency not configured.", show_alert=True)
             
         bot.answer_callback_query(call.id)
         if user_id not in user_action_data: user_action_data[user_id] = {}
         user_action_data[user_id]['currency'] = curr
         user_state[user_id] = 'dep_wait_amount'
-        
         try: bot.delete_message(call.message.chat.id, call.message.message_id)
         except Exception: pass
-        
         bot.send_message(call.message.chat.id, deposit_settings[curr]['msg_enter'], parse_mode="Markdown", reply_markup=get_cancel_action_keyboard())
         return
         
@@ -1763,12 +1823,27 @@ def handle_inline(call):
                         plan_macro = lines[0].strip()
                         dep_cmd = lines[1].strip() if len(lines) > 1 else None
                         
-                        if plan_macro not in bot_plans:
-                            return bot.send_message(call.message.chat.id, "⚠️ Error: This plan no longer exists in the system.")
+                        if plan_macro not in bot_plans: return bot.send_message(call.message.chat.id, "⚠️ Error: This plan no longer exists in the system.")
                             
                         p_data = bot_plans[plan_macro]
                         u_dep = user_db[user_id]['deposit']
                         
+                        if p_data.get('is_free'):
+                            invest_amount = p_data.get('free_capital', 2.0)
+                            has_free = any(p['macro'] == plan_macro for p in user_db[user_id].get('active_plans', []))
+                            if has_free: return bot.send_message(call.message.chat.id, "You already have this plan active!")
+                            
+                            log_tx(user_id, f"Activated Free {p_data['name']}", 0)
+                            new_plan = {
+                                'id': str(uuid.uuid4())[:8], 'macro': plan_macro, 'amount': invest_amount,
+                                'profit_pct': p_data['profit'], 'length_hours': p_data.get('length', 0),
+                                'start_time': time.time(), 'last_accrual': time.time(),
+                                'earned': 0.0, 'status': 'active'
+                            }
+                            user_db[user_id]['active_plans'].append(new_plan)
+                            bot.send_message(call.message.chat.id, f"🎉 **Success!**\n{p_data['name']} Activated! Generating profit based on virtual ${invest_amount} capital.", parse_mode="Markdown")
+                            return
+
                         if u_dep < p_data['min']:
                             user_db[user_id]['pending_plan'] = plan_macro
                             bot.send_message(call.message.chat.id, f"⚠️ Insufficient deposit balance (Min: ${p_data['min']}). Redirecting to Deposit...", parse_mode="Markdown")
@@ -1786,22 +1861,17 @@ def handle_inline(call):
                         log_tx(user_id, f"Bought {p_data['name']}", -invest_amt)
                         
                         new_plan = {
-                            'id': str(uuid.uuid4())[:8],
-                            'macro': plan_macro,
-                            'amount': invest_amt,
-                            'profit_pct': p_data['profit'],
-                            'length_hours': p_data.get('length', 0),
-                            'start_time': time.time(),
-                            'last_accrual': time.time(),
-                            'earned': 0.0,
-                            'status': 'active'
+                            'id': str(uuid.uuid4())[:8], 'macro': plan_macro, 'amount': invest_amt,
+                            'profit_pct': p_data['profit'], 'length_hours': p_data.get('length', 0),
+                            'start_time': time.time(), 'last_accrual': time.time(),
+                            'earned': 0.0, 'status': 'active'
                         }
                         user_db[user_id]['active_plans'].append(new_plan)
                         bot.send_message(call.message.chat.id, f"🎉 **Success!**\n\nYou successfully invested **${invest_amt:.2f}** into **{p_data['name']}**!\nYour profit is accruing automatically.", parse_mode="Markdown")
                         return
         return bot.answer_callback_query(call.id)
 
-    # --- ADMIN POSTS INLINE TOOLS ---
+    # --- POST TOOLS ---
     if call.data.startswith('cb_p_'):
         if not is_admin: return bot.answer_callback_query(call.id, "Action not permitted.", show_alert=True)
         parts = call.data.split('_')
@@ -1810,54 +1880,44 @@ def handle_inline(call):
         
         posts_list = menu_posts.get(current_path, [])
         idx = next((i for i, p in enumerate(posts_list) if p['id'] == post_id), -1)
-        
         if idx == -1: return bot.answer_callback_query(call.id, "Post not found.", show_alert=True)
 
         if action == 'up' and idx > 0:
             posts_list[idx], posts_list[idx-1] = posts_list[idx-1], posts_list[idx]
             send_path_content(call.message.chat.id, user_id, current_path, True)
-            
         elif action == 'down' and idx < len(posts_list) - 1:
             posts_list[idx], posts_list[idx+1] = posts_list[idx+1], posts_list[idx]
             send_path_content(call.message.chat.id, user_id, current_path, True)
-            
         elif action == 'reptext':
             user_state[user_id] = 'posts_rep_text'
             user_action_data[user_id] = {'post_id': post_id}
             bot.send_message(call.message.chat.id, "Send the new text (image will be kept):", reply_markup=get_cancel_action_keyboard())
-            
         elif action == 'repall':
             user_state[user_id] = 'posts_rep_all'
             user_action_data[user_id] = {'post_id': post_id}
             bot.send_message(call.message.chat.id, "Send the new message (text or photo):", reply_markup=get_cancel_action_keyboard())
-            
         elif action == 'add':
             user_state[user_id] = 'posts_insert_after'
             user_action_data[user_id] = {'post_id': post_id}
             bot.send_message(call.message.chat.id, "Send the message to add below this one:", reply_markup=get_cancel_action_keyboard())
-            
         elif action == 'del':
             markup = InlineKeyboardMarkup()
             markup.row(InlineKeyboardButton('✅ Yes, Delete Post', callback_data=f'cb_p_delyes_{post_id}'), InlineKeyboardButton('❌ Cancel', callback_data=f'cb_p_delno_{post_id}'))
             bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=markup)
-            
         elif action == 'delyes':
             menu_posts[current_path].pop(idx)
             send_path_content(call.message.chat.id, user_id, current_path, True)
-            
         elif action == 'delno':
             bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=get_post_inline_tools(post_id))
-            
         elif action == 'star':
             user_state[user_id] = 'pi_manage'
             user_action_data[user_id] = {'post_id': post_id}
             post = next((p for p in menu_posts.get(current_path, []) if p['id'] == post_id), None)
             if post: render_pi_manager(call.message.chat.id, post)
-            
         bot.answer_callback_query(call.id)
         return
 
-    # --- CUSTOM INLINE BUTTONS MANAGER ---
+    # --- CUSTOM INLINE MANAGER ---
     if call.data.startswith('cb_pi_'):
         action = call.data.replace('cb_pi_', '')
         if action == 'add':
@@ -1936,12 +1996,10 @@ def handle_inline(call):
         bot.answer_callback_query(call.id)
         return
 
-    # --- LIVE WITHDRAWAL CONFIRMATION ---
+    # --- WITHDRAWAL CONFIRMATION ---
     if call.data == 'cb_w_yes':
         if user_state.get(user_id) == 'w_action_conf':
             data = user_action_data[user_id]
-            meta = btn_metadata.get(data['path'], get_default_metadata())
-            
             w_var = global_w_setup.get('w_var', 'balance')
             user_db[user_id][w_var] -= data['amount']
             log_tx(user_id, "Withdrawal", -data['amount'])
@@ -1983,35 +2041,29 @@ def handle_inline(call):
     if call.data == 'cb_move_left' and idx > 0:
         current_list[idx], current_list[idx-1] = current_list[idx-1], current_list[idx]
         bot.send_message(call.message.chat.id, "Moved left.", reply_markup=get_keyboard(user_id))
-        
     elif call.data == 'cb_move_right' and idx < len(current_list) - 1:
         current_list[idx], current_list[idx+1] = current_list[idx+1], current_list[idx]
         bot.send_message(call.message.chat.id, "Moved right.", reply_markup=get_keyboard(user_id))
-        
     elif call.data == 'cb_move_up':
         btn_path = f"{current_path}/{target_btn}"
         meta = btn_metadata.get(btn_path, get_default_metadata())
         meta['row_idx'] = meta.get('row_idx', 0) - 1
         btn_metadata[btn_path] = meta 
         bot.send_message(call.message.chat.id, f"Moved '{target_btn}' up.", reply_markup=get_keyboard(user_id))
-        
     elif call.data == 'cb_move_down':
         btn_path = f"{current_path}/{target_btn}"
         meta = btn_metadata.get(btn_path, get_default_metadata())
         meta['row_idx'] = meta.get('row_idx', 0) + 1
         btn_metadata[btn_path] = meta 
         bot.send_message(call.message.chat.id, f"Moved '{target_btn}' down.", reply_markup=get_keyboard(user_id))
-    
     elif call.data == 'cb_settings':
         user_state[user_id] = 'button_settings'
         bot.delete_message(call.message.chat.id, call.message.message_id)
         bot.send_message(call.message.chat.id, f"⚙️ **Settings for:** `{target_btn}`", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
-
     elif call.data == 'cb_rename':
         user_state[user_id] = 'renaming_button'
         bot.delete_message(call.message.chat.id, call.message.message_id)
         bot.send_message(call.message.chat.id, f"Send new name for '{target_btn}':", reply_markup=get_cancel_action_keyboard())
-
     elif call.data == 'cb_cut':
         full_path = f"{current_path}/{target_btn}"
         user_clipboard[user_id] = {'name': target_btn, 'full_path': full_path}
@@ -2019,29 +2071,25 @@ def handle_inline(call):
         user_selected_button[user_id] = None
         bot.delete_message(call.message.chat.id, call.message.message_id)
         bot.send_message(call.message.chat.id, f"✂️ Cut '{target_btn}'. Go to a new folder and press Paste.", reply_markup=get_keyboard(user_id))
-
     elif call.data == 'cb_delete':
         markup = InlineKeyboardMarkup()
         markup.row(InlineKeyboardButton('✅ Yes, Delete', callback_data='cb_del_yes'), InlineKeyboardButton('❌ Cancel', callback_data='cb_del_no'))
         bot.edit_message_text(f"Are you sure you want to delete '{target_btn}' and all folders inside it?", call.message.chat.id, call.message.message_id, reply_markup=markup)
-
     elif call.data == 'cb_del_yes':
         menus[current_path].remove(target_btn)
         full_path_to_del = f"{current_path}/{target_btn}"
         for k in [k for k in menus.keys() if k == full_path_to_del or k.startswith(full_path_to_del + '/')]: del menus[k]
         for k in [k for k in btn_metadata.keys() if k == full_path_to_del or k.startswith(full_path_to_del + '/')]: del btn_metadata[k]
         for k in [k for k in menu_posts.keys() if k == full_path_to_del or k.startswith(full_path_to_del + '/')]: del menu_posts[k]
-        
         user_selected_button[user_id] = None
         bot.delete_message(call.message.chat.id, call.message.message_id)
         bot.send_message(call.message.chat.id, f"🗑 Deleted '{target_btn}'.", reply_markup=get_keyboard(user_id))
-
     elif call.data == 'cb_del_no':
         bot.edit_message_text(f"🛠 Selected: **{target_btn}**\nChoose an action:", call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=get_edit_inline_tools())
 
     bot.answer_callback_query(call.id)
 
-# --- NEW: LIGHTWEIGHT WEB SERVER FOR ADMIN DASHBOARD & UPTIMEROBOT ---
+# --- WEB SERVER ---
 class AdminDashboardHandler(BaseHTTPRequestHandler):
     def do_HEAD(self):
         self.send_response(200)
@@ -2060,8 +2108,7 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
             except FileNotFoundError:
                 self.send_response(404)
                 self.end_headers()
-                self.wfile.write(b"index.html not found. Make sure it is in the root directory.")
-                
+                self.wfile.write(b"index.html not found.")
         elif parsed_path.path == '/api/get_admins':
             self.send_response(200)
             self.send_header('Content-type', 'application/json')
@@ -2086,7 +2133,6 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                     self.send_header('Content-type', 'application/json')
                     self.end_headers()
                     self.wfile.write(json.dumps({'success': True}).encode())
-                    print(f"👑 Dashboard Action: Added Admin ID {new_admin}")
                 else:
                     self.send_response(400)
                     self.send_header('Content-type', 'application/json')
@@ -2096,7 +2142,6 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                 self.send_response(400)
                 self.end_headers()
                 self.wfile.write(json.dumps({'error': str(e)}).encode())
-        
         elif parsed_path.path == '/api/remove_admin':
             try:
                 data = json.loads(post_data)
@@ -2107,7 +2152,6 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                     self.send_header('Content-type', 'application/json')
                     self.end_headers()
                     self.wfile.write(json.dumps({'success': True}).encode())
-                    print(f"👑 Dashboard Action: Removed Admin ID {remove_admin}")
                 else:
                     self.send_response(400)
                     self.end_headers()
@@ -2121,20 +2165,14 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
 def run_web_server():
-    """Runs the HTTP server silently in the background."""
     port = int(os.environ.get('PORT', 8080))
     server = HTTPServer(('0.0.0.0', port), AdminDashboardHandler)
     print(f"🌐 Web server running on port {port} for UptimeRobot & Admin Dashboard.")
     server.serve_forever()
 
 if __name__ == '__main__':
-    # Start the Web Server (Required for Render and Dashboard)
     threading.Thread(target=run_web_server, daemon=True).start()
-    
-    # Start the Blockchain Scanner
     print("👀 Starting background watcher thread...")
     threading.Thread(target=blockchain_watcher_loop, daemon=True).start()
-    
-    # Start the Telegram Bot
     print("🚀 Bot is running fast! Press Ctrl+C to stop.")
     bot.infinity_polling(skip_pending=True)
