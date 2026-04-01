@@ -1,5 +1,5 @@
-# Use the official lightweight Python image
-FROM python:3.11-slim
+# Use the standard Python image which includes all build tools like gcc
+FROM python:3.11
 
 # Keep Python from buffering logs
 ENV PYTHONUNBUFFERED=1
