@@ -7,6 +7,7 @@ import threading
 import requests
 import json
 import html
+import re
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse
 from dotenv import load_dotenv
@@ -719,47 +720,31 @@ def send_path_content(chat_id, user_id, path, is_editing=False, reply_keyboard=N
             if is_editing: editor_msg_ids.setdefault(user_id, []).append(sent.message_id)
 
 # --- NATIVE ENTITY EXTRACTOR (Safely translates Telegram Formatting to Database HTML) ---
-def extract_html(message):
-    text = message.text or message.caption or ""
-    entities = message.entities or message.caption_entities or []
+def extract_safe_html(message):
+    raw_html = ""
+    if message.photo:
+        raw_html = message.caption_html if hasattr(message, 'caption_html') and message.caption_html else message.caption or ""
+    else:
+        raw_html = message.html if hasattr(message, 'html') and message.html else message.text or ""
+        
+    if not raw_html:
+        return ""
+        
+    # Telegram's message.html safely escapes manual < and >.
+    # We selectively unescape ONLY valid Telegram HTML tags so copied templates work flawlessly.
+    tags = ['b', 'strong', 'i', 'em', 'u', 'ins', 's', 'strike', 'del', 'code', 'pre', 'tg-spoiler']
+    for tag in tags:
+        raw_html = re.sub(f"&lt;{tag}&gt;", f"<{tag}>", raw_html, flags=re.IGNORECASE)
+        raw_html = re.sub(f"&lt;/{tag}&gt;", f"</{tag}>", raw_html, flags=re.IGNORECASE)
+        
+    # Safely restore anchor tags
+    raw_html = re.sub(r'&lt;a href=(?:&quot;|"|&apos;|\')(.*?)(?:&quot;|"|&apos;|\')&gt;', r'<a href="\1">', raw_html, flags=re.IGNORECASE)
+    raw_html = re.sub(r'&lt;/a&gt;', '</a>', raw_html, flags=re.IGNORECASE)
     
-    # Always fix the <bold> mistake for convenience, whether entities exist or not
-    text = text.replace('<bold>', '<b>').replace('</bold>', '</b>')
+    # Auto-fix common typos just in case
+    raw_html = raw_html.replace('&lt;bold&gt;', '<b>').replace('&lt;/bold&gt;', '</b>')
     
-    if not entities:
-        return text
-
-    inserts = {}
-    for ent in entities:
-        start = ent.offset
-        end = start + ent.length
-        
-        open_tag, close_tag = "", ""
-        if ent.type == 'bold': open_tag, close_tag = "<b>", "</b>"
-        elif ent.type == 'italic': open_tag, close_tag = "<i>", "</i>"
-        elif ent.type == 'code': open_tag, close_tag = "<code>", "</code>"
-        elif ent.type == 'pre': open_tag, close_tag = "<pre>", "</pre>"
-        elif ent.type == 'strikethrough': open_tag, close_tag = "<s>", "</s>"
-        elif ent.type == 'underline': open_tag, close_tag = "<u>", "</u>"
-        elif ent.type == 'spoiler': open_tag, close_tag = "<tg-spoiler>", "</tg-spoiler>"
-        elif ent.type == 'text_link': open_tag, close_tag = f"<a href=\"{ent.url}\">", "</a>"
-        
-        if open_tag:
-            inserts.setdefault(start, []).append(open_tag)
-            inserts.setdefault(end, []).insert(0, close_tag)
-            
-    out = ""
-    for i, char in enumerate(text):
-        if i in inserts:
-            out += "".join(inserts[i])
-        
-        # We intentionally do not html.escape here so users can still mix manual raw HTML with native formatting
-        out += char
-        
-    if len(text) in inserts:
-        out += "".join(inserts[len(text)])
-        
-    return out
+    return raw_html
 
 # --- KEYBOARD BUILDERS ---
 def get_wizard_keyboard(current_val, options=None, allow_empty=False):
@@ -1068,7 +1053,7 @@ def handle_messages(message):
     text = message.text if message.text else (message.caption if message.caption else "")
     
     # --- NEW: NATIVE FORMATTING CAPTURE ---
-    formatted_text = extract_html(message)
+    formatted_text = extract_safe_html(message)
 
     is_admin = user_id in ADMIN_IDS
     
