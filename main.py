@@ -631,7 +631,7 @@ def send_path_content(chat_id, user_id, path, is_editing=False, reply_keyboard=N
         msg_raw = f"📂 **{path.split('/')[-1]}**\n\n_(No messages set for this menu)_" if path != 'root' else "Welcome!"
         sent = bot.send_message(chat_id, get_tl_and_map(msg_raw, lang), parse_mode="Markdown", reply_markup=reply_keyboard)
         if is_editing: editor_msg_ids.setdefault(user_id, []).append(sent.message_id)
-        kb_attached = True
+        return
         
     for i, p in enumerate(posts):
         text = get_tl_and_map(replace_macros(p['text'], user_id, path), lang)
@@ -676,7 +676,8 @@ def send_path_content(chat_id, user_id, path, is_editing=False, reply_keyboard=N
         if not markup.keyboard: 
             markup = None
             
-        if not markup and not kb_attached and reply_keyboard and i == len(posts) - 1:
+        # INTELLIGENT KEYBOARD INJECTION: Try to hide the reply keyboard inside the last normal post to avoid empty bubbles
+        if i == len(posts) - 1 and not markup and not kb_attached and reply_keyboard:
             markup = reply_keyboard
             kb_attached = True
         
@@ -690,14 +691,10 @@ def send_path_content(chat_id, user_id, path, is_editing=False, reply_keyboard=N
         except Exception as e:
             sent = bot.send_message(chat_id, f"⚠️ Error rendering post: {e}")
             if is_editing: editor_msg_ids.setdefault(user_id, []).append(sent.message_id)
-            
-    # Invisible keyboard injection hack if all posts have inline buttons blocking the reply keyboard
+
+    # If all posts had inline keyboards, we are forced to send a tiny arrow to push the reply keyboard
     if reply_keyboard and not kb_attached:
-        try:
-            temp_msg = bot.send_message(chat_id, "🔄", reply_markup=reply_keyboard)
-            bot.delete_message(chat_id, temp_msg.message_id)
-        except Exception:
-            pass
+        bot.send_message(chat_id, "⬇️", reply_markup=reply_keyboard)
 
 # --- KEYBOARD BUILDERS ---
 def get_wizard_keyboard(current_val, options=None, allow_empty=False):
@@ -1011,31 +1008,24 @@ def handle_messages(message):
     if user_id not in user_current_path: user_current_path[user_id] = 'root'
     if user_id not in user_state: user_state[user_id] = 'normal'
     
-    # REVERSE MAP: Transparently translate incoming buttons back to English logic robustly!
+    # REVERSE MAP: Transparently translate incoming buttons back to English logic!
+    # This loop absolutely guarantees that BACK and HOME buttons always work in any language!
     lang = user_db.get(user_id, {}).get('lang', 'en')
     if lang != 'en':
         if text in REVERSE_TL_MAP.get(lang, {}):
             text = REVERSE_TL_MAP[lang][text]
         else:
-            # Bulletproof Fallback: Dynamic re-hydration if cache was cleared/restarted
-            known_cmds = [
-                '🏠 Home', '🔙 Back', '❌ Cancel Action', '❌ Cancel', '🚫 Cancel Action', 
-                '🔙 Exit Button Settings', '🔙 Exit Balance', '💵 Get', '💵 Change', '💵 Set', 
-                'Referral Bonus', 'Deposit balance', 'Withdrawal balance', 'User Macro', 
-                '📊 Plans', '🏦 Deposit Settings', 'Withdrawal Settings', '💳 Wallet Settings', 
-                '🎁 Bonus Settings', '🧮 Calculator', '📜 Transactions', '🔙 Back to Main', 
-                '🔙 Back to Admin', '🔙 Back to Deposit Menu', '🔙 Back to Plans List', 
-                '✔️ Leave as Is', '➖ Set Empty', '🎛️ Buttons Editor', '📝 Posts Editor', 
-                '➕ Add Message', '🛑 Stop Editor', '➕ Add Button', '🔐 Admin'
-            ]
-            # Inject all dynamic button names currently existing
-            for path_keys in menus.values():
-                known_cmds.extend(path_keys)
-                
-            for cmd in set(known_cmds):
+            # Bulletproof Fallback check for core navigation (fixes bot reboot translation amnesia)
+            core_commands = ['🏠 Home', '🔙 Back', '❌ Cancel Action', '🔙 Exit Button Settings', '🔙 Exit Balance', '🔙 Back to Main', '🔙 Back to Admin', '🎛️ Buttons Editor', '📝 Posts Editor', '💵 Balance', '🔐 Admin']
+            for cmd in core_commands:
                 if text == get_tl_and_map(cmd, lang):
                     text = cmd
                     break
+            if text not in core_commands:
+                for btn_name in menus.get(user_current_path.get(user_id, 'root'), []):
+                    if text == get_tl_and_map(btn_name, lang):
+                        text = btn_name
+                        break
 
     # Reset normal users if stuck in certain states
     if not is_admin and user_state[user_id] not in ['w_action_amount', 'w_action_addr', 'dep_wait_amount', 'dep_wait_proof', 'buyplan_wait_amount', 'wait_calc_amount', 'wallet_wait_email', 'wallet_wait_address']: 
@@ -1234,9 +1224,9 @@ def handle_messages(message):
                     'photo': None,
                     'custom_inlines': []
                 }
-                # Add default buttons dynamically from requirement
+                # Add default buttons dynamically from requirement. Chinese forced to zh-CN so deep-translator never fails.
                 langs = [
-                    ('🇬🇧 English', 'en'), ('🇨🇳 Chinese', 'zh-cn'), ('🇵🇹 Portuguese', 'pt'),
+                    ('🇬🇧 English', 'en'), ('🇨🇳 Chinese', 'zh-CN'), ('🇵🇹 Portuguese', 'pt'),
                     ('🇳🇱 Dutch', 'nl'), ('🇪🇸 Spanish', 'es'), ('🇩🇪 German', 'de'),
                     ('🇫🇷 French', 'fr'), ('🇸🇦 Arabic', 'ar'), ('🇷🇺 Russian', 'ru'),
                     ('🇮🇩 Indonesian', 'id'), ('🇮🇳 Hindi', 'hi')
@@ -1337,7 +1327,7 @@ def handle_messages(message):
             bot.send_message(message.chat.id, "Enter the exact command/button name to trigger:")
         elif mode == '🌐 Set Language':
             user_state[user_id] = 'pi_wait_data'
-            bot.send_message(message.chat.id, "Enter the language code (e.g. 'en', 'es', 'fr', 'ru'):")
+            bot.send_message(message.chat.id, "Enter the language code (e.g. 'en', 'es', 'fr', 'zh-CN'):")
         elif mode == '🛒 Buy Plan':
             user_state[user_id] = 'pi_wait_data'
             markup = ReplyKeyboardMarkup(resize_keyboard=True)
@@ -1629,13 +1619,8 @@ def handle_messages(message):
             msg = conf['msg_instruct'].replace('%crypto_amount%', str(crypto_amount)).replace('%address%', address)
             msg = f"*(Live Rate: 1 {curr.split('_')[0]} = ${live_price:.2f})*\n\n{msg}"
             
-            # Flash the keyboard update instantly via a micro-message and delete it
-            try:
-                temp_msg = bot.send_message(message.chat.id, "🔄", reply_markup=get_keyboard(user_id))
-                bot.delete_message(message.chat.id, temp_msg.message_id)
-            except Exception: pass
+            bot.send_message(message.chat.id, get_tl_and_map(msg, lang), parse_mode='Markdown', reply_markup=get_keyboard(user_id))
             
-            bot.send_message(message.chat.id, get_tl_and_map(msg, lang), parse_mode='Markdown')
             user_state[user_id] = 'normal'
         return
 
@@ -2382,7 +2367,11 @@ def handle_inline(call):
             for p in posts:
                 for b in p.get('custom_inlines', []):
                     if b['id'] == btn_id:
-                        target_lang = b['data'].strip().lower()
+                        target_lang = b['data'].strip()
+        
+        # Fallback handling for deep-translator target naming convention
+        if target_lang.lower() == 'zh-cn': target_lang = 'zh-CN'
+        else: target_lang = target_lang.lower()
 
         user_db[user_id]['lang'] = target_lang
         bot.answer_callback_query(call.id, get_tl_and_map("Language updated!", target_lang), show_alert=True)
