@@ -949,6 +949,31 @@ def handle_messages(message):
     selected_btn = user_selected_button.get(user_id)
     full_path = f"{current_path}/{selected_btn}" if selected_btn else None
 
+    # --- UPDATED MACRO LIST LOGIC ---
+    if text == '📜 Macros' and is_admin:
+        macros_msg = (
+            "📝 **Available Macros List**\n"
+            "(Tap on any macro to copy it)\n\n"
+            "`%balance%` - Withdrawal balance (profits)\n"
+            "`%deposit%` - Deposit balance\n"
+            "`%my_plans%` - Shows user their active plans\n"
+            "`%activeplan%` - Exact same as %my_plans%\n"
+            "`%userid%` - Telegram numeric ID\n"
+            "`%username%` - Telegram @username\n"
+            "`%firstname%` - User's first name\n"
+            "`%lastname%` - User's last name\n\n"
+            "`%usd_amount%` - USD amount of deposit\n"
+            "`%crypto_amount%` - Crypto amount of deposit\n"
+            "`%address%` - Withdraw Wallet address\n\n"
+            "`%wallet%` - User's USDT Wallet address\n"
+            "`%email%` - User's Email address\n"
+            "`%bonus_amount%` - The defined bonus amount\n"
+            "`%time_left%` - Used dynamically in Bonus fail msg\n\n"
+            "`%plan0%` ... `%plan5%` - Plan details\n"
+        )
+        bot.send_message(message.chat.id, macros_msg, parse_mode="Markdown", reply_markup=get_keyboard(user_id))
+        return
+
     # --- HANDLE USER ABORTING OR NAVIGATING ---
     if text in ['❌ Cancel Action', '❌ Cancel', '🚫 Cancel Action']:
         if state in ['posts_adding', 'posts_insert_after', 'posts_rep_text', 'posts_rep_all']:
@@ -1794,28 +1819,6 @@ def handle_messages(message):
         elif text == '🎁 Bonus Settings':
             user_state[user_id] = 'admin_bonus_menu'
             bot.send_message(message.chat.id, "🎁 **Bonus Settings**", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
-        elif text == '📜 Macros':
-            macros_msg = (
-                "📝 **Available Macros List**\n"
-                "(Tap on any macro to copy it)\n\n"
-                "`%balance%` - Withdrawal balance (profits)\n"
-                "`%deposit%` - Deposit balance\n"
-                "`%my_plans%` - Shows user their active plans\n"
-                "`%activeplan%` - Exact same as %my_plans%\n"
-                "`%userid%` - Telegram numeric ID\n"
-                "`%username%` - Telegram @username\n"
-                "`%firstname%` - User's first name\n"
-                "`%lastname%` - User's last name\n\n"
-                "`%usd_amount%` - USD amount of deposit\n"
-                "`%crypto_amount%` - Crypto amount of deposit\n"
-                "`%address%` - Withdraw Wallet address\n\n"
-                "`%wallet%` - User's USDT Wallet address\n"
-                "`%email%` - User's Email address\n"
-                "`%bonus_amount%` - The defined bonus amount\n"
-                "`%time_left%` - Used dynamically in Bonus fail msg\n\n"
-                "`%plan0%` ... `%plan5%` - Plan details\n"
-            )
-            bot.send_message(message.chat.id, macros_msg, parse_mode="Markdown", reply_markup=get_keyboard(user_id))
         elif text == '📊 Plans':
             user_state[user_id] = 'admin_plans'
             bot.send_message(message.chat.id, "📊 **Plans Manager**", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
