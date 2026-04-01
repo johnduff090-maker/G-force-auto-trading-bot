@@ -648,7 +648,12 @@ def send_path_content(chat_id, user_id, path, is_editing=False, reply_keyboard=N
             for r_idx in sorted(rows_dict.keys()):
                 row_btns = []
                 for b in rows_dict[r_idx]:
-                    tl_btn_text = get_tl_and_map(b['text'], lang)
+                    # Bypass translating Language indicator buttons so the flags and native names stay perfect
+                    if b['mode'] == 'set_lang':
+                        tl_btn_text = b['text']
+                    else:
+                        tl_btn_text = get_tl_and_map(b['text'], lang)
+                        
                     if b['mode'] == 'url':
                         row_btns.append(InlineKeyboardButton(tl_btn_text, url=b['data']))
                     elif b['mode'] == 'popup':
@@ -691,10 +696,6 @@ def send_path_content(chat_id, user_id, path, is_editing=False, reply_keyboard=N
         except Exception as e:
             sent = bot.send_message(chat_id, f"⚠️ Error rendering post: {e}")
             if is_editing: editor_msg_ids.setdefault(user_id, []).append(sent.message_id)
-
-    # If all posts had inline keyboards, we are forced to send a tiny arrow to push the reply keyboard
-    if reply_keyboard and not kb_attached:
-        bot.send_message(chat_id, "⬇️", reply_markup=reply_keyboard)
 
 # --- KEYBOARD BUILDERS ---
 def get_wizard_keyboard(current_val, options=None, allow_empty=False):
@@ -2377,7 +2378,11 @@ def handle_inline(call):
         bot.answer_callback_query(call.id, get_tl_and_map("Language updated!", target_lang), show_alert=True)
         try: bot.delete_message(call.message.chat.id, call.message.message_id)
         except: pass
-        send_path_content(call.message.chat.id, user_id, current_path, is_editing=(user_state.get(user_id) == 'posts_editing'), reply_keyboard=get_keyboard(user_id))
+        
+        # REFRESH MAIN MENU IMMEDIATELY
+        user_current_path[user_id] = 'root'
+        user_state[user_id] = 'normal'
+        send_path_content(call.message.chat.id, user_id, 'root', is_editing=False, reply_keyboard=get_keyboard(user_id))
         return
 
     # --- CALCULATOR DYNAMIC BUY NOW (POPUP ENGINE) ---
