@@ -1021,6 +1021,14 @@ def send_welcome(message):
 def handle_messages(message):
     user_id = message.from_user.id
     text = message.text if message.text else (message.caption if message.caption else "")
+    
+    # --- NEW: NATIVE FORMATTING CAPTURE ---
+    formatted_text = ""
+    if message.photo:
+        formatted_text = message.caption_html if hasattr(message, 'caption_html') and message.caption_html else text
+    else:
+        formatted_text = message.html if hasattr(message, 'html') and message.html else text
+
     is_admin = user_id in ADMIN_IDS
     
     init_user_db(message)
@@ -1171,7 +1179,7 @@ def handle_messages(message):
         new_post = {
             'id': str(uuid.uuid4())[:8],
             'type': 'photo' if message.photo else 'text',
-            'text': message.caption if message.photo else text,
+            'text': formatted_text,
             'photo': message.photo[-1].file_id if message.photo else None,
             'custom_inlines': []
         }
@@ -1185,7 +1193,7 @@ def handle_messages(message):
         p_id = user_action_data[user_id]['post_id']
         post = next((p for p in menu_posts.get(current_path, []) if p['id'] == p_id), None)
         if post:
-            post['text'] = text
+            post['text'] = formatted_text
         user_state[user_id] = 'posts_editing'
         bot.send_message(message.chat.id, get_tl_and_map("✅ Text updated successfully!", lang), reply_markup=get_keyboard(user_id))
         send_path_content(message.chat.id, user_id, current_path, True)
@@ -1196,7 +1204,7 @@ def handle_messages(message):
         post = next((p for p in menu_posts.get(current_path, []) if p['id'] == p_id), None)
         if post:
             post['type'] = 'photo' if message.photo else 'text'
-            post['text'] = message.caption if message.photo else text
+            post['text'] = formatted_text
             post['photo'] = message.photo[-1].file_id if message.photo else None
         user_state[user_id] = 'posts_editing'
         bot.send_message(message.chat.id, get_tl_and_map("✅ Message completely replaced!", lang), reply_markup=get_keyboard(user_id))
@@ -1211,7 +1219,7 @@ def handle_messages(message):
         new_post = {
             'id': str(uuid.uuid4())[:8],
             'type': 'photo' if message.photo else 'text',
-            'text': message.caption if message.photo else text,
+            'text': formatted_text,
             'photo': message.photo[-1].file_id if message.photo else None,
             'custom_inlines': []
         }
@@ -1490,10 +1498,10 @@ def handle_messages(message):
         return
 
     if state.startswith('wallet_setup_'):
-        if state == 'wallet_setup_main': global_wallet_setup['msg_main'] = text
-        elif state == 'wallet_setup_prompt': global_wallet_setup['msg_prompt'] = text
-        elif state == 'wallet_setup_success': global_wallet_setup['msg_success'] = text
-        elif state == 'wallet_setup_email_prompt': global_wallet_setup['msg_email_prompt'] = text
+        if state == 'wallet_setup_main': global_wallet_setup['msg_main'] = formatted_text
+        elif state == 'wallet_setup_prompt': global_wallet_setup['msg_prompt'] = formatted_text
+        elif state == 'wallet_setup_success': global_wallet_setup['msg_success'] = formatted_text
+        elif state == 'wallet_setup_email_prompt': global_wallet_setup['msg_email_prompt'] = formatted_text
         elif state == 'wallet_setup_inline_set': global_wallet_setup['inline_set'] = text
         elif state == 'wallet_setup_inline_change': global_wallet_setup['inline_change'] = text
         
@@ -1527,8 +1535,8 @@ def handle_messages(message):
         elif state == 'bonus_setup_cooldown':
             try: global_bonus_setup['cooldown_hours'] = float(text)
             except: return bot.send_message(message.chat.id, "⚠️ Invalid number.")
-        elif state == 'bonus_setup_success': global_bonus_setup['msg_success'] = text
-        elif state == 'bonus_setup_fail': global_bonus_setup['msg_fail'] = text
+        elif state == 'bonus_setup_success': global_bonus_setup['msg_success'] = formatted_text
+        elif state == 'bonus_setup_fail': global_bonus_setup['msg_fail'] = formatted_text
         
         user_state[user_id] = 'admin_bonus_menu'
         bot.send_message(message.chat.id, "✅ Setting updated successfully!", reply_markup=get_keyboard(user_id))
@@ -1752,10 +1760,10 @@ def handle_messages(message):
         curr = admin_dep_setup.get(user_id)
         if state == 'dep_setup_addr': deposit_settings[curr]['address'] = text
         elif state == 'dep_setup_key': deposit_settings[curr]['hd_key'] = text
-        elif state == 'dep_setup_enter': deposit_settings[curr]['msg_enter'] = text
-        elif state == 'dep_setup_instruct': deposit_settings[curr]['msg_instruct'] = text
-        elif state == 'dep_setup_pending': deposit_settings[curr]['msg_pending'] = text
-        elif state == 'dep_setup_success': deposit_settings[curr]['msg_success'] = text
+        elif state == 'dep_setup_enter': deposit_settings[curr]['msg_enter'] = formatted_text
+        elif state == 'dep_setup_instruct': deposit_settings[curr]['msg_instruct'] = formatted_text
+        elif state == 'dep_setup_pending': deposit_settings[curr]['msg_pending'] = formatted_text
+        elif state == 'dep_setup_success': deposit_settings[curr]['msg_success'] = formatted_text
         elif state == 'dep_setup_min':
             try: deposit_settings[curr]['min'] = float(text)
             except ValueError: return bot.send_message(message.chat.id, "⚠️ Invalid amount. Please enter numbers only.")
@@ -1801,13 +1809,14 @@ def handle_messages(message):
 
     if state.startswith('w_setup_'):
         val = None if text == '➖ Set Empty' else text
+        formatted_val = None if text == '➖ Set Empty' else formatted_text
         if text != '✔️ Leave as Is':
             if state == 'w_setup_var': global_w_setup['w_var'] = val
             elif state == 'w_setup_min': global_w_setup['w_min'] = val
             elif state == 'w_setup_max': global_w_setup['w_max'] = val
-            elif state == 'w_setup_enter': global_w_setup['w_msg_enter'] = val
-            elif state == 'w_setup_addr': global_w_setup['w_msg_addr'] = val
-            elif state == 'w_setup_conf': global_w_setup['w_msg_conf'] = val
+            elif state == 'w_setup_enter': global_w_setup['w_msg_enter'] = formatted_val
+            elif state == 'w_setup_addr': global_w_setup['w_msg_addr'] = formatted_val
+            elif state == 'w_setup_conf': global_w_setup['w_msg_conf'] = formatted_val
 
         if state == 'w_setup_var':
             user_state[user_id] = 'admin_w_menu'
@@ -1909,7 +1918,7 @@ def handle_messages(message):
             except ValueError: return bot.send_message(message.chat.id, "⚠️ Invalid amount. Numbers only.")
         elif state == 'plan_setup_display':
             bot_plans[p_id]['photo'] = message.photo[-1].file_id if message.photo else None
-            bot_plans[p_id]['text'] = message.caption if message.photo else text
+            bot_plans[p_id]['text'] = formatted_text
         elif state == 'plan_setup_inline':
             bot_plans[p_id]['inline_text'] = text
         elif state == 'plan_setup_active_inline':
@@ -2079,7 +2088,7 @@ def handle_messages(message):
 
     if state in ['bal_change_comment', 'bal_set_comment']:
         if text == '➖ Set Empty': admin_bal_comment_text[user_id] = ""
-        else: admin_bal_comment_text[user_id] = text
+        else: admin_bal_comment_text[user_id] = formatted_text
             
         user_state[user_id] = state.replace('_comment', '_amount')
         bot.send_message(message.chat.id, "Enter the <b>numeric value</b> (+/- allowed for change):", parse_mode="HTML", reply_markup=get_keyboard(user_id))
