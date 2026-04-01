@@ -10,6 +10,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 from bip_utils import Bip39SeedGenerator, Bip44, Bip44Coins, Bip44Changes
+import psycopg2
+from psycopg2.extras import Json
 
 # --- 1. SECURITY VAULT (Environment Variables) ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -55,27 +57,56 @@ if MASTER_SEED:
 TRONGRID_API_KEY = os.getenv('TRONGRID_API_KEY', '')
 ETHERSCAN_API_KEY = os.getenv('ETHERSCAN_API_KEY', '')
 
-# --- NEW: PERMANENT JSON DATABASE SYSTEM ---
-DB_FILE = os.path.join(BASE_DIR, 'bot_database.json')
+# --- NEON POSTGRESQL DATABASE SYSTEM ---
+DATABASE_URL = os.getenv('DATABASE_URL', '')
+
+def init_db():
+    if not DATABASE_URL:
+        print("⚠️ NO DATABASE_URL FOUND! Make sure it is in your Environment Variables.")
+        return
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor()
+        # Create a permanent table if it doesn't exist yet
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS bot_state (
+                id INT PRIMARY KEY,
+                data JSONB
+            );
+        """)
+        conn.commit()
+        cur.close()
+        conn.close()
+        print("✅ Neon Database connected and table verified!")
+    except Exception as e:
+        print(f"❌ Neon DB Init Error: {e}")
 
 def load_database():
-    if os.path.exists(DB_FILE):
-        try:
-            with open(DB_FILE, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                # JSON converts Python integer keys to strings. We must convert User IDs back to numbers!
-                if 'user_db' in data:
-                    parsed_user_db = {}
-                    for k, v in data['user_db'].items():
-                        try: parsed_user_db[int(k)] = v
-                        except: parsed_user_db[k] = v
-                    data['user_db'] = parsed_user_db
-                return data
-        except Exception as e:
-            print(f"⚠️ Error loading database: {e}")
+    if not DATABASE_URL: return {}
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor()
+        cur.execute("SELECT data FROM bot_state WHERE id = 1;")
+        result = cur.fetchone()
+        cur.close()
+        conn.close()
+        
+        if result and result[0]:
+            data = result[0]
+            # JSON converts Python integer keys to strings. We convert User IDs back to numbers!
+            if 'user_db' in data:
+                parsed_user_db = {}
+                for k, v in data['user_db'].items():
+                    try: parsed_user_db[int(k)] = v
+                    except: parsed_user_db[k] = v
+                data['user_db'] = parsed_user_db
+            return data
+    except Exception as e:
+        print(f"⚠️ Error loading from Neon DB: {e}")
     return {}
 
 def save_database():
+    if not DATABASE_URL: return
     # Bundle everything we want to save into one master dictionary
     data_to_save = {
         'user_db': user_db,
@@ -87,13 +118,23 @@ def save_database():
         'global_w_setup': global_w_setup,
         'global_wallet_setup': global_wallet_setup,
         'global_bonus_setup': global_bonus_setup,
-        'processed_txids': list(processed_txids) # Convert set to list for JSON
+        'processed_txids': list(processed_txids) # Convert set to list for database
     }
     try:
-        with open(DB_FILE, 'w', encoding='utf-8') as f:
-            json.dump(data_to_save, f, indent=4)
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor()
+        # Securely upsert the data into row id 1
+        cur.execute("""
+            INSERT INTO bot_state (id, data) 
+            VALUES (1, %s)
+            ON CONFLICT (id) DO UPDATE 
+            SET data = EXCLUDED.data;
+        """, [Json(data_to_save)])
+        conn.commit()
+        cur.close()
+        conn.close()
     except Exception as e:
-        pass
+        print(f"⚠️ Neon DB Save Error: {e}")
 
 def auto_save_loop():
     """Runs forever in the background, saving data every 10 seconds."""
@@ -101,7 +142,8 @@ def auto_save_loop():
         time.sleep(10)
         save_database()
 
-# Load existing data from the file, or start fresh if it's the first time!
+# Initialize Neon and Load Data
+init_db()
 db_data = load_database()
 
 # --- DYNAMIC MEMORY & STATE ---
@@ -112,7 +154,7 @@ user_clipboard = {}
 user_action_data = {} 
 editor_msg_ids = {}
 
-# --- ADMIN TRACKERS (Don't need to be saved to JSON) ---
+# --- ADMIN TRACKERS (Don't need to be saved to DB) ---
 admin_bal_type = {}            
 admin_bal_notify = {}          
 admin_bal_comment_on = {}      
@@ -122,7 +164,7 @@ user_plan_setup = {}
 pending_deposits = {}
 admin_dep_setup = {}
 
-# --- PERSISTENT DATA (Loaded from JSON) ---
+# --- PERSISTENT DATA (Loaded from Neon DB) ---
 user_db = db_data.get('user_db', {})
 menus = db_data.get('menus', {'root': []})
 menu_posts = db_data.get('menu_posts', {'root': [{'id': 'init', 'type': 'text', 'text': 'Welcome to the Main Menu! Select an option below:', 'photo': None}]})
@@ -186,8 +228,8 @@ def get_default_metadata():
         'command': None,
         'move_by_command': False,
         'withdrawal': False, 
-        'is_wallet': False,  # NEW
-        'is_bonus': False,   # NEW
+        'is_wallet': False,  
+        'is_bonus': False,   
         'assigned_plan': None, 
         'is_calculator': False, 
         'is_history': False    
@@ -199,7 +241,7 @@ def init_user_db(message):
         user_db[user_id] = {
             'balance': 1000.00, 'bonus': 500.00, 'deposit': 200.00, 
             'hourly': 0.00, 'plan': 0.00, 'address': 'Not Set',
-            'wallet': 'Not Set', 'wallet_net': 'Not Set', 'email': 'Not Set', 'last_bonus_time': 0.0, # NEW
+            'wallet': 'Not Set', 'wallet_net': 'Not Set', 'email': 'Not Set', 'last_bonus_time': 0.0, 
             'first_name': message.from_user.first_name or 'Unknown',
             'last_name': message.from_user.last_name or '',
             'username': message.from_user.username or 'No Username',
