@@ -713,8 +713,53 @@ def send_path_content(chat_id, user_id, path, is_editing=False, reply_keyboard=N
                 
             if is_editing: editor_msg_ids.setdefault(user_id, []).append(sent.message_id)
         except Exception as e:
-            sent = bot.send_message(chat_id, f"⚠️ Error rendering post: {e}")
+            # FIX: Prevent editor lockout when HTML parse fails, send error and attach the editor markup
+            err_msg = f"⚠️ <b>Error rendering post:</b>\n<code>{html.escape(str(e))}</code>\n\n<i>Fix or delete this using the buttons below!</i>"
+            sent = bot.send_message(chat_id, err_msg, parse_mode="HTML", reply_markup=markup)
             if is_editing: editor_msg_ids.setdefault(user_id, []).append(sent.message_id)
+
+# --- NATIVE ENTITY EXTRACTOR (Safely translates Telegram Formatting to Database HTML) ---
+def extract_html(message):
+    text = message.text or message.caption or ""
+    entities = message.entities or message.caption_entities or []
+    
+    # Always fix the <bold> mistake for convenience, whether entities exist or not
+    text = text.replace('<bold>', '<b>').replace('</bold>', '</b>')
+    
+    if not entities:
+        return text
+
+    inserts = {}
+    for ent in entities:
+        start = ent.offset
+        end = start + ent.length
+        
+        open_tag, close_tag = "", ""
+        if ent.type == 'bold': open_tag, close_tag = "<b>", "</b>"
+        elif ent.type == 'italic': open_tag, close_tag = "<i>", "</i>"
+        elif ent.type == 'code': open_tag, close_tag = "<code>", "</code>"
+        elif ent.type == 'pre': open_tag, close_tag = "<pre>", "</pre>"
+        elif ent.type == 'strikethrough': open_tag, close_tag = "<s>", "</s>"
+        elif ent.type == 'underline': open_tag, close_tag = "<u>", "</u>"
+        elif ent.type == 'spoiler': open_tag, close_tag = "<tg-spoiler>", "</tg-spoiler>"
+        elif ent.type == 'text_link': open_tag, close_tag = f"<a href=\"{ent.url}\">", "</a>"
+        
+        if open_tag:
+            inserts.setdefault(start, []).append(open_tag)
+            inserts.setdefault(end, []).insert(0, close_tag)
+            
+    out = ""
+    for i, char in enumerate(text):
+        if i in inserts:
+            out += "".join(inserts[i])
+        
+        # We intentionally do not html.escape here so users can still mix manual raw HTML with native formatting
+        out += char
+        
+    if len(text) in inserts:
+        out += "".join(inserts[len(text)])
+        
+    return out
 
 # --- KEYBOARD BUILDERS ---
 def get_wizard_keyboard(current_val, options=None, allow_empty=False):
@@ -1023,11 +1068,7 @@ def handle_messages(message):
     text = message.text if message.text else (message.caption if message.caption else "")
     
     # --- NEW: NATIVE FORMATTING CAPTURE ---
-    formatted_text = ""
-    if message.photo:
-        formatted_text = message.caption_html if hasattr(message, 'caption_html') and message.caption_html else text
-    else:
-        formatted_text = message.html if hasattr(message, 'html') and message.html else text
+    formatted_text = extract_html(message)
 
     is_admin = user_id in ADMIN_IDS
     
