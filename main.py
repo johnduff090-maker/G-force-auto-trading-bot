@@ -55,41 +55,111 @@ if MASTER_SEED:
 TRONGRID_API_KEY = os.getenv('TRONGRID_API_KEY', '')
 ETHERSCAN_API_KEY = os.getenv('ETHERSCAN_API_KEY', '')
 
-# --- DYNAMIC MEMORY & STATE ---
-menus = {'root': []}
-menu_posts = {'root': [{'id': 'init', 'type': 'text', 'text': 'Welcome to the Main Menu! Select an option below:', 'photo': None}]}
+# --- NEW: PERMANENT JSON DATABASE SYSTEM ---
+DB_FILE = os.path.join(BASE_DIR, 'bot_database.json')
 
+def load_database():
+    if os.path.exists(DB_FILE):
+        try:
+            with open(DB_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                # JSON converts Python integer keys to strings. We must convert User IDs back to numbers!
+                if 'user_db' in data:
+                    parsed_user_db = {}
+                    for k, v in data['user_db'].items():
+                        try: parsed_user_db[int(k)] = v
+                        except: parsed_user_db[k] = v
+                    data['user_db'] = parsed_user_db
+                return data
+        except Exception as e:
+            print(f"⚠️ Error loading database: {e}")
+    return {}
+
+def save_database():
+    # Bundle everything we want to save into one master dictionary
+    data_to_save = {
+        'user_db': user_db,
+        'menus': menus,
+        'menu_posts': menu_posts,
+        'btn_metadata': btn_metadata,
+        'bot_plans': bot_plans,
+        'deposit_settings': deposit_settings,
+        'global_w_setup': global_w_setup,
+        'global_wallet_setup': global_wallet_setup,
+        'global_bonus_setup': global_bonus_setup,
+        'processed_txids': list(processed_txids) # Convert set to list for JSON
+    }
+    try:
+        with open(DB_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data_to_save, f, indent=4)
+    except Exception as e:
+        pass
+
+def auto_save_loop():
+    """Runs forever in the background, saving data every 10 seconds."""
+    while True:
+        time.sleep(10)
+        save_database()
+
+# Load existing data from the file, or start fresh if it's the first time!
+db_data = load_database()
+
+# --- DYNAMIC MEMORY & STATE ---
 user_current_path = {}
 user_state = {} 
 user_selected_button = {} 
 user_clipboard = {}        
-
-# User Database
-user_db = {}
 user_action_data = {} 
-btn_metadata = {}
 editor_msg_ids = {}
 
-# --- ADMIN TRACKERS ---
+# --- ADMIN TRACKERS (Don't need to be saved to JSON) ---
 admin_bal_type = {}            
 admin_bal_notify = {}          
 admin_bal_comment_on = {}      
 admin_bal_target = {}          
 admin_bal_comment_text = {}    
-bot_plans = {}                
 user_plan_setup = {}          
-
-# --- DEPOSIT ENGINE SETTINGS ---
 pending_deposits = {}
 admin_dep_setup = {}
 
-deposit_settings = {
+# --- PERSISTENT DATA (Loaded from JSON) ---
+user_db = db_data.get('user_db', {})
+menus = db_data.get('menus', {'root': []})
+menu_posts = db_data.get('menu_posts', {'root': [{'id': 'init', 'type': 'text', 'text': 'Welcome to the Main Menu! Select an option below:', 'photo': None}]})
+btn_metadata = db_data.get('btn_metadata', {})
+processed_txids = set(db_data.get('processed_txids', []))
+
+deposit_settings = db_data.get('deposit_settings', {
     'USDT_TRC20': {'mode': 'auto', 'address': 'Not Set', 'hd_key': 'Not Set', 'min': 10.0, 'max': 10000.0, 'msg_enter': 'Enter amount of USDT TRC20 (in USD) to deposit:', 'msg_instruct': 'Please send exactly `%crypto_amount%` USDT to:\n\n`%address%`\n\n_The system is monitoring the blockchain and will credit you automatically._', 'msg_pending': '✅ Your deposit request for $%usd_amount% has been submitted to the administrators.', 'msg_success': '✅ **Deposit Approved!**\n**$%usd_amount%** has been successfully added to your deposit balance.'},
     'USDT_BEP20': {'mode': 'auto', 'address': 'Not Set', 'hd_key': 'Not Set', 'min': 10.0, 'max': 10000.0, 'msg_enter': 'Enter amount of USDT BEP20 (in USD) to deposit:', 'msg_instruct': 'Please send exactly `%crypto_amount%` USDT to:\n\n`%address%`\n\n_The system is monitoring the blockchain and will credit you automatically._', 'msg_pending': '✅ Your deposit request for $%usd_amount% has been submitted to the administrators.', 'msg_success': '✅ **Deposit Approved!**\n**$%usd_amount%** has been successfully added to your deposit balance.'},
     'USDT_ERC20': {'mode': 'auto', 'address': 'Not Set', 'hd_key': 'Not Set', 'min': 10.0, 'max': 10000.0, 'msg_enter': 'Enter amount of USDT ERC20 (in USD) to deposit:', 'msg_instruct': 'Please send exactly `%crypto_amount%` USDT to:\n\n`%address%`\n\n_The system is monitoring the blockchain and will credit you automatically._', 'msg_pending': '✅ Your deposit request for $%usd_amount% has been submitted to the administrators.', 'msg_success': '✅ **Deposit Approved!**\n**$%usd_amount%** has been successfully added to your deposit balance.'},
     'TRX': {'mode': 'auto', 'address': 'Not Set', 'hd_key': 'Not Set', 'min': 5.0, 'max': 10000.0, 'msg_enter': 'Enter amount of TRX (in USD) to deposit:', 'msg_instruct': 'Please send exactly `%crypto_amount%` TRX to:\n\n`%address%`\n\n_The system is monitoring the blockchain and will credit you automatically._', 'msg_pending': '✅ Your deposit request for $%usd_amount% has been submitted to the administrators.', 'msg_success': '✅ **Deposit Approved!**\n**$%usd_amount%** has been successfully added to your deposit balance.'},
     'BTC': {'mode': 'auto', 'address': 'Not Set', 'hd_key': 'Not Set', 'min': 50.0, 'max': 50000.0, 'msg_enter': 'Enter amount of BTC (in USD) to deposit:', 'msg_instruct': 'Please send exactly `%crypto_amount%` BTC to:\n\n`%address%`\n\n_The system is monitoring the blockchain and will credit you automatically._', 'msg_pending': '✅ Your deposit request for $%usd_amount% has been submitted to the administrators.', 'msg_success': '✅ **Deposit Approved!**\n**$%usd_amount%** has been successfully added to your deposit balance.'}
-}
+})
+
+global_w_setup = db_data.get('global_w_setup', {
+    'w_var': 'balance', 'w_min': 10.0, 'w_max': 10000.0,
+    'w_msg_enter': 'Please enter the amount you wish to withdraw:',
+    'w_msg_addr': 'Please enter your withdrawal address:',
+    'w_msg_conf': 'Confirm withdrawal of %withdraw% to `%address%`?',
+    'do_not_ask_address': False
+})
+
+global_wallet_setup = db_data.get('global_wallet_setup', {
+    'msg_main': '💡 Your currently set USDT Wallet Address is: `%wallet%`\n\nEmail: `%email%`\n\n💹 It will be used for all future withdrawals.\n\nNOTE🔴: Supported, USDT Network Address are: TRC20 and BEP20 Set Only one..',
+    'msg_prompt': '✏️ Send now your USDT TRC 20 OR BEP 20 Address to use it in future transactions ..',
+    'msg_success': '🖊 Done: Your new wallet address is `%wallet%` (%network%)',
+    'inline_set': 'Set wallet', 'inline_change': 'Change wallet',
+    'ask_email': True, 'msg_email_prompt': '✏️ Please enter your Email address:'
+})
+
+global_bonus_setup = db_data.get('global_bonus_setup', {
+    'amount': 5.0, 'cooldown_hours': 24.0,
+    'msg_success': '🎉 Congratulations! You have received $%bonus% as a bonus.',
+    'msg_fail': '⏳ You have already claimed your bonus. Please wait %time_left%.'
+})
+
+bot_plans = db_data.get('bot_plans', {})
 
 # --- SYSTEM PLANS INITIALIZATION ---
 if not bot_plans:
@@ -100,38 +170,6 @@ if not bot_plans:
             'photo': None, 'inline_text': '🛒 Purchase Plan', 'inline_active_text': '(Active ✅)', 
             'redirect_cmd': None, 'is_free': (i == 0), 'bonus_amount': 50.0 if i == 0 else 0.0
         }
-
-# --- GLOBAL WITHDRAWAL SETTINGS ---
-global_w_setup = {
-    'w_var': 'balance',
-    'w_min': 10.0,
-    'w_max': 10000.0,
-    'w_msg_enter': 'Please enter the amount you wish to withdraw:',
-    'w_msg_addr': 'Please enter your withdrawal address:',
-    'w_msg_conf': 'Confirm withdrawal of %withdraw% to `%address%`?',
-    'do_not_ask_address': False
-}
-
-# --- NEW: GLOBAL WALLET & EMAIL SETTINGS ---
-global_wallet_setup = {
-    'msg_main': '💡 Your currently set USDT Wallet Address is: `%wallet%`\n\nEmail: `%email%`\n\n💹 It will be used for all future withdrawals.\n\nNOTE🔴: Supported, USDT Network Address are: TRC20 and BEP20 Set Only one..',
-    'msg_prompt': '✏️ Send now your USDT TRC 20 OR BEP 20 Address to use it in future transactions ..',
-    'msg_success': '🖊 Done: Your new wallet address is `%wallet%` (%network%)',
-    'inline_set': 'Set wallet',
-    'inline_change': 'Change wallet',
-    'ask_email': True,
-    'msg_email_prompt': '✏️ Please enter your Email address:'
-}
-
-# --- NEW: GLOBAL BONUS SETTINGS ---
-global_bonus_setup = {
-    'amount': 5.0,
-    'cooldown_hours': 24.0,
-    'msg_success': '🎉 Congratulations! You have received $%bonus% as a bonus.',
-    'msg_fail': '⏳ You have already claimed your bonus. Please wait %time_left%.'
-}
-
-processed_txids = set() # Stores Hashes to prevent double-crediting
 
 # --- TRANSACTION LEDGER LOGGER ---
 def log_tx(uid, t_type, amt):
@@ -2642,6 +2680,10 @@ if __name__ == '__main__':
     # Start the Blockchain Scanner
     print("👀 Starting background watcher thread...")
     threading.Thread(target=blockchain_watcher_loop, daemon=True).start()
+
+    # Start the Auto-Save Database Thread
+    print("💾 Starting JSON database auto-save thread...")
+    threading.Thread(target=auto_save_loop, daemon=True).start()
     
     # Start the Telegram Bot
     print("🚀 Bot is running fast! Press Ctrl+C to stop.")
