@@ -31,6 +31,7 @@ elif os.path.exists(txt_env_file):
     load_dotenv(dotenv_path=txt_env_file)
 else:
     print("❌ CRITICAL ERROR: No environment file found at all!")
+    print(f"📄 Files Python actually sees in this folder: {os.listdir(BASE_DIR)}")
 
 BOT_TOKEN = os.getenv('BOT_TOKEN', '')
 bot = telebot.TeleBot(BOT_TOKEN)
@@ -744,8 +745,8 @@ def get_keyboard(user_id):
             return markup
 
         if state == 'admin_menu':
-            # --- RENAMED BUTTON TO BYPASS EMOJI BUG ---
-            markup.row(KeyboardButton('User Macros'), KeyboardButton('📊 Plans'))
+            # --- RENAMED BUTTON TO BYPASS BUG ---
+            markup.row(KeyboardButton('User Macro'), KeyboardButton('📊 Plans'))
             markup.row(KeyboardButton('🏦 Deposit Settings'), KeyboardButton('Withdrawal Settings')) 
             markup.row(KeyboardButton('💳 Wallet Settings'), KeyboardButton('🎁 Bonus Settings')) 
             markup.row(KeyboardButton('🧮 Calculator'), KeyboardButton('📜 Transactions'))
@@ -951,10 +952,10 @@ def handle_messages(message):
     selected_btn = user_selected_button.get(user_id)
     full_path = f"{current_path}/{selected_btn}" if selected_btn else None
 
-    # --- UPDATED MACRO LIST LOGIC (EMOJI BUG BYPASS) ---
-    if ('User Macro' in text or 'Macros' in text) and is_admin:
+    # --- UPDATED MACRO LIST LOGIC (BULLETPROOF PARSE CATCHER) ---
+    if text in ['User Macro', 'User Macros', '📜 Macros'] and is_admin:
         macros_msg = (
-            "📝 **Available Macros List**\n"
+            "📝 *Available Macros List*\n"
             "(Tap on any macro to copy it)\n\n"
             "`%balance%` - Withdrawal balance (profits)\n"
             "`%deposit%` - Deposit balance\n"
@@ -973,7 +974,11 @@ def handle_messages(message):
             "`%time_left%` - Used dynamically in Bonus fail msg\n\n"
             "`%plan0%` ... `%plan5%` - Plan details\n"
         )
-        bot.send_message(message.chat.id, macros_msg, parse_mode="Markdown", reply_markup=get_keyboard(user_id))
+        try:
+            bot.send_message(message.chat.id, macros_msg, parse_mode="Markdown", reply_markup=get_keyboard(user_id))
+        except Exception as e:
+            safe_msg = "📝 Available Macros List:\n%balance%, %deposit%, %my_plans%, %activeplan%, %userid%, %username%, %firstname%, %lastname%, %usd_amount%, %crypto_amount%, %address%, %wallet%, %email%, %bonus_amount%, %time_left%, %plan0% to %plan5%"
+            bot.send_message(message.chat.id, safe_msg, reply_markup=get_keyboard(user_id))
         return
 
     # --- HANDLE USER ABORTING OR NAVIGATING ---
@@ -1754,7 +1759,7 @@ def handle_messages(message):
         return
 
     # --- BLOCK UNAUTHORIZED ADMIN COMMANDS ---
-    admin_commands = ['🎛️ Buttons Editor', '📝 Posts Editor', '💵 Balance', '🔐 Admin', '➕ Add Button', '🛑 Stop Editor', '✅ Confirm', '🚫 Cancel', '✖️ Delete', 'Deposit balance', 'Withdrawal balance', 'User Macros', '📊 Plans', '🔙 Back to Main', '🔙 Back to Admin', '➕ Add Plan', '➕ Add Message', 'Pagination in Editor (10)', '🏦 Deposit Settings', 'Withdrawal Settings', '🔙 Back to Deposit Menu', '📍 Set Static Address', '🔑 Set HD Wallet Key', '💬 Edit Enter Msg', '💬 Edit Instruct Msg', '💰 Set Min Deposit', '💰 Set Max Deposit', '💬 Edit Pending Msg', '💬 Edit Success Msg', '🧮 Calculator', '📜 Transactions', '💳 Wallet Settings', '🎁 Bonus Settings']
+    admin_commands = ['🎛️ Buttons Editor', '📝 Posts Editor', '💵 Balance', '🔐 Admin', '➕ Add Button', '🛑 Stop Editor', '✅ Confirm', '🚫 Cancel', '✖️ Delete', 'Deposit balance', 'Withdrawal balance', 'User Macro', 'User Macros', '📜 Macros', '📊 Plans', '🔙 Back to Main', '🔙 Back to Admin', '➕ Add Plan', '➕ Add Message', 'Pagination in Editor (10)', '🏦 Deposit Settings', 'Withdrawal Settings', '🔙 Back to Deposit Menu', '📍 Set Static Address', '🔑 Set HD Wallet Key', '💬 Edit Enter Msg', '💬 Edit Instruct Msg', '💰 Set Min Deposit', '💰 Set Max Deposit', '💬 Edit Pending Msg', '💬 Edit Success Msg', '🧮 Calculator', '📜 Transactions', '💳 Wallet Settings', '🎁 Bonus Settings']
     if not is_admin and (text in admin_commands or text.startswith('📋 Paste "') or text == '✔️ Leave as Is' or text == '➖ Set Empty' or text.startswith('⚙️ Edit ')):
         bot.send_message(message.chat.id, "Unrecognized command.", reply_markup=get_keyboard(user_id))
         return
@@ -1821,28 +1826,6 @@ def handle_messages(message):
         elif text == '🎁 Bonus Settings':
             user_state[user_id] = 'admin_bonus_menu'
             bot.send_message(message.chat.id, "🎁 **Bonus Settings**", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
-        elif 'User Macro' in text or 'Macros' in text:
-            macros_msg = (
-                "📝 **Available Macros List**\n"
-                "(Tap on any macro to copy it)\n\n"
-                "`%balance%` - Withdrawal balance (profits)\n"
-                "`%deposit%` - Deposit balance\n"
-                "`%my_plans%` - Shows user their active plans\n"
-                "`%activeplan%` - Exact same as %my_plans%\n"
-                "`%userid%` - Telegram numeric ID\n"
-                "`%username%` - Telegram @username\n"
-                "`%firstname%` - User's first name\n"
-                "`%lastname%` - User's last name\n\n"
-                "`%usd_amount%` - USD amount of deposit\n"
-                "`%crypto_amount%` - Crypto amount of deposit\n"
-                "`%address%` - Withdraw Wallet address\n\n"
-                "`%wallet%` - User's USDT Wallet address\n"
-                "`%email%` - User's Email address\n"
-                "`%bonus_amount%` - The defined bonus amount\n"
-                "`%time_left%` - Used dynamically in Bonus fail msg\n\n"
-                "`%plan0%` ... `%plan5%` - Plan details\n"
-            )
-            bot.send_message(message.chat.id, macros_msg, parse_mode="Markdown", reply_markup=get_keyboard(user_id))
         elif text == '📊 Plans':
             user_state[user_id] = 'admin_plans'
             bot.send_message(message.chat.id, "📊 **Plans Manager**", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
