@@ -591,7 +591,7 @@ def render_pi_manager(chat_id, post, message_id=None):
     else:
         bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=markup)
 
-def send_path_content(chat_id, user_id, path, is_editing=False):
+def send_path_content(chat_id, user_id, path, is_editing=False, reply_keyboard=None):
     if is_editing and user_id in editor_msg_ids:
         for m_id in editor_msg_ids[user_id]:
             try: bot.delete_message(chat_id, m_id)
@@ -601,6 +601,8 @@ def send_path_content(chat_id, user_id, path, is_editing=False):
     lang = user_db.get(user_id, {}).get('lang', 'en')
     meta = btn_metadata.get(path, get_default_metadata())
     assigned_plan = meta.get('assigned_plan')
+    
+    kb_attached = False
     
     if assigned_plan and assigned_plan in bot_plans:
         p_data = bot_plans[assigned_plan]
@@ -627,7 +629,7 @@ def send_path_content(chat_id, user_id, path, is_editing=False):
     posts = menu_posts.get(path, [])
     if not posts and not assigned_plan:
         msg_raw = f"📂 **{path.split('/')[-1]}**\n\n_(No messages set for this menu)_" if path != 'root' else "Welcome!"
-        sent = bot.send_message(chat_id, get_tl_and_map(msg_raw, lang), parse_mode="Markdown")
+        sent = bot.send_message(chat_id, get_tl_and_map(msg_raw, lang), parse_mode="Markdown", reply_markup=reply_keyboard)
         if is_editing: editor_msg_ids.setdefault(user_id, []).append(sent.message_id)
         return
         
@@ -673,6 +675,10 @@ def send_path_content(chat_id, user_id, path, is_editing=False):
                 
         if not markup.keyboard: 
             markup = None
+            
+        if not markup and not kb_attached and reply_keyboard:
+            markup = reply_keyboard
+            kb_attached = True
         
         try:
             if p['type'] == 'photo':
@@ -983,8 +989,7 @@ def send_welcome(message):
     user_state[user_id] = 'normal'
     user_selected_button[user_id] = None
     
-    send_path_content(message.chat.id, user_id, 'root', is_editing=False)
-    bot.send_message(message.chat.id, "\u3164", reply_markup=get_keyboard(user_id))
+    send_path_content(message.chat.id, user_id, 'root', is_editing=False, reply_keyboard=get_keyboard(user_id))
 
 @bot.message_handler(content_types=['text', 'photo'])
 def handle_messages(message):
@@ -1089,8 +1094,7 @@ def handle_messages(message):
         user_state[user_id] = 'normal' if not is_admin else state # Maintain editing states if admin
         if state in ['posts_adding', 'w_action_amount', 'w_action_addr', 'buyplan_wait_amount', 'dep_wait_amount', 'dep_wait_proof', 'wait_calc_amount', 'wallet_wait_email', 'wallet_wait_address']:
             user_state[user_id] = 'normal'
-        send_path_content(message.chat.id, user_id, 'root', is_editing=(user_state[user_id] == 'posts_editing'))
-        bot.send_message(message.chat.id, "\u3164", reply_markup=get_keyboard(user_id))
+        send_path_content(message.chat.id, user_id, 'root', is_editing=(user_state[user_id] == 'posts_editing'), reply_keyboard=get_keyboard(user_id))
         return
 
     if text == '🔙 Back':
@@ -1100,8 +1104,7 @@ def handle_messages(message):
             user_current_path[user_id] = new_path
             if state in ['w_action_amount', 'w_action_addr', 'buyplan_wait_amount', 'dep_wait_amount', 'dep_wait_proof', 'wait_calc_amount', 'wallet_wait_email', 'wallet_wait_address']:
                 user_state[user_id] = 'normal'
-            send_path_content(message.chat.id, user_id, new_path, is_editing=(user_state[user_id] == 'posts_editing'))
-            bot.send_message(message.chat.id, "\u3164", reply_markup=get_keyboard(user_id))
+            send_path_content(message.chat.id, user_id, new_path, is_editing=(user_state[user_id] == 'posts_editing'), reply_keyboard=get_keyboard(user_id))
         return
 
     if text == '🔙 Exit Button Settings':
@@ -1597,10 +1600,9 @@ def handle_messages(message):
             msg = conf['msg_instruct'].replace('%crypto_amount%', str(crypto_amount)).replace('%address%', address)
             msg = f"*(Live Rate: 1 {curr.split('_')[0]} = ${live_price:.2f})*\n\n{msg}"
             
-            bot.send_message(message.chat.id, get_tl_and_map(msg, lang), parse_mode='Markdown')
+            bot.send_message(message.chat.id, get_tl_and_map(msg, lang), parse_mode='Markdown', reply_markup=get_keyboard(user_id))
             
             user_state[user_id] = 'normal'
-            bot.send_message(message.chat.id, "\u3164", reply_markup=get_keyboard(user_id))
         return
 
     if state == 'dep_wait_proof':
@@ -1882,8 +1884,7 @@ def handle_messages(message):
                 new_path = f"{current_path}/{text}"
                 user_current_path[user_id] = new_path
                 if new_path not in menus: menus[new_path] = []
-                send_path_content(message.chat.id, user_id, new_path, False)
-                bot.send_message(message.chat.id, "\u3164", reply_markup=get_keyboard(user_id))
+                send_path_content(message.chat.id, user_id, new_path, False, reply_keyboard=get_keyboard(user_id))
             else:
                 user_selected_button[user_id] = text
                 bot.send_message(message.chat.id, f"🛠 Selected: **{text}**\nChoose an action:", parse_mode="Markdown", reply_markup=get_edit_inline_tools())
@@ -1893,8 +1894,7 @@ def handle_messages(message):
         if text == '🛑 Stop Editor':
             user_state[user_id] = 'normal'
             bot.send_message(message.chat.id, "🛑 Posts Editor stopped.", reply_markup=get_keyboard(user_id))
-            send_path_content(message.chat.id, user_id, current_path, False)
-            bot.send_message(message.chat.id, "\u3164", reply_markup=get_keyboard(user_id))
+            send_path_content(message.chat.id, user_id, current_path, False, reply_keyboard=get_keyboard(user_id))
             return
         elif text == '🎛️ Buttons Editor':
             user_state[user_id] = 'editing'
@@ -2105,8 +2105,7 @@ def handle_messages(message):
                 user_current_path[user_id] = path
                 if path not in menus: menus[path] = []
                 
-                send_path_content(message.chat.id, user_id, path, is_editing=(state == 'posts_editing'))
-                bot.send_message(message.chat.id, "\u3164", reply_markup=get_keyboard(user_id))
+                send_path_content(message.chat.id, user_id, path, is_editing=(state == 'posts_editing'), reply_keyboard=get_keyboard(user_id))
                 return
 
     # --- HANDLE BUTTONS EDITOR ADD / RENAME ---
@@ -2239,8 +2238,7 @@ def handle_messages(message):
             user_current_path[user_id] = new_path
             if new_path not in menus: menus[new_path] = []
             
-            send_path_content(message.chat.id, user_id, new_path, is_editing=(state == 'posts_editing'))
-            bot.send_message(message.chat.id, "\u3164", reply_markup=get_keyboard(user_id))
+            send_path_content(message.chat.id, user_id, new_path, is_editing=(state == 'posts_editing'), reply_keyboard=get_keyboard(user_id))
         else:
             bot.send_message(message.chat.id, get_tl_and_map("Unrecognized command.", lang), reply_markup=get_keyboard(user_id))
 
@@ -2356,8 +2354,7 @@ def handle_inline(call):
         bot.answer_callback_query(call.id, get_tl_and_map("Language updated!", target_lang), show_alert=True)
         try: bot.delete_message(call.message.chat.id, call.message.message_id)
         except: pass
-        send_path_content(call.message.chat.id, user_id, current_path, is_editing=(user_state.get(user_id) == 'posts_editing'))
-        bot.send_message(call.message.chat.id, "\u3164", reply_markup=get_keyboard(user_id))
+        send_path_content(call.message.chat.id, user_id, current_path, is_editing=(user_state.get(user_id) == 'posts_editing'), reply_keyboard=get_keyboard(user_id))
         return
 
     # --- CALCULATOR DYNAMIC BUY NOW (POPUP ENGINE) ---
@@ -2688,8 +2685,7 @@ def handle_inline(call):
             new_path = '/'.join(parts) if len(parts) > 1 else 'root'
             user_current_path[user_id] = new_path
             bot.delete_message(call.message.chat.id, call.message.message_id)
-            send_path_content(call.message.chat.id, user_id, new_path, is_editing=(user_state.get(user_id) == 'posts_editing'))
-            bot.send_message(call.message.chat.id, "\u3164", reply_markup=get_keyboard(user_id))
+            send_path_content(call.message.chat.id, user_id, new_path, is_editing=(user_state.get(user_id) == 'posts_editing'), reply_keyboard=get_keyboard(user_id))
         bot.answer_callback_query(call.id)
         return
 
