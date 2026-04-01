@@ -631,9 +631,9 @@ def send_path_content(chat_id, user_id, path, is_editing=False, reply_keyboard=N
         msg_raw = f"📂 **{path.split('/')[-1]}**\n\n_(No messages set for this menu)_" if path != 'root' else "Welcome!"
         sent = bot.send_message(chat_id, get_tl_and_map(msg_raw, lang), parse_mode="Markdown", reply_markup=reply_keyboard)
         if is_editing: editor_msg_ids.setdefault(user_id, []).append(sent.message_id)
-        return
+        kb_attached = True
         
-    for p in posts:
+    for i, p in enumerate(posts):
         text = get_tl_and_map(replace_macros(p['text'], user_id, path), lang)
         
         markup = InlineKeyboardMarkup()
@@ -676,7 +676,7 @@ def send_path_content(chat_id, user_id, path, is_editing=False, reply_keyboard=N
         if not markup.keyboard: 
             markup = None
             
-        if not markup and not kb_attached and reply_keyboard:
+        if not markup and not kb_attached and reply_keyboard and i == len(posts) - 1:
             markup = reply_keyboard
             kb_attached = True
         
@@ -690,6 +690,14 @@ def send_path_content(chat_id, user_id, path, is_editing=False, reply_keyboard=N
         except Exception as e:
             sent = bot.send_message(chat_id, f"⚠️ Error rendering post: {e}")
             if is_editing: editor_msg_ids.setdefault(user_id, []).append(sent.message_id)
+            
+    # Invisible keyboard injection hack if all posts have inline buttons blocking the reply keyboard
+    if reply_keyboard and not kb_attached:
+        try:
+            temp_msg = bot.send_message(chat_id, "🔄", reply_markup=reply_keyboard)
+            bot.delete_message(chat_id, temp_msg.message_id)
+        except Exception:
+            pass
 
 # --- KEYBOARD BUILDERS ---
 def get_wizard_keyboard(current_val, options=None, allow_empty=False):
@@ -1003,10 +1011,31 @@ def handle_messages(message):
     if user_id not in user_current_path: user_current_path[user_id] = 'root'
     if user_id not in user_state: user_state[user_id] = 'normal'
     
-    # REVERSE MAP: Transparently translate incoming buttons back to English logic!
+    # REVERSE MAP: Transparently translate incoming buttons back to English logic robustly!
     lang = user_db.get(user_id, {}).get('lang', 'en')
-    if lang != 'en' and text in REVERSE_TL_MAP.get(lang, {}):
-        text = REVERSE_TL_MAP[lang][text]
+    if lang != 'en':
+        if text in REVERSE_TL_MAP.get(lang, {}):
+            text = REVERSE_TL_MAP[lang][text]
+        else:
+            # Bulletproof Fallback: Dynamic re-hydration if cache was cleared/restarted
+            known_cmds = [
+                '🏠 Home', '🔙 Back', '❌ Cancel Action', '❌ Cancel', '🚫 Cancel Action', 
+                '🔙 Exit Button Settings', '🔙 Exit Balance', '💵 Get', '💵 Change', '💵 Set', 
+                'Referral Bonus', 'Deposit balance', 'Withdrawal balance', 'User Macro', 
+                '📊 Plans', '🏦 Deposit Settings', 'Withdrawal Settings', '💳 Wallet Settings', 
+                '🎁 Bonus Settings', '🧮 Calculator', '📜 Transactions', '🔙 Back to Main', 
+                '🔙 Back to Admin', '🔙 Back to Deposit Menu', '🔙 Back to Plans List', 
+                '✔️ Leave as Is', '➖ Set Empty', '🎛️ Buttons Editor', '📝 Posts Editor', 
+                '➕ Add Message', '🛑 Stop Editor', '➕ Add Button', '🔐 Admin'
+            ]
+            # Inject all dynamic button names currently existing
+            for path_keys in menus.values():
+                known_cmds.extend(path_keys)
+                
+            for cmd in set(known_cmds):
+                if text == get_tl_and_map(cmd, lang):
+                    text = cmd
+                    break
 
     # Reset normal users if stuck in certain states
     if not is_admin and user_state[user_id] not in ['w_action_amount', 'w_action_addr', 'dep_wait_amount', 'dep_wait_proof', 'buyplan_wait_amount', 'wait_calc_amount', 'wallet_wait_email', 'wallet_wait_address']: 
@@ -1207,7 +1236,7 @@ def handle_messages(message):
                 }
                 # Add default buttons dynamically from requirement
                 langs = [
-                    ('🇬🇧 English', 'en'), ('🇨🇳 Chinese', 'zh-CN'), ('🇵🇹 Portuguese', 'pt'),
+                    ('🇬🇧 English', 'en'), ('🇨🇳 Chinese', 'zh-cn'), ('🇵🇹 Portuguese', 'pt'),
                     ('🇳🇱 Dutch', 'nl'), ('🇪🇸 Spanish', 'es'), ('🇩🇪 German', 'de'),
                     ('🇫🇷 French', 'fr'), ('🇸🇦 Arabic', 'ar'), ('🇷🇺 Russian', 'ru'),
                     ('🇮🇩 Indonesian', 'id'), ('🇮🇳 Hindi', 'hi')
@@ -1600,8 +1629,13 @@ def handle_messages(message):
             msg = conf['msg_instruct'].replace('%crypto_amount%', str(crypto_amount)).replace('%address%', address)
             msg = f"*(Live Rate: 1 {curr.split('_')[0]} = ${live_price:.2f})*\n\n{msg}"
             
-            bot.send_message(message.chat.id, get_tl_and_map(msg, lang), parse_mode='Markdown', reply_markup=get_keyboard(user_id))
+            # Flash the keyboard update instantly via a micro-message and delete it
+            try:
+                temp_msg = bot.send_message(message.chat.id, "🔄", reply_markup=get_keyboard(user_id))
+                bot.delete_message(message.chat.id, temp_msg.message_id)
+            except Exception: pass
             
+            bot.send_message(message.chat.id, get_tl_and_map(msg, lang), parse_mode='Markdown')
             user_state[user_id] = 'normal'
         return
 
