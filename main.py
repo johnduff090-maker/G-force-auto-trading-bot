@@ -239,7 +239,7 @@ def init_user_db(message):
     user_id = message.from_user.id
     if user_id not in user_db:
         user_db[user_id] = {
-            'balance': 1000.00, 'bonus': 500.00, 'deposit': 200.00, 
+            'balance': 0.00, 'bonus': 0.00, 'deposit': 0.00, 
             'hourly': 0.00, 'plan': 0.00, 'address': 'Not Set',
             'wallet': 'Not Set', 'wallet_net': 'Not Set', 'email': 'Not Set', 'last_bonus_time': 0.0, 
             'first_name': message.from_user.first_name or 'Unknown',
@@ -1815,7 +1815,7 @@ def handle_messages(message):
                 "`%time_left%` - Used dynamically in Bonus fail msg\n\n"
                 "`%plan0%` ... `%plan5%` - Plan details\n"
             )
-            bot.send_message(message.chat.id, macros_msg, parse_mode="Markdown")
+            bot.send_message(message.chat.id, macros_msg, parse_mode="Markdown", reply_markup=get_keyboard(user_id))
         elif text == '📊 Plans':
             user_state[user_id] = 'admin_plans'
             bot.send_message(message.chat.id, "📊 **Plans Manager**", parse_mode="Markdown", reply_markup=get_keyboard(user_id))
