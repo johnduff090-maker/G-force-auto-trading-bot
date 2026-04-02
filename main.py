@@ -353,56 +353,7 @@ def generate_user_wallet(user_id, currency):
         print(f"Wallet Gen Error: {e}")
         return "GEN_ERROR", "GEN_ERROR"
 
-# --- 4. ON-DEMAND API DEPOSIT CHECKER ---
-def on_demand_deposit_check(user_id, curr):
-    """Scans blockchain on-demand using ENV APIs when Confirm is tapped."""
-    addr = user_db.get(user_id, {}).get('wallets', {}).get(curr, {}).get('address')
-    if not addr: return False, 0.0, None
-
-    try:
-        # 1. TRON Network (TRX, USDT_TRC20)
-        if curr in ['TRX', 'USDT_TRC20']:
-            headers = {"TRON-PRO-API-KEY": TRONGRID_API_KEY} if TRONGRID_API_KEY else {}
-            url = f"https://api.trongrid.io/v1/accounts/{addr}/transactions/trc20" if curr == 'USDT_TRC20' else f"https://api.trongrid.io/v1/accounts/{addr}/transactions"
-            resp = requests.get(url, headers=headers, timeout=10)
-            if resp.status_code == 200:
-                txs = resp.json().get('data', [])
-                for tx in txs:
-                    txid = tx.get('transaction_id') or tx.get('txID')
-                    if txid in processed_txids: continue
-                    
-                    is_incoming = False
-                    crypto_amount = 0.0
-                    if curr == 'USDT_TRC20':
-                        if tx.get('token_info', {}).get('address') == "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t" and tx.get('to') == addr:
-                            is_incoming = True
-                            crypto_amount = float(tx.get('value', 0)) / 1_000_000
-                    elif curr == 'TRX':
-                        if tx.get('raw_data', {}).get('contract', [{}])[0].get('parameter', {}).get('value', {}).get('to_address') == addr:
-                            is_incoming = True
-                            crypto_amount = float(tx['raw_data']['contract'][0]['parameter']['value'].get('amount', 0)) / 1_000_000
-                    
-                    if is_incoming and crypto_amount > 0:
-                        return True, crypto_amount, txid
-                        
-        # 2. ETHERSCAN / BSC / BTC placeholders for future extension
-        elif curr == 'USDT_ERC20':
-            # Requires ETHERSCAN_API_KEY logic
-            pass 
-        elif curr == 'USDT_BEP20':
-            # Requires BSCSCAN_API_KEY logic
-            pass
-        elif curr == 'BTC':
-            # Requires BTC API logic
-            pass
-            
-    except Exception as e:
-        print(f"Manual check error: {e}")
-        
-    return False, 0.0, None
-
-
-# --- 5. AUTO-DETECTION WATCHER ENGINE ---
+# --- 4. AUTO-DETECTION WATCHER ENGINE ---
 def blockchain_watcher_loop():
     """Continuously checks the blockchain for new deposits to generated wallets."""
     USDT_TRC20_CONTRACT = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
@@ -1486,7 +1437,8 @@ def handle_messages(message):
         raw_mode = user_action_data[user_id]['pi_mode']
         
         mode_map = {
-            '🔗 URL or Share': '💬 Popup Window': 'popup',
+            '🔗 URL or Share': 'url',
+            '💬 Popup Window': 'popup',
             '🚀 Command': 'command',
             '🛒 Buy Plan': 'buy_plan',
             '🏦 Deposit': 'deposit',
@@ -1728,18 +1680,23 @@ def handle_messages(message):
             user_state[user_id] = 'dep_wait_proof'
             bot.send_message(message.chat.id, get_tl_and_map(msg, lang), parse_mode='HTML', reply_markup=get_cancel_action_keyboard())
         else:
-            # --- NEW LOADING BAR UI ---
-            loading_msg = bot.send_message(message.chat.id, get_tl_and_map("⏳ Generating deposit wallet...\n[⬜️⬜️⬜️⬜️⬜️⬜️⬜️⬜️⬜️⬜️] 0%", lang))
-            time.sleep(0.5)
-            try: bot.edit_message_text(get_tl_and_map("⏳ Generating deposit wallet...\n[🟩🟩🟩⬜️⬜️⬜️⬜️⬜️⬜️⬜️] 30%", lang), message.chat.id, loading_msg.message_id)
-            except: pass
-            time.sleep(0.5)
-            try: bot.edit_message_text(get_tl_and_map("⏳ Generating deposit wallet...\n[🟩🟩🟩🟩🟩🟩🟩⬜️⬜️⬜️] 70%", lang), message.chat.id, loading_msg.message_id)
-            except: pass
-            time.sleep(0.5)
-            try: bot.edit_message_text(get_tl_and_map("⏳ Generating deposit wallet...\n[🟩🟩🟩🟩🟩🟩🟩🟩🟩🟩] 100%", lang), message.chat.id, loading_msg.message_id)
-            except: pass
-            time.sleep(0.2)
+            # LOADING BAR ANIMATION
+            loading_msg = bot.send_message(message.chat.id, get_tl_and_map("🔄 <b>Initializing Secure Connection...</b>\n[▯▯▯▯▯▯▯▯▯▯] 0%", lang), parse_mode="HTML")
+            bars = ["[■■▯▯▯▯▯▯▯▯] 20%", "[■■■■▯▯▯▯▯▯] 40%", "[■■■■■■▯▯▯▯] 60%", "[■■■■■■■■▯▯] 80%", "[■■■■■■■■■■] 100%"]
+            for bar in bars:
+                time.sleep(0.5)
+                try: bot.edit_message_text(get_tl_and_map(f"🔄 <b>Generating Wallet...</b>\n{bar}", lang), message.chat.id, loading_msg.message_id, parse_mode="HTML")
+                except: pass
+
+            if 'USDT' in curr:
+                live_price = 1.0
+            else:
+                live_price = get_crypto_price(curr)
+                if not live_price:
+                    user_state[user_id] = 'normal'
+                    return bot.send_message(message.chat.id, get_tl_and_map("⚠️ Error connecting to price oracle. Please try again later.", lang), reply_markup=get_keyboard(user_id))
+            
+            crypto_amount = round(usd_amount / live_price, 6)
             
             if curr not in user_db[user_id]['wallets']:
                 address, private_key = generate_user_wallet(user_id, curr)
@@ -1755,37 +1712,27 @@ def handle_messages(message):
             else:
                 address = user_db[user_id]['wallets'][curr]['address']
             
-            if 'USDT' in curr:
-                crypto_amount = f"{usd_amount:.4f}"
-                rate_text = ""
-                currency_symbol = "USDT"
-            else:
-                live_price = get_crypto_price(curr)
-                if not live_price:
-                    user_state[user_id] = 'normal'
-                    return bot.send_message(message.chat.id, get_tl_and_map("⚠️ Error connecting to price oracle. Please try again later.", lang), reply_markup=get_keyboard(user_id))
-                crypto_amount = f"{round(usd_amount / live_price, 6)}"
-                currency_symbol = curr.split('_')[0]
-                rate_text = f"🛜 live exchange rate: 1 {currency_symbol} = ${live_price:.2f}\n"
-
-            deposit_msg = f"""🚨 <b>DEPOSIT WALLET GENERATED</b> 🚨
-
-👤 User: {user_id} (@{message.from_user.username or 'None'})
-🪙 Currency: {curr.replace('_', ' ')}
-{rate_text}💸 Deposit amount: {crypto_amount}
-
-Please send exactly <code>{crypto_amount}</code> {currency_symbol} to:
-
-📫 Your Deposit Address:
-<code>{address}</code>"""
-
+            rate_text = f"🛜 live exchange rate: 1 {curr.split('_')[0]} = ${live_price:.2f}\n" if 'USDT' not in curr else ""
+            
+            msg = (
+                f"🚨 <b>DEPOSIT WALLET GENERATED</b> 🚨\n\n"
+                f"👤 User: <code>{user_id}</code> (@{message.from_user.username or 'None'})\n"
+                f"🪙 Currency: {curr.replace('_', ' ')}\n"
+                f"{rate_text}"
+                f"💸 Deposit amount: {crypto_amount} {curr.split('_')[0]}\n\n"
+                f"Please send exactly <code>{crypto_amount}</code> {curr.split('_')[0]} to:\n"
+                f"tap confirm\n\n"
+                f"📫 Your Deposit Address:\n"
+                f"<code>{address}</code>"
+            )
+            
             markup = InlineKeyboardMarkup()
-            markup.row(InlineKeyboardButton("✅ Confirm", callback_data=f"cb_dconf_{curr}"))
-
-            try:
-                bot.edit_message_text(get_tl_and_map(deposit_msg, lang), message.chat.id, loading_msg.message_id, parse_mode='HTML', reply_markup=markup)
-            except Exception:
-                bot.send_message(message.chat.id, get_tl_and_map(deposit_msg, lang), parse_mode='HTML', reply_markup=markup)
+            markup.row(InlineKeyboardButton(get_tl_and_map("✅ Confirm", lang), callback_data=f"cb_depcheck_{curr}"))
+            
+            try: bot.delete_message(message.chat.id, loading_msg.message_id)
+            except: pass
+            
+            bot.send_message(message.chat.id, get_tl_and_map(msg, lang), parse_mode='HTML', reply_markup=markup)
             
             user_state[user_id] = 'normal'
         return
@@ -2516,32 +2463,67 @@ def handle_inline(call):
     is_admin = user_id in ADMIN_IDS
     lang = user_db.get(user_id, {}).get('lang', 'en')
 
-    # --- ENHANCED DEPOSIT ON-DEMAND CHECKER (CONFIRM BUTTON) ---
-    if call.data.startswith('cb_dconf_'):
-        curr = call.data.replace('cb_dconf_', '')
-        bot.answer_callback_query(call.id, "🔍 Scanning blockchain for your deposit...", show_alert=True)
+    # --- ON-DEMAND DEPOSIT BLOCKCHAIN SCAN ---
+    if call.data.startswith('cb_depcheck_'):
+        curr = call.data.replace('cb_depcheck_', '')
+        bot.answer_callback_query(call.id, get_tl_and_map("Scanning blockchain for your deposit...", lang))
+        scan_msg = bot.send_message(call.message.chat.id, get_tl_and_map("⏳ Scanning blockchain network, please wait...", lang))
         
-        found, crypto_amt, txid = on_demand_deposit_check(user_id, curr)
+        addr = user_db[user_id].get('wallets', {}).get(curr, {}).get('address')
+        if not addr:
+            return bot.edit_message_text(get_tl_and_map("⚠️ Wallet not found.", lang), call.message.chat.id, scan_msg.message_id)
+
+        found_deposit = False
+        crypto_amount = 0.0
+        txid_found = ""
         
-        if found:
-            processed_txids.add(txid)
-            live_price = get_crypto_price(curr) or 1.0
-            usd_value = crypto_amt * live_price
+        if curr in ['TRX', 'USDT_TRC20']:
+            headers = {"TRON-PRO-API-KEY": TRONGRID_API_KEY} if TRONGRID_API_KEY else {}
+            url = f"https://api.trongrid.io/v1/accounts/{addr}/transactions/trc20" if curr == 'USDT_TRC20' else f"https://api.trongrid.io/v1/accounts/{addr}/transactions"
+            
+            try:
+                resp = requests.get(url, headers=headers, timeout=10)
+                if resp.status_code == 200:
+                    txs = resp.json().get('data', [])
+                    for tx in txs:
+                        txid = tx.get('transaction_id') or tx.get('txID')
+                        if txid in processed_txids: continue
+                        
+                        is_incoming = False
+                        if curr == 'USDT_TRC20':
+                            USDT_TRC20_CONTRACT = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
+                            if tx.get('token_info', {}).get('address') == USDT_TRC20_CONTRACT and tx.get('to') == addr:
+                                is_incoming = True
+                                crypto_amount = float(tx.get('value', 0)) / 1_000_000
+                        elif curr == 'TRX':
+                            if tx.get('raw_data', {}).get('contract', [{}])[0].get('parameter', {}).get('value', {}).get('to_address') == addr:
+                                is_incoming = True
+                                crypto_amount = float(tx['raw_data']['contract'][0]['parameter']['value'].get('amount', 0)) / 1_000_000
+                                
+                        if is_incoming and crypto_amount > 0:
+                            found_deposit = True
+                            txid_found = txid
+                            break
+            except Exception: pass
+            
+        if found_deposit:
+            processed_txids.add(txid_found)
+            live_price = get_crypto_price(curr) if 'USDT' not in curr else 1.0
+            usd_value = crypto_amount * live_price
+            
             user_db[user_id]['deposit'] += usd_value
             log_tx(user_id, f"Auto-Deposit ({curr})", usd_value)
             
-            msg = f"✅ <b>Deposit Confirmed!</b>\nWe found your deposit of <b>{crypto_amt} {curr.replace('_', ' ')}</b>.\n<b>${usd_value:.2f} USD</b> has been added to your balance."
-            bot.send_message(call.message.chat.id, get_tl_and_map(msg, lang), parse_mode="HTML")
+            bot.edit_message_text(get_tl_and_map(f"✅ <b>Deposit Detected!</b>\n\nReceived: <b>{crypto_amount} {curr.replace('_', ' ')}</b>\nCredited: <b>${usd_value:.2f} USD</b>", lang), call.message.chat.id, scan_msg.message_id, parse_mode="HTML")
             
-            admin_msg = f"🟢 <b>ON-DEMAND DEPOSIT CONFIRMED</b>\nUser: <code>{user_id}</code>\nCurrency: {curr.replace('_', ' ')}\nCrypto Amount: {crypto_amt}\nUSD Credited: ${usd_value:.2f}\nHash (TXID): <code>{txid}</code>"
+            admin_msg = f"🟢 <b>AUTO-DEPOSIT CONFIRMED (MANUAL CHECK)</b>\nUser: <code>{user_id}</code>\nCurrency: {curr.replace('_', ' ')}\nCrypto Amount: {crypto_amount}\nUSD Credited: ${usd_value:.2f}\nHash (TXID): <code>{txid_found}</code>"
             for admin in ADMIN_IDS:
                 try: bot.send_message(admin, admin_msg, parse_mode="HTML")
                 except Exception: pass
                 
             check_and_trigger_auto_buy(user_id)
         else:
-            scan_msg = get_tl_and_map(f"🔄 <b>Scanning Network...</b>\n\nNo new deposit found yet on the {curr.replace('_', ' ')} network. \n\n<i>Note: Network confirmations can take a few minutes. We will keep monitoring your address automatically!</i>", lang)
-            bot.send_message(call.message.chat.id, scan_msg, parse_mode="HTML")
+            bot.edit_message_text(get_tl_and_map("⏳ <b>No new deposit detected yet.</b>\n\nIf you just sent it, please wait a few minutes for the blockchain to confirm the transaction and try clicking Confirm again.", lang), call.message.chat.id, scan_msg.message_id, parse_mode="HTML")
         return
 
     # --- WALLET SETUP NATIVE INLINE ---
