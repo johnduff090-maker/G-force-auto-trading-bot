@@ -6,68 +6,168 @@
     <title>Bot Admin Dashboard</title>
     <style>
         :root {
-            --bg-color: #121212;
-            --card-bg: #1e1e1e;
+            --bg-color: #0f2027; /* Fallback */
+            --bg-gradient: linear-gradient(to right, #2c5364, #203a43, #0f2027);
             --text-color: #ffffff;
             --primary-color: #0088cc;
-            --primary-hover: #006699;
+            --primary-hover: #00aaff;
             --danger-color: #ff4d4d;
-            --border-radius: 8px;
+            --glass-bg: rgba(255, 255, 255, 0.05);
+            --glass-border: rgba(255, 255, 255, 0.1);
+            --border-radius: 12px;
         }
 
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background-color: var(--bg-color);
+            background: var(--bg-gradient);
             color: var(--text-color);
+            margin: 0;
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        /* Glassmorphism Utility */
+        .glass {
+            background: var(--glass-bg);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid var(--glass-border);
+            border-radius: var(--border-radius);
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+        }
+
+        /* Login Screen */
+        #login-screen {
             display: flex;
+            flex-direction: column;
             justify-content: center;
             align-items: center;
-            min-height: 100vh;
-            margin: 0;
+            height: 100vh;
         }
 
-        .dashboard-container {
-            background-color: var(--card-bg);
-            padding: 30px;
-            border-radius: var(--border-radius);
-            box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+        .login-box {
+            padding: 40px;
             width: 100%;
-            max-width: 400px;
-        }
-
-        h2 {
-            margin-top: 0;
+            max-width: 350px;
             text-align: center;
-            border-bottom: 2px solid #333;
-            padding-bottom: 15px;
-            margin-bottom: 20px;
         }
 
+        /* Dashboard Layout */
+        #dashboard-screen {
+            display: none; 
+            flex-direction: column;
+            height: 100vh;
+        }
+
+        /* Navbar */
+        nav {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 15px 20px;
+            margin: 10px;
+            z-index: 10;
+        }
+
+        .nav-left {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .hamburger {
+            font-size: 24px;
+            cursor: pointer;
+            background: none;
+            border: none;
+            color: white;
+        }
+
+        .total-balance {
+            font-size: 1.2em;
+            font-weight: bold;
+            color: #4caf50;
+            padding: 8px 15px;
+            background: rgba(0,0,0,0.3);
+            border-radius: var(--border-radius);
+        }
+
+        /* Layout */
+        .main-container {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+            position: relative;
+        }
+
+        /* Sidebar */
+        aside {
+            width: 250px;
+            margin: 0 0 10px 10px;
+            padding: 20px 0;
+            display: flex;
+            flex-direction: column;
+            transition: transform 0.3s ease;
+        }
+
+        .sidebar-hidden {
+            transform: translateX(-110%);
+            position: absolute;
+            height: 100%;
+        }
+
+        aside a {
+            padding: 15px 20px;
+            color: white;
+            text-decoration: none;
+            font-size: 1.1em;
+            cursor: pointer;
+            border-bottom: 1px solid var(--glass-border);
+            transition: background 0.3s;
+        }
+
+        aside a:hover {
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        /* Content Area */
+        main {
+            flex: 1;
+            padding: 20px;
+            overflow-y: auto;
+        }
+
+        .section {
+            display: none;
+            max-width: 800px;
+            margin: 0 auto;
+        }
+
+        .section.active {
+            display: block;
+        }
+
+        /* Typography & Forms */
+        h2 { margin-top: 0; }
+        
         .form-group {
             display: flex;
             flex-direction: column;
             gap: 10px;
-            margin-bottom: 25px;
+            margin-bottom: 20px;
         }
 
-        label {
-            font-size: 0.9em;
-            color: #aaa;
-        }
-
-        input[type="number"] {
+        input {
             padding: 12px;
-            border: 1px solid #333;
+            border: 1px solid var(--glass-border);
             border-radius: var(--border-radius);
-            background-color: #2a2a2a;
+            background-color: rgba(0, 0, 0, 0.2);
             color: white;
             font-size: 1em;
             outline: none;
         }
 
-        input[type="number"]:focus {
-            border-color: var(--primary-color);
-        }
+        input:focus { border-color: var(--primary-color); }
 
         button {
             padding: 12px;
@@ -77,45 +177,54 @@
             border-radius: var(--border-radius);
             font-size: 1em;
             cursor: pointer;
-            transition: background-color 0.3s;
             font-weight: bold;
+            transition: 0.3s;
         }
 
-        button:hover {
-            background-color: var(--primary-hover);
+        button:hover { background-color: var(--primary-hover); }
+        button.btn-danger { background-color: var(--danger-color); }
+        button.btn-danger:hover { background-color: #cc0000; }
+        button.btn-outline { background: transparent; border: 1px solid var(--primary-color); color: var(--primary-color); }
+        button.btn-outline:hover { background: var(--primary-color); color: white; }
+
+        /* Wallet Cards */
+        .wallet-card {
+            padding: 20px;
+            margin-bottom: 15px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
         }
 
-        .admin-list-container {
-            margin-top: 20px;
+        .wallet-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid var(--glass-border);
+            padding-bottom: 10px;
         }
 
-        .admin-list {
-            list-style-type: none;
-            padding: 0;
-            margin: 0;
+        .wallet-body p { margin: 5px 0; font-family: monospace; font-size: 1.1em; color: #ddd;}
+        .wallet-body span { color: white; font-weight: bold; }
+
+        .wallet-actions {
+            display: flex;
+            gap: 10px;
+            margin-top: 10px;
         }
 
+        /* Admin List */
         .admin-item {
-            background-color: #2a2a2a;
-            padding: 10px 15px;
+            background-color: rgba(0,0,0,0.2);
+            padding: 15px;
             border-radius: var(--border-radius);
-            margin-bottom: 8px;
+            margin-bottom: 10px;
             display: flex;
             justify-content: space-between;
             align-items: center;
             font-family: monospace;
             font-size: 1.1em;
-        }
-
-        .delete-btn {
-            background-color: transparent;
-            color: var(--danger-color);
-            padding: 5px 10px;
-            font-size: 0.9em;
-        }
-
-        .delete-btn:hover {
-            background-color: rgba(255, 77, 77, 0.1);
+            border: 1px solid var(--glass-border);
         }
 
         #status-message {
@@ -124,68 +233,269 @@
             font-size: 0.9em;
             min-height: 20px;
         }
-
         .success { color: #4caf50; }
         .error { color: var(--danger-color); }
 
-        .footer-note {
+        /* Modals */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0, 0, 0, 0.6);
+            z-index: 100;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .modal-content {
+            width: 90%;
+            max-width: 400px;
+            padding: 25px;
             text-align: center;
-            font-size: 0.8em;
-            color: #555;
-            margin-top: 20px;
         }
     </style>
 </head>
 <body>
 
-    <div class="dashboard-container">
-        <h2>🔐 Bot Admin Manager</h2>
-
-        <div class="form-group">
-            <label for="adminId">Add New Admin (Telegram User ID)</label>
-            <input type="number" id="adminId" placeholder="e.g. 123456789" required>
-            <button onclick="addAdmin()">Add Admin</button>
+    <div id="login-screen">
+        <div class="login-box glass">
+            <h2>🔒 Admin Access</h2>
+            <div class="form-group">
+                <input type="password" id="pinInput" placeholder="Enter 6-Digit PIN" maxlength="6" style="text-align: center; font-size: 1.5em; letter-spacing: 10px;">
+                <button onclick="login()">Unlock Dashboard</button>
+            </div>
+            <div id="loginError" class="error"></div>
         </div>
+    </div>
 
-        <div id="status-message"></div>
+    <div id="dashboard-screen">
+        <nav class="glass">
+            <div class="nav-left">
+                <button class="hamburger" onclick="toggleSidebar()">☰</button>
+                <h2>Bot Admin</h2>
+            </div>
+            <div class="total-balance" id="totalBalanceUI">Total: $0.00</div>
+        </nav>
 
-        <div class="admin-list-container">
-            <label>Current Admins</label>
-            <ul class="admin-list" id="adminList">
-                <li class="admin-item">Loading admins...</li>
-            </ul>
+        <div class="main-container">
+            <aside id="sidebar" class="glass">
+                <a onclick="switchSection('wallets')">💼 Active Wallets</a>
+                <a onclick="switchSection('admins')">👑 Admin Manager</a>
+                <a onclick="logout()">🚪 Lock & Logout</a>
+            </aside>
+
+            <main>
+                <section id="wallets" class="section active">
+                    <h2>💼 Pending Sweeps</h2>
+                    <p style="color: #aaa; margin-bottom: 20px;">Wallets below have active unswept deposits.</p>
+                    <div id="walletsContainer">
+                        </div>
+                </section>
+
+                <section id="admins" class="section glass" style="padding: 30px;">
+                    <h2>🔐 Manager Settings</h2>
+                    
+                    <div class="form-group">
+                        <label>Add New Admin (Telegram User ID)</label>
+                        <input type="number" id="adminId" placeholder="e.g. 123456789">
+                        <button onclick="addAdmin()">Add Admin</button>
+                    </div>
+                    <div id="status-message"></div>
+
+                    <div style="margin-top: 30px;">
+                        <label style="color: #aaa;">Current Admins</label>
+                        <div id="adminList" style="margin-top: 10px;">
+                            </div>
+                    </div>
+                </section>
+            </main>
         </div>
+    </div>
 
-        <div class="footer-note">
-            🟢 UptimeRobot Status: Online & Monitoring
+    <div id="pkModal" class="modal-overlay">
+        <div class="modal-content glass">
+            <h2>🔑 Private Key</h2>
+            <p style="color: #aaa; font-size: 0.9em;">Keep this secure. Do not share.</p>
+            <input type="text" id="pkValue" readonly style="width: 100%; box-sizing: border-box; margin-bottom: 15px;">
+            <div style="display: flex; gap: 10px;">
+                <button onclick="copyPK()" style="flex: 1;">📋 Copy</button>
+                <button class="btn-outline" onclick="closeModal()" style="flex: 1;">Close</button>
+            </div>
         </div>
     </div>
 
     <script>
-        // When we build the Python backend, this function will ask Python for the current admins
-        async function fetchAdmins() {
+        let sessionPin = '';
+
+        // --- UI LOGIC ---
+        function toggleSidebar() {
+            document.getElementById('sidebar').classList.toggle('sidebar-hidden');
+        }
+
+        function switchSection(sectionId) {
+            document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+            document.getElementById(sectionId).classList.add('active');
+            if(window.innerWidth < 768) toggleSidebar(); // Auto-hide on mobile
+            
+            if(sectionId === 'wallets') fetchWallets();
+            if(sectionId === 'admins') fetchAdmins();
+        }
+
+        function closeModal() {
+            document.getElementById('pkModal').style.display = 'none';
+            document.getElementById('pkValue').value = '';
+        }
+
+        function logout() {
+            sessionPin = '';
+            document.getElementById('dashboard-screen').style.display = 'none';
+            document.getElementById('login-screen').style.display = 'flex';
+            document.getElementById('pinInput').value = '';
+        }
+
+        async function copyPK() {
+            const pkInput = document.getElementById('pkValue');
+            pkInput.select();
+            document.execCommand('copy');
+            alert('Private Key copied to clipboard!');
+        }
+
+        // --- API LOGIC ---
+        
+        async function login() {
+            const pin = document.getElementById('pinInput').value;
+            const errDiv = document.getElementById('loginError');
+            
+            if(pin.length < 4) { errDiv.innerText = 'Enter a valid PIN.'; return; }
+            errDiv.innerText = 'Authenticating...';
+
             try {
-                const response = await fetch('/api/get_admins');
-                const data = await response.json();
-                const listElement = document.getElementById('adminList');
-                
-                listElement.innerHTML = '';
-                
-                data.admins.forEach(adminId => {
-                    const li = document.createElement('li');
-                    li.className = 'admin-item';
-                    li.innerHTML = `
-                        ${adminId}
-                        <button class="delete-btn" onclick="removeAdmin(${adminId})">Remove</button>
-                    `;
-                    listElement.appendChild(li);
+                const response = await fetch('/api/verify_pin', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ pin: pin })
                 });
-            } catch (error) {
-                document.getElementById('adminList').innerHTML = '<li class="admin-item error">Backend not connected yet.</li>';
+                
+                if(response.ok) {
+                    sessionPin = pin;
+                    document.getElementById('login-screen').style.display = 'none';
+                    document.getElementById('dashboard-screen').style.display = 'flex';
+                    fetchWallets();
+                } else {
+                    errDiv.innerText = '❌ Incorrect PIN';
+                }
+            } catch (e) {
+                errDiv.innerText = 'Backend connection error.';
             }
         }
 
-        // This function will send the new ID to your Python script
+        async function fetchWallets() {
+            try {
+                const response = await fetch('/api/get_wallets', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ pin: sessionPin })
+                });
+                const data = await response.json();
+                
+                document.getElementById('totalBalanceUI').innerText = `Total: $${data.total_usd.toFixed(2)}`;
+                const container = document.getElementById('walletsContainer');
+                container.innerHTML = '';
+
+                if(data.wallets.length === 0) {
+                    container.innerHTML = '<p style="color: #aaa;">No active unswept deposits found.</p>';
+                    return;
+                }
+
+                data.wallets.forEach(w => {
+                    const card = document.createElement('div');
+                    card.className = 'wallet-card glass';
+                    card.innerHTML = `
+                        <div class="wallet-header">
+                            <h3 style="margin:0;">👤 ${w.username}</h3>
+                            <span style="background: rgba(255,255,255,0.1); padding: 5px 10px; border-radius: 8px;">⏱ ${w.time}</span>
+                        </div>
+                        <div class="wallet-body">
+                            <p>Network: <span>${w.network}</span></p>
+                            <p>Address: <span style="font-size: 0.9em; word-break: break-all;">${w.address}</span></p>
+                            <p>Pending Sweep: <span style="color: #4caf50;">${w.amount}</span></p>
+                        </div>
+                        <div class="wallet-actions">
+                            <button onclick="viewKey(${w.uid}, '${w.network}')" style="flex:1;">👁 View Private Key</button>
+                            <button class="btn-outline" onclick="markSwept(${w.uid}, '${w.network}')" style="flex:1;">🧹 Mark as Swept</button>
+                        </div>
+                    `;
+                    container.appendChild(card);
+                });
+            } catch (e) {
+                console.error("Wallet fetch error");
+            }
+        }
+
+        async function viewKey(uid, network) {
+            try {
+                const response = await fetch('/api/get_private_key', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ pin: sessionPin, uid: uid, network: network })
+                });
+                const data = await response.json();
+                
+                if(response.ok) {
+                    document.getElementById('pkValue').value = data.private_key;
+                    document.getElementById('pkModal').style.display = 'flex';
+                } else {
+                    alert('Error retrieving key');
+                }
+            } catch(e) {
+                alert('Connection error');
+            }
+        }
+
+        async function markSwept(uid, network) {
+            if(!confirm("Are you sure you want to mark this wallet as swept? It will disappear from this list.")) return;
+            
+            try {
+                const response = await fetch('/api/mark_swept', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ pin: sessionPin, uid: uid, network: network })
+                });
+                
+                if(response.ok) {
+                    fetchWallets(); // Refresh list automatically
+                }
+            } catch(e) {
+                alert('Connection error');
+            }
+        }
+
+        // --- ADMIN MANAGER FUNCTIONS (Updated to use PIN) ---
+        async function fetchAdmins() {
+            try {
+                const response = await fetch('/api/get_admins', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ pin: sessionPin })
+                });
+                const data = await response.json();
+                const listElement = document.getElementById('adminList');
+                listElement.innerHTML = '';
+                
+                data.admins.forEach(adminId => {
+                    const div = document.createElement('div');
+                    div.className = 'admin-item';
+                    div.innerHTML = `
+                        ${adminId}
+                        <button class="btn-danger" style="padding: 8px 15px;" onclick="removeAdmin(${adminId})">Remove</button>
+                    `;
+                    listElement.appendChild(div);
+                });
+            } catch (error) {
+                document.getElementById('adminList').innerHTML = '<p class="error">Backend not connected yet.</p>';
+            }
+        }
+
         async function addAdmin() {
             const adminIdInput = document.getElementById('adminId');
             const statusMsg = document.getElementById('status-message');
@@ -197,52 +507,42 @@
                 return;
             }
 
-            statusMsg.textContent = "Connecting to bot...";
-            statusMsg.className = "";
-
             try {
                 const response = await fetch('/api/add_admin', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ admin_id: adminId })
+                    body: JSON.stringify({ pin: sessionPin, admin_id: adminId })
                 });
 
                 const result = await response.json();
-
                 if (response.ok) {
-                    statusMsg.textContent = `✅ Admin ${adminId} added successfully!`;
+                    statusMsg.textContent = `✅ Admin ${adminId} added!`;
                     statusMsg.className = "success";
-                    adminIdInput.value = ''; // Clear input
-                    fetchAdmins(); // Refresh the list
+                    adminIdInput.value = ''; 
+                    fetchAdmins(); 
                 } else {
-                    statusMsg.textContent = `❌ Error: ${result.error}`;
+                    statusMsg.textContent = `❌ ${result.error}`;
                     statusMsg.className = "error";
                 }
             } catch (error) {
-                statusMsg.textContent = "Backend Python server is not active yet.";
+                statusMsg.textContent = "Backend Python server error.";
                 statusMsg.className = "error";
             }
         }
 
-        // This function will tell Python to delete an admin
         async function removeAdmin(adminId) {
-            if(!confirm(`Are you sure you want to remove admin ${adminId}?`)) return;
-
+            if(!confirm(`Remove admin ${adminId}?`)) return;
             try {
                 await fetch('/api/remove_admin', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ admin_id: adminId })
+                    body: JSON.stringify({ pin: sessionPin, admin_id: adminId })
                 });
                 fetchAdmins();
             } catch (error) {
-                console.error("Failed to remove admin", error);
+                console.error(error);
             }
         }
-
-        // Fetch the list of admins as soon as the page loads
-        window.onload = fetchAdmins;
     </script>
 </body>
 </html>
-
