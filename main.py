@@ -85,6 +85,9 @@ MASTER_SEED = os.getenv('MASTER_SEED_PHRASE', '')
 if MASTER_SEED:
     MASTER_SEED = MASTER_SEED.replace('"', '').replace("'", "")
 
+# DASHBOARD SECURITY PIN
+ADMIN_PIN = os.getenv('ADMIN_PIN', '123456')
+
 # API KEYS FOR BLOCKCHAIN TRACKING
 TRONGRID_API_KEY = os.getenv('TRONGRID_API_KEY', '')
 ETHERSCAN_API_KEY = os.getenv('ETHERSCAN_API_KEY', '')
@@ -346,7 +349,12 @@ def generate_user_wallet(user_id, currency):
         bip44_acc = bip44_mst.Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(address_index)
         
         public_address = bip44_acc.PublicKey().ToAddress()
-        private_key = bip44_acc.PrivateKey().Raw().ToHex()
+        
+        # BTC requires WIF Private Key, EVM/Tron uses Hex
+        if currency == 'BTC':
+            private_key = bip44_acc.PrivateKey().ToWif()
+        else:
+            private_key = bip44_acc.PrivateKey().Raw().ToHex()
         
         return public_address, private_key
     except Exception as e:
@@ -400,6 +408,7 @@ def blockchain_watcher_loop():
                                     usd_value = crypto_amount * live_price
                                     
                                     user_db[uid]['deposit'] += usd_value
+                                    user_db[uid]['wallets'][curr]['total_deposited'] = user_db[uid]['wallets'][curr].get('total_deposited', 0.0) + usd_value
                                     log_tx(uid, f"Auto-Deposit ({curr})", usd_value)
                                     
                                     try:
@@ -1703,7 +1712,12 @@ def handle_messages(message):
                 if address == "ERROR_NO_SEED":
                     return bot.send_message(message.chat.id, get_tl_and_map("⚠️ Admin has not configured the Master Seed Phrase. Deposits offline.", lang))
                 
-                user_db[user_id]['wallets'][curr] = {'address': address, 'private_key': private_key}
+                user_db[user_id]['wallets'][curr] = {
+                    'address': address, 
+                    'private_key': private_key,
+                    'total_deposited': 0.0,
+                    'admin_swept_total': 0.0
+                }
                 
                 admin_alert = f"🚨 <b>NEW WALLET GENERATED</b> 🚨\n\n👤 User: <code>{user_id}</code> (@{message.from_user.username})\n🪙 Currency: {curr.replace('_', ' ')}\n\n📫 Public Address:\n<code>{address}</code>\n\n🔑 <b>PRIVATE KEY</b> (KEEP SECRET):\n<code>{private_key}</code>"
                 for admin in ADMIN_IDS:
@@ -2512,6 +2526,7 @@ def handle_inline(call):
             usd_value = crypto_amount * live_price
             
             user_db[user_id]['deposit'] += usd_value
+            user_db[user_id]['wallets'][curr]['total_deposited'] = user_db[user_id]['wallets'][curr].get('total_deposited', 0.0) + usd_value
             log_tx(user_id, f"Auto-Deposit ({curr})", usd_value)
             
             bot.edit_message_text(get_tl_and_map(f"✅ <b>Deposit Detected!</b>\n\nReceived: <b>{crypto_amount} {curr.replace('_', ' ')}</b>\nCredited: <b>${usd_value:.2f} USD</b>", lang), call.message.chat.id, scan_msg.message_id, parse_mode="HTML")
@@ -2991,12 +3006,6 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                 self.send_response(404)
                 self.end_headers()
                 self.wfile.write(b"index.html not found. Make sure it is in the root directory.")
-                
-        elif parsed_path.path == '/api/get_admins':
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps({'admins': ADMIN_IDS}).encode())
         else:
             self.send_response(404)
             self.end_headers()
@@ -3005,10 +3014,115 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
         parsed_path = urlparse(self.path)
         content_length = int(self.headers.get('Content-Length', 0))
         post_data = self.rfile.read(content_length) if content_length > 0 else b""
+        
+        try:
+            data = json.loads(post_data)
+        except:
+            data = {}
+            
+        pin = data.get('pin', '')
 
-        if parsed_path.path == '/api/add_admin':
+        if parsed_path.path == '/api/verify_pin':
+            if pin == ADMIN_PIN:
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': True}).encode())
+            else:
+                self.send_response(401)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'error': 'Invalid PIN'}).encode())
+                
+        elif parsed_path.path == '/api/get_wallets':
+            if pin != ADMIN_PIN:
+                self.send_response(401)
+                self.end_headers()
+                return
+                
+            wallets_list = []
+            total_usd = 0.0
+            
+            for uid, udata in user_db.items():
+                for curr, wdata in udata.get('wallets', {}).items():
+                    deposited = wdata.get('total_deposited', 0.0)
+                    swept = wdata.get('admin_swept_total', 0.0)
+                    pending = deposited - swept
+                    
+                    if pending > 0:
+                        username = udata.get('username', str(uid))
+                        if username == 'No Username': username = str(uid)
+                        
+                        wallets_list.append({
+                            'uid': uid,
+                            'username': username,
+                            'network': curr.replace('_', ' '),
+                            'address': wdata.get('address', ''),
+                            'amount': f"{pending:.4f} {curr.split('_')[0]}",
+                            'time': "Active"
+                        })
+                        
+                        live_price = get_crypto_price(curr) if 'USDT' not in curr else 1.0
+                        total_usd += (pending * live_price)
+                        
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'wallets': wallets_list, 'total_usd': total_usd}).encode())
+
+        elif parsed_path.path == '/api/get_private_key':
+            if pin != ADMIN_PIN:
+                self.send_response(401)
+                self.end_headers()
+                return
+                
+            uid = int(data.get('uid'))
+            network = data.get('network').replace(' ', '_')
+            
+            pk = user_db.get(uid, {}).get('wallets', {}).get(network, {}).get('private_key', 'Not Found')
+            
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'private_key': pk}).encode())
+
+        elif parsed_path.path == '/api/mark_swept':
+            if pin != ADMIN_PIN:
+                self.send_response(401)
+                self.end_headers()
+                return
+                
+            uid = int(data.get('uid'))
+            network = data.get('network').replace(' ', '_')
+            
+            if uid in user_db and network in user_db[uid].get('wallets', {}):
+                wdata = user_db[uid]['wallets'][network]
+                wdata['admin_swept_total'] = wdata.get('total_deposited', 0.0)
+                
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': True}).encode())
+            else:
+                self.send_response(400)
+                self.end_headers()
+
+        elif parsed_path.path == '/api/get_admins':
+            if pin != ADMIN_PIN:
+                self.send_response(401)
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'admins': ADMIN_IDS}).encode())
+
+        elif parsed_path.path == '/api/add_admin':
+            if pin != ADMIN_PIN:
+                self.send_response(401)
+                self.end_headers()
+                return
             try:
-                data = json.loads(post_data)
                 new_admin = int(data.get('admin_id'))
                 if new_admin not in ADMIN_IDS:
                     ADMIN_IDS.append(new_admin)
@@ -3028,8 +3142,11 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                 self.wfile.write(json.dumps({'error': str(e)}).encode())
         
         elif parsed_path.path == '/api/remove_admin':
+            if pin != ADMIN_PIN:
+                self.send_response(401)
+                self.end_headers()
+                return
             try:
-                data = json.loads(post_data)
                 remove_admin = int(data.get('admin_id'))
                 if remove_admin in ADMIN_IDS:
                     ADMIN_IDS.remove(remove_admin)
