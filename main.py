@@ -91,6 +91,7 @@ ADMIN_PIN = os.getenv('ADMIN_PIN', '123456')
 # API KEYS FOR BLOCKCHAIN TRACKING
 TRONGRID_API_KEY = os.getenv('TRONGRID_API_KEY', '')
 ETHERSCAN_API_KEY = os.getenv('ETHERSCAN_API_KEY', '')
+BSCSCAN_API_KEY = os.getenv('BSCSCAN_API_KEY', '')
 
 # --- NEON POSTGRESQL DATABASE SYSTEM ---
 DATABASE_URL = os.getenv('DATABASE_URL', '')
@@ -153,6 +154,7 @@ def save_database():
         'global_w_setup': global_w_setup,
         'global_wallet_setup': global_wallet_setup,
         'global_bonus_setup': global_bonus_setup,
+        'global_ui_settings': global_ui_settings,
         'processed_txids': list(processed_txids) # Convert set to list for database
     }
     try:
@@ -205,6 +207,8 @@ menus = db_data.get('menus', {'root': []})
 menu_posts = db_data.get('menu_posts', {'root': [{'id': 'init', 'type': 'text', 'text': 'Welcome to the Main Menu! Select an option below:', 'photo': None}]})
 btn_metadata = db_data.get('btn_metadata', {})
 processed_txids = set(db_data.get('processed_txids', []))
+
+global_ui_settings = db_data.get('global_ui_settings', {'loading_bar_style': '1'})
 
 deposit_settings = db_data.get('deposit_settings', {
     'USDT_TRC20': {'mode': 'auto', 'address': 'Not Set', 'hd_key': 'Not Set', 'min': 10.0, 'max': 10000.0, 'msg_enter': 'Enter amount of USDT TRC20 (in USD) to deposit:', 'msg_instruct': 'Please send exactly <code>%crypto_amount%</code> USDT to:\n\n<code>%address%</code>\n\n<i>The system is monitoring the blockchain and will credit you automatically.</i>', 'msg_pending': '✅ Your deposit request for $%usd_amount% has been submitted to the administrators.', 'msg_success': '✅ <b>Deposit Approved!</b>\n<b>$%usd_amount%</b> has been successfully added to your deposit balance.'},
@@ -361,72 +365,108 @@ def generate_user_wallet(user_id, currency):
         print(f"Wallet Gen Error: {e}")
         return "GEN_ERROR", "GEN_ERROR"
 
+
+# --- MASTER API SCANNER HELPER (100% AUTOMATED NETWORK SCAN) ---
+def check_address_for_new_deposit(addr, curr):
+    """Scans the respective blockchain for new incoming transfers."""
+    crypto_amount = 0.0
+    txid_found = ""
+    
+    try:
+        if curr in ['TRX', 'USDT_TRC20']:
+            headers = {"TRON-PRO-API-KEY": TRONGRID_API_KEY} if TRONGRID_API_KEY else {}
+            url = f"https://api.trongrid.io/v1/accounts/{addr}/transactions/trc20" if curr == 'USDT_TRC20' else f"https://api.trongrid.io/v1/accounts/{addr}/transactions"
+            resp = requests.get(url, headers=headers, timeout=5)
+            if resp.status_code == 200:
+                txs = resp.json().get('data', [])
+                for tx in txs:
+                    txid = tx.get('transaction_id') or tx.get('txID')
+                    if txid in processed_txids: continue
+                    if curr == 'USDT_TRC20':
+                        if tx.get('token_info', {}).get('address') == "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t" and tx.get('to') == addr:
+                            return True, float(tx.get('value', 0)) / 1_000_000, txid
+                    elif curr == 'TRX':
+                        if tx.get('raw_data', {}).get('contract', [{}])[0].get('parameter', {}).get('value', {}).get('to_address') == addr:
+                            return True, float(tx['raw_data']['contract'][0]['parameter']['value'].get('amount', 0)) / 1_000_000, txid
+                            
+        elif curr == 'USDT_ERC20':
+            url = f"https://api.etherscan.io/api?module=account&action=tokentx&address={addr}&page=1&offset=10&sort=desc&apikey={ETHERSCAN_API_KEY}"
+            resp = requests.get(url, timeout=5)
+            if resp.status_code == 200:
+                txs = resp.json().get('result', [])
+                if isinstance(txs, list):
+                    for tx in txs:
+                        txid = tx.get('hash')
+                        if txid in processed_txids: continue
+                        if tx.get('contractAddress', '').lower() == "0xdac17f958d2ee523a2206206994597c13d831ec7" and tx.get('to', '').lower() == addr.lower():
+                            return True, float(tx.get('value', 0)) / 10**6, txid
+                            
+        elif curr == 'USDT_BEP20':
+            url = f"https://api.bscscan.com/api?module=account&action=tokentx&address={addr}&page=1&offset=10&sort=desc&apikey={BSCSCAN_API_KEY}"
+            resp = requests.get(url, timeout=5)
+            if resp.status_code == 200:
+                txs = resp.json().get('result', [])
+                if isinstance(txs, list):
+                    for tx in txs:
+                        txid = tx.get('hash')
+                        if txid in processed_txids: continue
+                        if tx.get('contractAddress', '').lower() == "0x55d398326f99059ff775485246999027b3197955" and tx.get('to', '').lower() == addr.lower():
+                            return True, float(tx.get('value', 0)) / 10**18, txid
+                            
+        elif curr == 'BTC':
+            url = f"https://mempool.space/api/address/{addr}/txs"
+            resp = requests.get(url, timeout=5)
+            if resp.status_code == 200:
+                txs = resp.json()
+                if isinstance(txs, list):
+                    for tx in txs:
+                        txid = tx.get('txid')
+                        if txid in processed_txids: continue
+                        for vout in tx.get('vout', []):
+                            if vout.get('scriptpubkey_address') == addr:
+                                return True, float(vout.get('value', 0)) / 10**8, txid
+                                
+    except Exception as e:
+        print(f"API Scan Error ({curr}): {e}")
+        pass
+        
+    return False, 0.0, ""
+
 # --- 4. AUTO-DETECTION WATCHER ENGINE ---
 def blockchain_watcher_loop():
-    """Continuously checks the blockchain for new deposits to generated wallets."""
-    USDT_TRC20_CONTRACT = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
-    
+    """Continuously checks the blockchain for new deposits to generated wallets across all networks."""
     while True:
         try:
             for uid, data in user_db.items():
                 for curr, w_data in data.get('wallets', {}).items():
                     addr = w_data['address']
+                    found, crypto_amount, txid = check_address_for_new_deposit(addr, curr)
                     
-                    if curr in ['TRX', 'USDT_TRC20']:
-                        headers = {"TRON-PRO-API-KEY": TRONGRID_API_KEY} if TRONGRID_API_KEY else {}
+                    if found:
+                        processed_txids.add(txid)
                         
-                        if curr == 'USDT_TRC20':
-                            url = f"https://api.trongrid.io/v1/accounts/{addr}/transactions/trc20"
-                        else:
-                            url = f"https://api.trongrid.io/v1/accounts/{addr}/transactions"
+                        live_price = get_crypto_price(curr) if 'USDT' not in curr else 1.0
+                        usd_value = crypto_amount * live_price
                         
-                        resp = requests.get(url, headers=headers, timeout=10)
-                        if resp.status_code == 200:
-                            txs = resp.json().get('data', [])
-                            for tx in txs:
-                                txid = tx.get('transaction_id') or tx.get('txID')
-                                
-                                if txid in processed_txids:
-                                    continue
-                                    
-                                is_incoming = False
-                                crypto_amount = 0.0
-                                
-                                if curr == 'USDT_TRC20':
-                                    if tx.get('token_info', {}).get('address') == USDT_TRC20_CONTRACT and tx.get('to') == addr:
-                                        is_incoming = True
-                                        crypto_amount = float(tx.get('value', 0)) / 1_000_000
-                                elif curr == 'TRX':
-                                    if tx.get('raw_data', {}).get('contract', [{}])[0].get('parameter', {}).get('value', {}).get('to_address') == addr:
-                                        is_incoming = True
-                                        crypto_amount = float(tx['raw_data']['contract'][0]['parameter']['value'].get('amount', 0)) / 1_000_000
-                                
-                                if is_incoming and crypto_amount > 0:
-                                    processed_txids.add(txid)
-                                    
-                                    live_price = get_crypto_price(curr) or 1.0
-                                    usd_value = crypto_amount * live_price
-                                    
-                                    user_db[uid]['deposit'] += usd_value
-                                    user_db[uid]['wallets'][curr]['total_deposited'] = user_db[uid]['wallets'][curr].get('total_deposited', 0.0) + usd_value
-                                    log_tx(uid, f"Auto-Deposit ({curr})", usd_value)
-                                    
-                                    try:
-                                        conf = deposit_settings[curr]
-                                        msg_success = conf.get('msg_success', "✅ <b>Deposit Detected!</b>\n\nThe blockchain confirmed a deposit of <b>%crypto_amount% %currency%</b>.\n<b>$%usd_amount% USD</b> has been automatically added to your balance!")
-                                        msg_success = msg_success.replace('%usd_amount%', f"{usd_value:.2f}").replace('%crypto_amount%', f"{crypto_amount:.2f}").replace('%currency%', curr.replace('_', ' '))
-                                        # Auto-translate before sending
-                                        lang = user_db.get(uid, {}).get('lang', 'en')
-                                        bot.send_message(uid, get_tl_and_map(msg_success, lang), parse_mode="HTML")
-                                    except Exception: pass
-                                    
-                                    admin_msg = f"🟢 <b>AUTO-DEPOSIT APPROVED</b>\nUser: <code>{uid}</code>\nCurrency: {curr.replace('_', ' ')}\nCrypto Amount: {crypto_amount}\nUSD Credited: ${usd_value:.2f}\nHash (TXID): <code>{txid}</code>"
-                                    for admin in ADMIN_IDS:
-                                        try: bot.send_message(admin, admin_msg, parse_mode="HTML")
-                                        except Exception: pass
-                                        
-                                    check_and_trigger_auto_buy(uid)
-
+                        user_db[uid]['deposit'] += usd_value
+                        user_db[uid]['wallets'][curr]['total_deposited'] = user_db[uid]['wallets'][curr].get('total_deposited', 0.0) + usd_value
+                        log_tx(uid, f"Auto-Deposit ({curr})", usd_value)
+                        
+                        try:
+                            conf = deposit_settings[curr]
+                            msg_success = conf.get('msg_success', "✅ <b>Deposit Detected!</b>\n\nThe blockchain confirmed a deposit of <b>%crypto_amount% %currency%</b>.\n<b>$%usd_amount% USD</b> has been automatically added to your balance!")
+                            msg_success = msg_success.replace('%usd_amount%', f"{usd_value:.2f}").replace('%crypto_amount%', f"{crypto_amount:.2f}").replace('%currency%', curr.replace('_', ' '))
+                            lang = user_db.get(uid, {}).get('lang', 'en')
+                            bot.send_message(uid, get_tl_and_map(msg_success, lang), parse_mode="HTML")
+                        except Exception: pass
+                        
+                        admin_msg = f"🟢 <b>AUTO-DEPOSIT APPROVED</b>\nUser: <code>{uid}</code>\nCurrency: {curr.replace('_', ' ')}\nCrypto Amount: {crypto_amount}\nUSD Credited: ${usd_value:.2f}\nHash (TXID): <code>{txid}</code>"
+                        for admin in ADMIN_IDS:
+                            try: bot.send_message(admin, admin_msg, parse_mode="HTML")
+                            except Exception: pass
+                            
+                        check_and_trigger_auto_buy(uid)
+                        
         except Exception as e:
             pass
         time.sleep(30)
@@ -620,6 +660,34 @@ def render_pi_manager(chat_id, post, message_id=None):
     else:
         bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=markup)
 
+# --- GLOBAL MACRO: %loading_bar% ANIMATOR ---
+def execute_loading_animation(chat_id, msg_id, final_text, style_opt, markup, is_photo):
+    frames = {
+        '1': ["[▯▯▯▯▯▯▯▯▯▯] 0%", "[■■▯▯▯▯▯▯▯▯] 20%", "[■■■■▯▯▯▯▯▯] 40%", "[■■■■■■▯▯▯▯] 60%", "[■■■■■■■■▯▯] 80%", "[■■■■■■■■■■] 100%"],
+        '2': ["░░░░░░░░░░ 0%", "▓▓░░░░░░░░ 20%", "▓▓▓▓░░░░░░ 40%", "▓▓▓▓▓▓░░░░ 60%", "▓▓▓▓▓▓▓▓░░ 80%", "▓▓▓▓▓▓▓▓▓▓ 100%"],
+        '3': ["▒▒▒▒▒▒▒▒▒▒ 0%", "██▒▒▒▒▒▒▒▒ 20%", "████▒▒▒▒▒▒ 40%", "██████▒▒▒▒ 60%", "████████▒▒ 80%", "██████████ 100%"]
+    }
+    bars = frames.get(str(style_opt), frames['1'])
+    for bar in bars:
+        time.sleep(0.5)
+        frame_text = final_text + f"\n\n{bar}"
+        try:
+            if is_photo:
+                bot.edit_message_caption(caption=frame_text, chat_id=chat_id, message_id=msg_id, parse_mode="HTML", reply_markup=markup)
+            else:
+                bot.edit_message_text(text=frame_text, chat_id=chat_id, message_id=msg_id, parse_mode="HTML", reply_markup=markup)
+        except:
+            pass
+            
+    time.sleep(0.5)
+    try:
+        if is_photo:
+            bot.edit_message_caption(caption=final_text, chat_id=chat_id, message_id=msg_id, parse_mode="HTML", reply_markup=markup)
+        else:
+            bot.edit_message_text(text=final_text, chat_id=chat_id, message_id=msg_id, parse_mode="HTML", reply_markup=markup)
+    except:
+        pass
+
 def send_path_content(chat_id, user_id, path, is_editing=False, reply_keyboard=None):
     if is_editing and user_id in editor_msg_ids:
         for m_id in editor_msg_ids[user_id]:
@@ -663,7 +731,15 @@ def send_path_content(chat_id, user_id, path, is_editing=False, reply_keyboard=N
         return
         
     for i, p in enumerate(posts):
-        text = get_tl_and_map(replace_macros(p['text'], user_id, path), lang)
+        raw_text = get_tl_and_map(replace_macros(p['text'], user_id, path), lang)
+        
+        has_loading_macro = '%loading_bar%' in raw_text
+        if has_loading_macro:
+            final_text = raw_text.replace('%loading_bar%', '')
+            initial_text = final_text + "\n\n⏳ Loading..."
+        else:
+            final_text = raw_text
+            initial_text = raw_text
         
         markup = InlineKeyboardMarkup()
         custom_inlines = p.get('custom_inlines', [])
@@ -717,11 +793,16 @@ def send_path_content(chat_id, user_id, path, is_editing=False, reply_keyboard=N
         
         try:
             if p['type'] == 'photo':
-                sent = bot.send_photo(chat_id, p['photo'], caption=text, parse_mode="HTML", reply_markup=markup)
+                sent = bot.send_photo(chat_id, p['photo'], caption=initial_text, parse_mode="HTML", reply_markup=markup)
             else:
-                sent = bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=markup)
+                sent = bot.send_message(chat_id, initial_text, parse_mode="HTML", reply_markup=markup)
                 
             if is_editing: editor_msg_ids.setdefault(user_id, []).append(sent.message_id)
+            
+            if has_loading_macro and not is_editing:
+                style = global_ui_settings.get('loading_bar_style', '1')
+                threading.Thread(target=execute_loading_animation, args=(chat_id, sent.message_id, final_text, style, markup, p['type'] == 'photo'), daemon=True).start()
+                
         except Exception as e:
             # FIX: Prevent editor lockout when HTML parse fails, send error and attach the editor markup
             err_msg = f"⚠️ <b>Error rendering post:</b>\n<code>{html.escape(str(e))}</code>\n\n<i>Fix or delete this using the buttons below!</i>"
@@ -837,6 +918,12 @@ def get_admin_bonus_keyboard():
     markup.row(KeyboardButton('🔙 Back to Admin'))
     return markup
 
+def get_loading_bar_keyboard():
+    markup = ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.row(KeyboardButton('Style 1: [■■■▯▯]'), KeyboardButton('Style 2: ▓▓▓░░'))
+    markup.row(KeyboardButton('Style 3: ████▒▒'), KeyboardButton('🔙 Back to Admin'))
+    return markup
+
 def get_assign_command_keyboard(full_path):
     markup = ReplyKeyboardMarkup(resize_keyboard=True)
     meta = btn_metadata.get(full_path, get_default_metadata())
@@ -874,12 +961,14 @@ def get_keyboard_raw(user_id):
             markup.row(KeyboardButton('🏦 Deposit Settings'), KeyboardButton('Withdrawal Settings')) 
             markup.row(KeyboardButton('💳 Wallet Settings'), KeyboardButton('🎁 Bonus Settings')) 
             markup.row(KeyboardButton('🧮 Calculator'), KeyboardButton('📜 Transactions'))
+            markup.row(KeyboardButton('Loading Bar Settings'))
             markup.row(KeyboardButton('🔙 Back to Main'))
             return markup
 
         if state == 'admin_w_menu': return get_global_withdrawal_keyboard()
         if state == 'admin_wallet_menu': return get_admin_wallet_keyboard()
         if state == 'admin_bonus_menu': return get_admin_bonus_keyboard()
+        if state == 'admin_loading_bar': return get_loading_bar_keyboard()
 
         if state == 'admin_dep_menu':
             for c in deposit_settings.keys():
@@ -1132,7 +1221,8 @@ def handle_messages(message):
             "• <code>%wallet%</code> - User's USDT Wallet address\n"
             "• <code>%email%</code> - User's Email address\n"
             "• <code>%bonus_amount%</code> - The defined bonus amount\n"
-            "• <code>%time_left%</code> - Used dynamically in Bonus fail msg\n\n"
+            "• <code>%time_left%</code> - Used dynamically in Bonus fail msg\n"
+            "• <code>%loading_bar%</code> - Animates a loading bar (0% to 100%) globally\n\n"
             "• <code>%plan0%</code> ... <code>%plan5%</code> - Plan details\n"
             "• <code>%lang%</code> - User's current language\n\n"
             "<b>NEW BALANCE MACROS:</b>\n"
@@ -1589,6 +1679,22 @@ def handle_messages(message):
         bot.send_message(message.chat.id, "✅ Setting updated successfully!", reply_markup=get_keyboard(user_id))
         return
 
+    # --- ADMIN LOADING BAR SETTINGS ---
+    if state == 'admin_loading_bar':
+        if text == '🔙 Back to Admin':
+            user_state[user_id] = 'admin_menu'
+            bot.send_message(message.chat.id, "🔐 <b>Admin Panel</b>", parse_mode="HTML", reply_markup=get_keyboard(user_id))
+        elif text.startswith('Style 1'):
+            global_ui_settings['loading_bar_style'] = '1'
+            bot.send_message(message.chat.id, "✅ Loading Bar style changed to Style 1.", reply_markup=get_keyboard(user_id))
+        elif text.startswith('Style 2'):
+            global_ui_settings['loading_bar_style'] = '2'
+            bot.send_message(message.chat.id, "✅ Loading Bar style changed to Style 2.", reply_markup=get_keyboard(user_id))
+        elif text.startswith('Style 3'):
+            global_ui_settings['loading_bar_style'] = '3'
+            bot.send_message(message.chat.id, "✅ Loading Bar style changed to Style 3.", reply_markup=get_keyboard(user_id))
+        return
+
     # --- PROFIT CALCULATOR ENGINE ---
     if state == 'wait_calc_amount':
         try: amount = float(text)
@@ -1690,9 +1796,16 @@ def handle_messages(message):
             bot.send_message(message.chat.id, get_tl_and_map(msg, lang), parse_mode='HTML', reply_markup=get_cancel_action_keyboard())
         else:
             # LOADING BAR ANIMATION
-            loading_msg = bot.send_message(message.chat.id, get_tl_and_map("🔄 <b>Initializing Secure Connection...</b>\n[▯▯▯▯▯▯▯▯▯▯] 0%", lang), parse_mode="HTML")
-            bars = ["[■■▯▯▯▯▯▯▯▯] 20%", "[■■■■▯▯▯▯▯▯] 40%", "[■■■■■■▯▯▯▯] 60%", "[■■■■■■■■▯▯] 80%", "[■■■■■■■■■■] 100%"]
-            for bar in bars:
+            style_opt = global_ui_settings.get('loading_bar_style', '1')
+            frames = {
+                '1': ["[▯▯▯▯▯▯▯▯▯▯] 0%", "[■■▯▯▯▯▯▯▯▯] 20%", "[■■■■▯▯▯▯▯▯] 40%", "[■■■■■■▯▯▯▯] 60%", "[■■■■■■■■▯▯] 80%", "[■■■■■■■■■■] 100%"],
+                '2': ["░░░░░░░░░░ 0%", "▓▓░░░░░░░░ 20%", "▓▓▓▓░░░░░░ 40%", "▓▓▓▓▓▓░░░░ 60%", "▓▓▓▓▓▓▓▓░░ 80%", "▓▓▓▓▓▓▓▓▓▓ 100%"],
+                '3': ["▒▒▒▒▒▒▒▒▒▒ 0%", "██▒▒▒▒▒▒▒▒ 20%", "████▒▒▒▒▒▒ 40%", "██████▒▒▒▒ 60%", "████████▒▒ 80%", "██████████ 100%"]
+            }
+            bars = frames.get(str(style_opt), frames['1'])
+            
+            loading_msg = bot.send_message(message.chat.id, get_tl_and_map(f"🔄 <b>Initializing Secure Connection...</b>\n{bars[0]}", lang), parse_mode="HTML")
+            for bar in bars[1:]:
                 time.sleep(0.5)
                 try: bot.edit_message_text(get_tl_and_map(f"🔄 <b>Generating Wallet...</b>\n{bar}", lang), message.chat.id, loading_msg.message_id, parse_mode="HTML")
                 except: pass
@@ -2007,8 +2120,8 @@ def handle_messages(message):
         return
 
     # --- BLOCK UNAUTHORIZED ADMIN COMMANDS ---
-    admin_commands = ['🎛️ Buttons Editor', '📝 Posts Editor', '💵 Balance', '🔐 Admin', '➕ Add Button', '🛑 Stop Editor', '✅ Confirm', '🚫 Cancel', '✖️ Delete', 'Deposit balance', 'Withdrawal balance', 'User Macro', 'User Macros', '📜 Macros', '📊 Plans', '🔙 Back to Main', '🔙 Back to Admin', '➕ Add Plan', '➕ Add Message', 'Pagination in Editor (10)', '🏦 Deposit Settings', 'Withdrawal Settings', '🔙 Back to Deposit Menu', '📍 Set Static Address', '🔑 Set HD Wallet Key', '💬 Edit Enter Msg', '💬 Edit Instruct Msg', '💰 Set Min Deposit', '💰 Set Max Deposit', '💬 Edit Pending Msg', '💬 Edit Success Msg', '🧮 Calculator', '📜 Transactions', '💳 Wallet Settings', '🎁 Bonus Settings']
-    if not is_admin and (text in admin_commands or text.startswith('📋 Paste "') or text == '✔️ Leave as Is' or text == '➖ Set Empty' or text.startswith('⚙️ Edit ')):
+    admin_commands = ['🎛️ Buttons Editor', '📝 Posts Editor', '💵 Balance', '🔐 Admin', '➕ Add Button', '🛑 Stop Editor', '✅ Confirm', '🚫 Cancel', '✖️ Delete', 'Deposit balance', 'Withdrawal balance', 'User Macro', 'User Macros', '📜 Macros', '📊 Plans', '🔙 Back to Main', '🔙 Back to Admin', '➕ Add Plan', '➕ Add Message', 'Pagination in Editor (10)', '🏦 Deposit Settings', 'Withdrawal Settings', '🔙 Back to Deposit Menu', '📍 Set Static Address', '🔑 Set HD Wallet Key', '💬 Edit Enter Msg', '💬 Edit Instruct Msg', '💰 Set Min Deposit', '💰 Set Max Deposit', '💬 Edit Pending Msg', '💬 Edit Success Msg', '🧮 Calculator', '📜 Transactions', '💳 Wallet Settings', '🎁 Bonus Settings', 'Loading Bar Settings']
+    if not is_admin and (text in admin_commands or text.startswith('📋 Paste "') or text == '✔️ Leave as Is' or text == '➖ Set Empty' or text.startswith('⚙️ Edit ') or text.startswith('Style ')):
         bot.send_message(message.chat.id, get_tl_and_map("Unrecognized command.", lang), reply_markup=get_keyboard(user_id))
         return
 
@@ -2081,6 +2194,9 @@ def handle_messages(message):
         elif text == '📜 Transactions':
             user_state[user_id] = 'admin_wait_tx_id'
             bot.send_message(message.chat.id, "Enter User ID to view history:", reply_markup=get_cancel_action_keyboard())
+        elif text == 'Loading Bar Settings':
+            user_state[user_id] = 'admin_loading_bar'
+            bot.send_message(message.chat.id, "⚙️ <b>Loading Bar Styles</b>\nSelect the global style to use for the `%loading_bar%` macro and Deposit screen:", parse_mode="HTML", reply_markup=get_keyboard(user_id))
         return
 
     # --- ADMIN BALANCE MANAGEMENT ENGINE ---
@@ -2467,7 +2583,6 @@ def execute_plan_purchase_via_popup(user_id, chat_id, message_id, call_id, plan_
     user_current_path[user_id] = 'root'
     send_path_content(chat_id, user_id, 'root', False)
 
-
 # --- INLINE BUTTON LOGIC ---
 @bot.callback_query_handler(func=lambda call: True)
 def handle_inline(call):
@@ -2480,46 +2595,42 @@ def handle_inline(call):
     # --- ON-DEMAND DEPOSIT BLOCKCHAIN SCAN ---
     if call.data.startswith('cb_depcheck_'):
         curr = call.data.replace('cb_depcheck_', '')
-        bot.answer_callback_query(call.id, get_tl_and_map("Scanning blockchain for your deposit...", lang))
-        scan_msg = bot.send_message(call.message.chat.id, get_tl_and_map("⏳ Scanning blockchain network, please wait...", lang))
-        
         addr = user_db[user_id].get('wallets', {}).get(curr, {}).get('address')
+        
         if not addr:
-            return bot.edit_message_text(get_tl_and_map("⚠️ Wallet not found.", lang), call.message.chat.id, scan_msg.message_id)
-
+            return bot.answer_callback_query(call.id, get_tl_and_map("⚠️ Wallet not found.", lang), show_alert=True)
+            
+        style_opt = global_ui_settings.get('loading_bar_style', '1')
+        frames = {
+            '1': ["[▯▯▯▯▯▯▯▯▯▯] 0%", "[■■▯▯▯▯▯▯▯▯] 20%", "[■■■■▯▯▯▯▯▯] 40%", "[■■■■■■▯▯▯▯] 60%", "[■■■■■■■■▯▯] 80%", "[■■■■■■■■■■] 100%"],
+            '2': ["░░░░░░░░░░ 0%", "▓▓░░░░░░░░ 20%", "▓▓▓▓░░░░░░ 40%", "▓▓▓▓▓▓░░░░ 60%", "▓▓▓▓▓▓▓▓░░ 80%", "▓▓▓▓▓▓▓▓▓▓ 100%"],
+            '3': ["▒▒▒▒▒▒▒▒▒▒ 0%", "██▒▒▒▒▒▒▒▒ 20%", "████▒▒▒▒▒▒ 40%", "██████▒▒▒▒ 60%", "████████▒▒ 80%", "██████████ 100%"]
+        }
+        bar_styles = frames.get(str(style_opt), frames['1'])
+        
+        scan_msg = bot.send_message(call.message.chat.id, get_tl_and_map(f"⏳ <b>Checking Blockchain...</b>\n{bar_styles[0]}", lang), parse_mode="HTML")
+        
         found_deposit = False
         crypto_amount = 0.0
         txid_found = ""
         
-        if curr in ['TRX', 'USDT_TRC20']:
-            headers = {"TRON-PRO-API-KEY": TRONGRID_API_KEY} if TRONGRID_API_KEY else {}
-            url = f"https://api.trongrid.io/v1/accounts/{addr}/transactions/trc20" if curr == 'USDT_TRC20' else f"https://api.trongrid.io/v1/accounts/{addr}/transactions"
-            
-            try:
-                resp = requests.get(url, headers=headers, timeout=10)
-                if resp.status_code == 200:
-                    txs = resp.json().get('data', [])
-                    for tx in txs:
-                        txid = tx.get('transaction_id') or tx.get('txID')
-                        if txid in processed_txids: continue
-                        
-                        is_incoming = False
-                        if curr == 'USDT_TRC20':
-                            USDT_TRC20_CONTRACT = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
-                            if tx.get('token_info', {}).get('address') == USDT_TRC20_CONTRACT and tx.get('to') == addr:
-                                is_incoming = True
-                                crypto_amount = float(tx.get('value', 0)) / 1_000_000
-                        elif curr == 'TRX':
-                            if tx.get('raw_data', {}).get('contract', [{}])[0].get('parameter', {}).get('value', {}).get('to_address') == addr:
-                                is_incoming = True
-                                crypto_amount = float(tx['raw_data']['contract'][0]['parameter']['value'].get('amount', 0)) / 1_000_000
-                                
-                        if is_incoming and crypto_amount > 0:
-                            found_deposit = True
-                            txid_found = txid
-                            break
-            except Exception: pass
-            
+        # Rapid 8-Second Hybrid Check
+        for i in range(1, 9):
+            found, amt, txid = check_address_for_new_deposit(addr, curr)
+            if found:
+                found_deposit = True
+                crypto_amount = amt
+                txid_found = txid
+                break
+                
+            time.sleep(1)
+            if i < len(bar_styles):
+                try: bot.edit_message_text(get_tl_and_map(f"⏳ <b>Checking Blockchain...</b>\n{bar_styles[i]}", lang), call.message.chat.id, scan_msg.message_id, parse_mode="HTML")
+                except: pass
+
+        try: bot.delete_message(call.message.chat.id, scan_msg.message_id)
+        except: pass
+        
         if found_deposit:
             processed_txids.add(txid_found)
             live_price = get_crypto_price(curr) if 'USDT' not in curr else 1.0
@@ -2529,16 +2640,15 @@ def handle_inline(call):
             user_db[user_id]['wallets'][curr]['total_deposited'] = user_db[user_id]['wallets'][curr].get('total_deposited', 0.0) + usd_value
             log_tx(user_id, f"Auto-Deposit ({curr})", usd_value)
             
-            bot.edit_message_text(get_tl_and_map(f"✅ <b>Deposit Detected!</b>\n\nReceived: <b>{crypto_amount} {curr.replace('_', ' ')}</b>\nCredited: <b>${usd_value:.2f} USD</b>", lang), call.message.chat.id, scan_msg.message_id, parse_mode="HTML")
-            
             admin_msg = f"🟢 <b>AUTO-DEPOSIT CONFIRMED (MANUAL CHECK)</b>\nUser: <code>{user_id}</code>\nCurrency: {curr.replace('_', ' ')}\nCrypto Amount: {crypto_amount}\nUSD Credited: ${usd_value:.2f}\nHash (TXID): <code>{txid_found}</code>"
             for admin in ADMIN_IDS:
                 try: bot.send_message(admin, admin_msg, parse_mode="HTML")
                 except Exception: pass
                 
             check_and_trigger_auto_buy(user_id)
+            bot.answer_callback_query(call.id, get_tl_and_map(f"✅\nYour Deposit of {crypto_amount} {curr.replace('_', ' ')} was successfully completed.", lang), show_alert=True)
         else:
-            bot.edit_message_text(get_tl_and_map("⏳ <b>No new deposit detected yet.</b>\n\nIf you just sent it, please wait a few minutes for the blockchain to confirm the transaction and try clicking Confirm again.", lang), call.message.chat.id, scan_msg.message_id, parse_mode="HTML")
+            bot.answer_callback_query(call.id, get_tl_and_map(f"⏳ Pending: Your transaction has been broadcast but is still waiting for blockchain confirmation. We will notify you automatically as soon as the funds arrive.", lang), show_alert=True)
         return
 
     # --- WALLET SETUP NATIVE INLINE ---
