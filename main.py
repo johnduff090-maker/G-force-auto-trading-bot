@@ -144,12 +144,13 @@ def save_database():
         'user_db': user_db,
         'menus': menus,
         'menu_posts': menu_posts,
-        'btn_metadata': btn_metadata,
         'bot_plans': bot_plans,
         'deposit_settings': deposit_settings,
         'global_w_setup': global_w_setup,
         'global_wallet_setup': global_wallet_setup,
         'global_bonus_setup': global_bonus_setup,
+        'global_loading_setup': global_loading_setup,
+        'global_dep_popups': global_dep_popups,
         'processed_txids': list(processed_txids) # Convert set to list for database
     }
     try:
@@ -202,6 +203,15 @@ menus = db_data.get('menus', {'root': []})
 menu_posts = db_data.get('menu_posts', {'root': [{'id': 'init', 'type': 'text', 'text': 'Welcome to the Main Menu! Select an option below:', 'photo': None}]})
 btn_metadata = db_data.get('btn_metadata', {})
 processed_txids = set(db_data.get('processed_txids', []))
+
+global_loading_setup = db_data.get('global_loading_setup', {
+    'enabled': True, 'duration': 3.0
+})
+
+global_dep_popups = db_data.get('global_dep_popups', {
+    'success': '✅\nYour Deposit of %crypto_amount% %currency% ~ $%usd_amount% was successfully credited.',
+    'fail': '❌\nDeposit not detected yet. Please ensure you sent the exact amount and try checking again in a moment.'
+})
 
 deposit_settings = db_data.get('deposit_settings', {
     'USDT_TRC20': {'mode': 'auto', 'address': 'Not Set', 'hd_key': 'Not Set', 'min': 10.0, 'max': 10000.0, 'msg_enter': 'Enter amount of USDT TRC20 (in USD) to deposit:', 'msg_instruct': 'Please send exactly <code>%crypto_amount%</code> USDT to:\n\n<code>%address%</code>\n\n<i>The system is monitoring the blockchain and will credit you automatically.</i>', 'msg_pending': '✅ Your deposit request for $%usd_amount% has been submitted to the administrators.', 'msg_success': '✅ <b>Deposit Approved!</b>\n<b>$%usd_amount%</b> has been successfully added to your deposit balance.'},
@@ -306,8 +316,9 @@ def init_user_db(message):
 # --- 2. LIVE PRICE ORACLE ENGINE (WITH FALLBACKS) ---
 def get_crypto_price(currency_code):
     """Fetches live USD price for the requested currency from CoinGecko with hard fallbacks."""
+    if 'USDT' in currency_code: return 1.0 # 1:1 Bypass per user request
+    
     mapping = {
-        'USDT_TRC20': 'tether', 'USDT_BEP20': 'tether', 'USDT_ERC20': 'tether',
         'TRX': 'tron', 'BTC': 'bitcoin'
     }
     coin_id = mapping.get(currency_code, 'tether')
@@ -319,10 +330,35 @@ def get_crypto_price(currency_code):
         return float(data[coin_id]['usd'])
     except Exception as e:
         print(f"Oracle Error or Rate Limit: {e}")
-        if 'USDT' in currency_code: return 1.0
         if 'TRX' in currency_code: return 0.12
         if 'BTC' in currency_code: return 65000.0
         return 1.0
+
+# --- LIVE API DEPOSIT CHECKER ---
+def check_deposit_live(addr, curr, expected_crypto):
+    if not TRONGRID_API_KEY: return False, None
+    if curr == 'USDT_TRC20':
+        url = f"https://api.trongrid.io/v1/accounts/{addr}/transactions/trc20"
+    elif curr == 'TRX':
+        url = f"https://api.trongrid.io/v1/accounts/{addr}/transactions"
+    else:
+        return False, None
+        
+    headers = {"TRON-PRO-API-KEY": TRONGRID_API_KEY}
+    try:
+        resp = requests.get(url, headers=headers, timeout=5)
+        if resp.status_code == 200:
+            txs = resp.json().get('data', [])
+            for tx in txs:
+                if curr == 'USDT_TRC20':
+                    if tx.get('to') == addr and float(tx.get('value', 0))/1_000_000 >= expected_crypto:
+                        return True, tx.get('transaction_id')
+                elif curr == 'TRX':
+                    if tx.get('raw_data', {}).get('contract', [{}])[0].get('parameter', {}).get('value', {}).get('to_address') == addr:
+                        if float(tx['raw_data']['contract'][0]['parameter']['value'].get('amount', 0))/1_000_000 >= expected_crypto:
+                            return True, tx.get('txID')
+    except Exception: pass
+    return False, None
 
 # --- 3. HD WALLET ENGINE (BIP39/44) ---
 def generate_user_wallet(user_id, currency):
@@ -406,7 +442,6 @@ def blockchain_watcher_loop():
                                         conf = deposit_settings[curr]
                                         msg_success = conf.get('msg_success', "✅ <b>Deposit Detected!</b>\n\nThe blockchain confirmed a deposit of <b>%crypto_amount% %currency%</b>.\n<b>$%usd_amount% USD</b> has been automatically added to your balance!")
                                         msg_success = msg_success.replace('%usd_amount%', f"{usd_value:.2f}").replace('%crypto_amount%', f"{crypto_amount:.2f}").replace('%currency%', curr.replace('_', ' '))
-                                        # Auto-translate before sending
                                         lang = user_db.get(uid, {}).get('lang', 'en')
                                         bot.send_message(uid, get_tl_and_map(msg_success, lang), parse_mode="HTML")
                                     except Exception: pass
@@ -432,7 +467,6 @@ def check_and_trigger_auto_buy(user_id):
         if p_macro == 'plan0':
             invest_amt = p_data.get('bonus_amount', 50.0)
             user_db[user_id]['pending_plan'] = None
-            # Free plan activation bypasses balance reduction
         else:
             if user_db[user_id]['deposit'] >= p_data['min']:
                 invest_amt = min(user_db[user_id]['deposit'], p_data['max'])
@@ -505,7 +539,6 @@ def replace_macros(text, user_id, full_path, action_data=None):
     
     bals = user_db.get(user_id, {})
     
-    # CALCULATE NEW BALANCE MACROS
     active = [p for p in bals.get('active_plans', []) if p['status'] == 'active']
     plan_invest = sum(p['amount'] for p in active)
     hourly_profit = sum(p['amount'] * (p['profit_pct'] / 100.0) for p in active)
@@ -522,7 +555,6 @@ def replace_macros(text, user_id, full_path, action_data=None):
     t = t.replace('%deposit%', f"{bals.get('deposit', 0):.2f}")
     t = t.replace('%lang%', bals.get('lang', 'en').upper())
     
-    # NEW EXTENDED MACROS
     t = t.replace('%plan_invest%', f"{plan_invest:.2f}")
     t = t.replace('%hourly_profit%', f"{hourly_profit:.2f}")
     t = t.replace('%plan_names%', plan_names)
@@ -533,7 +565,6 @@ def replace_macros(text, user_id, full_path, action_data=None):
     t = t.replace('%email%', bals.get('email', 'Not Set'))
     t = t.replace('%bonus_amount%', str(global_bonus_setup['amount']))
     
-    # Use GLOBAL withdrawal settings for macros
     t = t.replace('%min%', str(global_w_setup.get('w_min') or 0))
     t = t.replace('%max%', str(global_w_setup.get('w_max') or 'No Limit'))
     
@@ -570,6 +601,41 @@ def replace_macros(text, user_id, full_path, action_data=None):
         t = t.replace('%address%', bals.get('address', 'Not Set'))
         
     return t
+
+# --- SECURE MESSAGE SENDER WITH %loading% MACRO SUPPORT ---
+def send_message_with_loading(chat_id, text, parse_mode="HTML", reply_markup=None, photo=None):
+    has_loading = '%loading%' in text
+    clean_text = text.replace('%loading%', '')
+    
+    if has_loading and global_loading_setup.get('enabled', True):
+        loading_msg = "⏳ <b>Processing Request...</b>\n████████████████████"
+        
+        try:
+            if photo:
+                msg = bot.send_photo(chat_id, photo, caption=loading_msg, parse_mode="HTML")
+            else:
+                msg = bot.send_message(chat_id, loading_msg, parse_mode="HTML")
+                
+            time.sleep(global_loading_setup.get('duration', 3.0))
+            
+            if photo:
+                bot.edit_message_caption(clean_text, chat_id, msg.message_id, parse_mode=parse_mode, reply_markup=reply_markup)
+            else:
+                bot.edit_message_text(clean_text, chat_id, msg.message_id, parse_mode=parse_mode, reply_markup=reply_markup)
+            return msg
+        except Exception as e:
+            err_msg = f"⚠️ <b>Error rendering post:</b>\n<code>{html.escape(str(e))}</code>\n\n<i>Fix or delete this using the buttons below!</i>"
+            return bot.send_message(chat_id, err_msg, parse_mode="HTML", reply_markup=reply_markup)
+    else:
+        try:
+            if photo:
+                return bot.send_photo(chat_id, photo, caption=clean_text, parse_mode=parse_mode, reply_markup=reply_markup)
+            else:
+                return bot.send_message(chat_id, clean_text, parse_mode=parse_mode, reply_markup=reply_markup)
+        except Exception as e:
+            err_msg = f"⚠️ <b>Error rendering post:</b>\n<code>{html.escape(str(e))}</code>\n\n<i>Fix or delete this using the buttons below!</i>"
+            return bot.send_message(chat_id, err_msg, parse_mode="HTML", reply_markup=reply_markup)
+
 
 # --- POSTS ENGINE ---
 def get_post_inline_tools(post_id):
@@ -636,21 +702,14 @@ def send_path_content(chat_id, user_id, path, is_editing=False, reply_keyboard=N
         markup = InlineKeyboardMarkup()
         markup.row(InlineKeyboardButton(btn_text, callback_data=f"cb_buyplan_{assigned_plan}"))
         
-        try:
-            if p_photo:
-                sent = bot.send_photo(chat_id, p_photo, caption=p_text, parse_mode="HTML", reply_markup=markup)
-            else:
-                sent = bot.send_message(chat_id, p_text, parse_mode="HTML", reply_markup=markup)
-            if is_editing: editor_msg_ids.setdefault(user_id, []).append(sent.message_id)
-        except Exception as e:
-            sent = bot.send_message(chat_id, f"⚠️ Error rendering plan: {e}")
-            if is_editing: editor_msg_ids.setdefault(user_id, []).append(sent.message_id)
+        sent = send_message_with_loading(chat_id, p_text, parse_mode="HTML", reply_markup=markup, photo=p_photo)
+        if is_editing and sent: editor_msg_ids.setdefault(user_id, []).append(sent.message_id)
 
     posts = menu_posts.get(path, [])
     if not posts and not assigned_plan:
         msg_raw = f"📂 <b>{path.split('/')[-1]}</b>\n\n<i>(No messages set for this menu)</i>" if path != 'root' else "Welcome!"
-        sent = bot.send_message(chat_id, get_tl_and_map(msg_raw, lang), parse_mode="HTML", reply_markup=reply_keyboard)
-        if is_editing: editor_msg_ids.setdefault(user_id, []).append(sent.message_id)
+        sent = send_message_with_loading(chat_id, get_tl_and_map(msg_raw, lang), parse_mode="HTML", reply_markup=reply_keyboard)
+        if is_editing and sent: editor_msg_ids.setdefault(user_id, []).append(sent.message_id)
         return
         
     for i, p in enumerate(posts):
@@ -668,7 +727,6 @@ def send_path_content(chat_id, user_id, path, is_editing=False, reply_keyboard=N
             for r_idx in sorted(rows_dict.keys()):
                 row_btns = []
                 for b in rows_dict[r_idx]:
-                    # Bypass translating Language indicator buttons so the flags and native names stay perfect
                     if b['mode'] == 'set_lang':
                         tl_btn_text = b['text']
                     else:
@@ -701,62 +759,39 @@ def send_path_content(chat_id, user_id, path, is_editing=False, reply_keyboard=N
         if not markup.keyboard: 
             markup = None
             
-        # INTELLIGENT KEYBOARD INJECTION: Try to hide the reply keyboard inside the last normal post to avoid empty bubbles
         if i == len(posts) - 1 and not markup and not kb_attached and reply_keyboard:
             markup = reply_keyboard
             kb_attached = True
         
-        try:
-            if p['type'] == 'photo':
-                sent = bot.send_photo(chat_id, p['photo'], caption=text, parse_mode="HTML", reply_markup=markup)
-            else:
-                sent = bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=markup)
-                
-            if is_editing: editor_msg_ids.setdefault(user_id, []).append(sent.message_id)
-        except Exception as e:
-            # FIX: Prevent editor lockout when HTML parse fails, send error and attach the editor markup
-            err_msg = f"⚠️ <b>Error rendering post:</b>\n<code>{html.escape(str(e))}</code>\n\n<i>Fix or delete this using the buttons below!</i>"
-            sent = bot.send_message(chat_id, err_msg, parse_mode="HTML", reply_markup=markup)
-            if is_editing: editor_msg_ids.setdefault(user_id, []).append(sent.message_id)
+        sent = send_message_with_loading(chat_id, text, parse_mode="HTML", reply_markup=markup, photo=p.get('photo'))
+        if is_editing and sent: editor_msg_ids.setdefault(user_id, []).append(sent.message_id)
 
 # --- NATIVE ENTITY EXTRACTOR (Safely translates Telegram Formatting to Database HTML) ---
-def extract_html(message):
-    text = message.text or message.caption or ""
-    entities = message.entities or message.caption_entities or []
-    
-    if not entities:
-        return text
+def extract_safe_html(message):
+    raw_html = ""
+    if message.photo:
+        raw_html = message.caption_html if hasattr(message, 'caption_html') and message.caption_html else message.caption or ""
+    else:
+        raw_html = message.html if hasattr(message, 'html') and message.html else message.text or ""
         
-    encoded_text = text.encode('utf-16-le')
-    
-    tags = []
-    for ent in entities:
-        open_tag, close_tag = '', ''
-        if ent.type == 'bold': open_tag, close_tag = '<b>', '</b>'
-        elif ent.type == 'italic': open_tag, close_tag = '<i>', '</i>'
-        elif ent.type == 'code': open_tag, close_tag = '<code>', '</code>'
-        elif ent.type == 'pre': open_tag, close_tag = '<pre>', '</pre>'
-        elif ent.type == 'strikethrough': open_tag, close_tag = '<s>', '</s>'
-        elif ent.type == 'underline': open_tag, close_tag = '<u>', '</u>'
-        elif ent.type == 'spoiler': open_tag, close_tag = '<tg-spoiler>', '</tg-spoiler>'
-        elif ent.type == 'text_link': open_tag, close_tag = f'<a href="{ent.url}">', '</a>'
+    if not raw_html:
+        return ""
         
-        if open_tag:
-            start = ent.offset * 2
-            end = (ent.offset + ent.length) * 2
-            tags.append((start, open_tag, 'open', ent.length))
-            tags.append((end, close_tag, 'close', ent.length))
-            
-    # Sort backwards to not mess up offsets.
-    tags.sort(key=lambda x: (x[0], x[2] == 'open', x[3] if x[2]=='close' else -x[3]), reverse=True)
-    
-    for index, tag_str, _, _ in tags:
-        encoded_text = encoded_text[:index] + tag_str.encode('utf-16-le') + encoded_text[index:]
+    # Telegram's message.html safely escapes manual < and >.
+    # We selectively unescape ONLY valid Telegram HTML tags so copied templates work flawlessly.
+    tags = ['b', 'strong', 'i', 'em', 'u', 'ins', 's', 'strike', 'del', 'code', 'pre', 'tg-spoiler']
+    for tag in tags:
+        raw_html = re.sub(f"&lt;{tag}&gt;", f"<{tag}>", raw_html, flags=re.IGNORECASE)
+        raw_html = re.sub(f"&lt;/{tag}&gt;", f"</{tag}>", raw_html, flags=re.IGNORECASE)
         
-    try:
-        return encoded_text.decode('utf-16-le')
-    except Exception:
-        return text
+    # Safely restore anchor tags
+    raw_html = re.sub(r'&lt;a href=(?:&quot;|"|&apos;|\')(.*?)(?:&quot;|"|&apos;|\')&gt;', r'<a href="\1">', raw_html, flags=re.IGNORECASE)
+    raw_html = re.sub(r'&lt;/a&gt;', '</a>', raw_html, flags=re.IGNORECASE)
+    
+    # Auto-fix common typos just in case
+    raw_html = raw_html.replace('&lt;bold&gt;', '<b>').replace('&lt;/bold&gt;', '</b>')
+    
+    return raw_html
 
 # --- KEYBOARD BUILDERS ---
 def get_wizard_keyboard(current_val, options=None, allow_empty=False):
@@ -865,12 +900,26 @@ def get_keyboard_raw(user_id):
             markup.row(KeyboardButton('🏦 Deposit Settings'), KeyboardButton('Withdrawal Settings')) 
             markup.row(KeyboardButton('💳 Wallet Settings'), KeyboardButton('🎁 Bonus Settings')) 
             markup.row(KeyboardButton('🧮 Calculator'), KeyboardButton('📜 Transactions'))
+            markup.row(KeyboardButton('⏳ Loading Settings'), KeyboardButton('🌍 Global Dep Popups'))
             markup.row(KeyboardButton('🔙 Back to Main'))
             return markup
 
         if state == 'admin_w_menu': return get_global_withdrawal_keyboard()
         if state == 'admin_wallet_menu': return get_admin_wallet_keyboard()
         if state == 'admin_bonus_menu': return get_admin_bonus_keyboard()
+
+        if state == 'admin_loading':
+            enabled_text = "☑️ On" if global_loading_setup.get('enabled') else "⬜️ Off"
+            markup.row(KeyboardButton(f'Toggle Loading ({enabled_text})'))
+            markup.row(KeyboardButton('Set Duration (sec)'))
+            markup.row(KeyboardButton('🔙 Back to Admin'))
+            return markup
+
+        if state == 'admin_dep_popups':
+            markup.row(KeyboardButton('💬 Edit Success Popup'))
+            markup.row(KeyboardButton('💬 Edit Fail Popup'))
+            markup.row(KeyboardButton('🔙 Back to Admin'))
+            return markup
 
         if state == 'admin_dep_menu':
             for c in deposit_settings.keys():
@@ -893,7 +942,7 @@ def get_keyboard_raw(user_id):
             markup.row(KeyboardButton('🔙 Back to Deposit Menu'))
             return markup
 
-        if state.startswith('dep_setup_') or state.startswith('wallet_setup_') or state.startswith('bonus_setup_'):
+        if state.startswith('dep_setup_') or state.startswith('wallet_setup_') or state.startswith('bonus_setup_') or state.startswith('loading_setup_') or state.startswith('dep_popups_'):
             return get_cancel_action_keyboard()
 
         if state == 'admin_plans':
@@ -1065,7 +1114,7 @@ def handle_messages(message):
     text = message.text if message.text else (message.caption if message.caption else "")
     
     # --- NEW: NATIVE FORMATTING CAPTURE ---
-    formatted_text = extract_html(message)
+    formatted_text = extract_safe_html(message)
 
     is_admin = user_id in ADMIN_IDS
     
@@ -1108,6 +1157,7 @@ def handle_messages(message):
         macros_msg = (
             "📝 <b>Available Macros List</b>\n"
             "<i>HTML Tags allowed: <b>bold</b>, <i>italic</i>, <code>monospace</code>, <u>underline</u>, <s>strikethrough</s></i>\n"
+            "• Use <b>%loading%</b> anywhere to natively show a loading bar before text.\n\n"
             "(Tap on any macro to copy it)\n\n"
             "• <code>%balance%</code> - Withdrawal balance (profits)\n"
             "• <code>%deposit%</code> - Deposit balance\n"
@@ -1175,6 +1225,14 @@ def handle_messages(message):
         elif state.startswith('bonus_setup_'):
             user_state[user_id] = 'admin_bonus_menu'
             bot.send_message(message.chat.id, get_tl_and_map("Bonus setup cancelled.", lang), reply_markup=get_keyboard(user_id))
+            return
+        elif state.startswith('loading_setup_'):
+            user_state[user_id] = 'admin_loading'
+            bot.send_message(message.chat.id, get_tl_and_map("Loading setup cancelled.", lang), reply_markup=get_keyboard(user_id))
+            return
+        elif state.startswith('dep_popups_'):
+            user_state[user_id] = 'admin_dep_popups'
+            bot.send_message(message.chat.id, get_tl_and_map("Popup setup cancelled.", lang), reply_markup=get_keyboard(user_id))
             return
         else:
             user_state[user_id] = 'normal'
@@ -1288,17 +1346,15 @@ def handle_messages(message):
         elif text == 'Assign Language':
             meta['is_language'] = True
             btn_metadata[btn_path] = meta
-            # Pre-populate menu_posts if empty with a language keyboard matrix
             if not menu_posts.get(btn_path):
                 post_id = str(uuid.uuid4())[:8]
                 new_post = {
                     'id': post_id,
                     'type': 'text',
-                    'text': 'Current Language: %lang%\nSelect Language to change it',
+                    'text': '%loading%Current Language: <b>%lang%</b>\nSelect Language to change it',
                     'photo': None,
                     'custom_inlines': []
                 }
-                # Add default buttons dynamically from requirement. Chinese forced to zh-CN so deep-translator never fails.
                 langs = [
                     ('🇬🇧 English', 'en'), ('🇨🇳 Chinese', 'zh-CN'), ('🇵🇹 Portuguese', 'pt'),
                     ('🇳🇱 Dutch', 'nl'), ('🇪🇸 Spanish', 'es'), ('🇩🇪 German', 'de'),
@@ -1348,7 +1404,7 @@ def handle_messages(message):
                 new_post = {
                     'id': post_id,
                     'type': 'text',
-                    'text': "━━━━━━━━━━━━━━━━━━\n📊 G-Force Auto Trading Bot\n━━━━━━━━━━━━━━━━━━\n💵 Balance: %balance% USDT\n💼 Active Investment: %plan_invest% USDT\n━━━━━━━━━━━━━━━━━━\n🎁 Bonus: %bonus% USDT\n⏱ Hourly Profit: %hourly_profit% USDT\n━━━━━━━━━━━━━━━━━━\n⚙️ Plan: %plan_names%\n👥 Referrals: %ref_count% Users\n💳 Payouts: %withdrawn% USDT\n━━━━━━━━━━━━━━━━━━",
+                    'text': "%loading%━━━━━━━━━━━━━━━━━━\n📊 <b>G-Force Auto Trading Bot</b>\n━━━━━━━━━━━━━━━━━━\n💵 Balance: <b>%balance% USDT</b>\n💼 Active Investment: <b>%plan_invest% USDT</b>\n━━━━━━━━━━━━━━━━━━\n🎁 Bonus: <b>%bonus% USDT</b>\n⏱ Hourly Profit: <b>%hourly_profit% USDT</b>\n━━━━━━━━━━━━━━━━━━\n⚙️ Plan: <b>%plan_names%</b>\n👥 Referrals: <b>%ref_count% Users</b>\n💳 Payouts: <b>%withdrawn% USDT</b>\n━━━━━━━━━━━━━━━━━━",
                     'photo': None,
                     'custom_inlines': []
                 }
@@ -1507,6 +1563,50 @@ def handle_messages(message):
         bot.send_message(message.chat.id, get_tl_and_map(replace_macros(msg, user_id, current_path), lang), parse_mode="HTML", reply_markup=get_keyboard(user_id))
         return
 
+    # --- ADMIN LOADING SETTINGS ---
+    if state == 'admin_loading':
+        if text == '🔙 Back to Admin':
+            user_state[user_id] = 'admin_menu'
+            bot.send_message(message.chat.id, "🔐 <b>Admin Panel</b>", parse_mode="HTML", reply_markup=get_keyboard(user_id))
+        elif text.startswith('Toggle Loading'):
+            global_loading_setup['enabled'] = not global_loading_setup.get('enabled', True)
+            bot.send_message(message.chat.id, "Loading toggled.", reply_markup=get_keyboard(user_id))
+        elif text == 'Set Duration (sec)':
+            user_state[user_id] = 'loading_setup_dur'
+            bot.send_message(message.chat.id, f"Enter duration in seconds (e.g. 3.0):\n\nCurrent: {global_loading_setup.get('duration', 3.0)}", reply_markup=get_cancel_action_keyboard())
+        return
+        
+    if state == 'loading_setup_dur':
+        try: global_loading_setup['duration'] = float(text)
+        except ValueError: return bot.send_message(message.chat.id, "⚠️ Invalid number.")
+        user_state[user_id] = 'admin_loading'
+        bot.send_message(message.chat.id, "✅ Setting updated successfully!", reply_markup=get_keyboard(user_id))
+        return
+        
+    # --- ADMIN DEPOSIT POPUPS SETTINGS ---
+    if state == 'admin_dep_popups':
+        if text == '🔙 Back to Admin':
+            user_state[user_id] = 'admin_menu'
+            bot.send_message(message.chat.id, "🔐 <b>Admin Panel</b>", parse_mode="HTML", reply_markup=get_keyboard(user_id))
+        elif text == '💬 Edit Success Popup':
+            user_state[user_id] = 'dep_popups_succ'
+            bot.send_message(message.chat.id, f"Enter the success popup message:\n\nCurrent:\n{global_dep_popups['success']}", reply_markup=get_cancel_action_keyboard())
+        elif text == '💬 Edit Fail Popup':
+            user_state[user_id] = 'dep_popups_fail'
+            bot.send_message(message.chat.id, f"Enter the fail popup message:\n\nCurrent:\n{global_dep_popups['fail']}", reply_markup=get_cancel_action_keyboard())
+        return
+        
+    if state == 'dep_popups_succ':
+        global_dep_popups['success'] = text
+        user_state[user_id] = 'admin_dep_popups'
+        bot.send_message(message.chat.id, "✅ Setting updated successfully!", reply_markup=get_keyboard(user_id))
+        return
+    if state == 'dep_popups_fail':
+        global_dep_popups['fail'] = text
+        user_state[user_id] = 'admin_dep_popups'
+        bot.send_message(message.chat.id, "✅ Setting updated successfully!", reply_markup=get_keyboard(user_id))
+        return
+
     # --- ADMIN WALLET SETTINGS ---
     if state == 'admin_wallet_menu':
         if text == '🔙 Back to Admin':
@@ -1607,7 +1707,7 @@ def handle_messages(message):
         if not found:
             msg += "No plans available for this exact amount."
             
-        bot.send_message(message.chat.id, get_tl_and_map(msg, lang), parse_mode="HTML", reply_markup=markup if found else get_keyboard(user_id))
+        send_message_with_loading(message.chat.id, get_tl_and_map(msg, lang), parse_mode="HTML", reply_markup=markup if found else get_keyboard(user_id))
         user_state[user_id] = 'normal'
         return
 
@@ -1652,7 +1752,7 @@ def handle_messages(message):
         
         user_state[user_id] = 'normal'
         msg = f"🎉 <b>Success!</b>\nYou invested <b>${invest_amount:.2f}</b> into <b>{p_data['name']}</b>!\nYour profit is accruing automatically."
-        bot.send_message(message.chat.id, get_tl_and_map(msg, lang), parse_mode="HTML", reply_markup=get_keyboard(user_id))
+        send_message_with_loading(message.chat.id, get_tl_and_map(msg, lang), parse_mode="HTML", reply_markup=get_keyboard(user_id))
         return
 
     # --- ENHANCED USER DEPOSIT FLOW ENGINE (WITH ORACLE & HD WALLETS) ---
@@ -1678,7 +1778,7 @@ def handle_messages(message):
         if conf['mode'] == 'manual':
             msg = conf['msg_instruct'].replace('%amount%', str(usd_amount)).replace('%address%', conf['address'])
             user_state[user_id] = 'dep_wait_proof'
-            bot.send_message(message.chat.id, get_tl_and_map(msg, lang), parse_mode='HTML', reply_markup=get_cancel_action_keyboard())
+            send_message_with_loading(message.chat.id, get_tl_and_map(msg, lang), parse_mode='HTML', reply_markup=get_cancel_action_keyboard())
         else:
             bot.send_message(message.chat.id, get_tl_and_map(f"🔄 Fetching live exchange rate for {curr.replace('_', ' ')}...", lang), reply_markup=get_cancel_action_keyboard())
             
@@ -1705,10 +1805,18 @@ def handle_messages(message):
             else:
                 address = user_db[user_id]['wallets'][curr]['address']
             
-            msg = conf['msg_instruct'].replace('%crypto_amount%', str(crypto_amount)).replace('%address%', address)
-            msg = f"<i>(Live Rate: 1 {curr.split('_')[0]} = ${live_price:.2f})</i>\n\n{msg}"
+            # Format the rigorous user requested response template
+            uname = message.from_user.username or 'Unknown'
+            live_rate_line = f"🛜 Live exchange rate: 1 {curr.replace('_', ' ')} = ${live_price:.2f}\n" if curr not in ['USDT_TRC20', 'USDT_BEP20', 'USDT_ERC20'] else ""
             
-            bot.send_message(message.chat.id, get_tl_and_map(msg, lang), parse_mode='HTML', reply_markup=get_keyboard(user_id))
+            msg = f"%loading%🚨 <b>DEPOSIT WALLET GENERATED</b> 🚨\n\n👤 User: {user_id} (@{uname})\n🪙 Currency: {curr.replace('_', ' ')}\n{live_rate_line}💸 Deposit amount: {crypto_amount} {curr.replace('_', ' ')}\n\nPlease send exactly <code>{crypto_amount}</code> {curr.replace('_', ' ')} to:\n👇 Tap confirm below after sending.\n\n📫 Public Address:\n<code>{address}</code>"
+            
+            markup = InlineKeyboardMarkup()
+            # We strictly store minimum data in callback to prevent Telegram 64-byte payload limit
+            user_action_data[user_id]['crypto_amount'] = crypto_amount
+            markup.row(InlineKeyboardButton("✅ Confirm", callback_data="cb_verify_deposit"))
+            
+            send_message_with_loading(message.chat.id, get_tl_and_map(msg, lang), parse_mode='HTML', reply_markup=markup)
             
             user_state[user_id] = 'normal'
         return
@@ -1742,7 +1850,7 @@ def handle_messages(message):
         conf = deposit_settings[curr]
         msg_pending = conf.get('msg_pending', "✅ Your deposit request has been submitted to the administrators.")
         msg_pending = msg_pending.replace('%usd_amount%', str(amt))
-        bot.send_message(message.chat.id, get_tl_and_map(msg_pending, lang), parse_mode="HTML", reply_markup=get_keyboard(user_id))
+        send_message_with_loading(message.chat.id, get_tl_and_map(msg_pending, lang), parse_mode="HTML", reply_markup=get_keyboard(user_id))
         return
 
     # --- ADMIN DEPOSIT MENU CONTROLS ---
@@ -2043,6 +2151,12 @@ def handle_messages(message):
         elif text == '📜 Transactions':
             user_state[user_id] = 'admin_wait_tx_id'
             bot.send_message(message.chat.id, "Enter User ID to view history:", reply_markup=get_cancel_action_keyboard())
+        elif text == '⏳ Loading Settings':
+            user_state[user_id] = 'admin_loading'
+            bot.send_message(message.chat.id, "⏳ <b>Loading Macro Settings</b>", parse_mode="HTML", reply_markup=get_keyboard(user_id))
+        elif text == '🌍 Global Dep Popups':
+            user_state[user_id] = 'admin_dep_popups'
+            bot.send_message(message.chat.id, "🌍 <b>Deposit Verify Popups</b>", parse_mode="HTML", reply_markup=get_keyboard(user_id))
         return
 
     # --- ADMIN BALANCE MANAGEMENT ENGINE ---
@@ -2189,11 +2303,11 @@ def handle_messages(message):
         if not global_w_setup.get('do_not_ask_address'):
             user_state[user_id] = 'w_action_addr'
             msg = global_w_setup.get('w_msg_addr') or "Please enter your withdrawal address:"
-            bot.send_message(message.chat.id, get_tl_and_map(replace_macros(msg, user_id, target_path, user_action_data[user_id]), lang), parse_mode="HTML")
+            send_message_with_loading(message.chat.id, get_tl_and_map(replace_macros(msg, user_id, target_path, user_action_data[user_id]), lang), parse_mode="HTML")
         else:
             user_state[user_id] = 'w_action_conf'
             msg = global_w_setup.get('w_msg_conf') or f"Confirm withdrawal of {amount}?"
-            bot.send_message(message.chat.id, get_tl_and_map(replace_macros(msg, user_id, target_path, user_action_data[user_id]), lang), parse_mode="HTML", reply_markup=get_withdrawal_conf_inline(lang))
+            send_message_with_loading(message.chat.id, get_tl_and_map(replace_macros(msg, user_id, target_path, user_action_data[user_id]), lang), parse_mode="HTML", reply_markup=get_withdrawal_conf_inline(lang))
         return
 
     if state == 'w_action_addr':
@@ -2202,7 +2316,7 @@ def handle_messages(message):
         
         user_state[user_id] = 'w_action_conf'
         msg = global_w_setup.get('w_msg_conf') or f"Confirm withdrawal of {user_action_data[user_id]['amount']} to <code>{text}</code>?"
-        bot.send_message(message.chat.id, get_tl_and_map(replace_macros(msg, user_id, target_path, user_action_data[user_id]), lang), parse_mode="HTML", reply_markup=get_withdrawal_conf_inline(lang))
+        send_message_with_loading(message.chat.id, get_tl_and_map(replace_macros(msg, user_id, target_path, user_action_data[user_id]), lang), parse_mode="HTML", reply_markup=get_withdrawal_conf_inline(lang))
         return
 
     # --- GLOBAL FEATURE: Move by Command ---
@@ -2292,7 +2406,7 @@ def handle_messages(message):
                 user_state[user_id] = 'w_action_amount'
                 user_action_data[user_id] = {'path': custom_btn_path}
                 msg = global_w_setup.get('w_msg_enter') or "Please enter the amount you wish to withdraw:"
-                bot.send_message(message.chat.id, get_tl_and_map(replace_macros(msg, user_id, custom_btn_path), lang), parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+                send_message_with_loading(message.chat.id, get_tl_and_map(replace_macros(msg, user_id, custom_btn_path), lang), parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
                 return
 
             if meta.get('is_wallet') and state != 'posts_editing':
@@ -2302,7 +2416,7 @@ def handle_messages(message):
                 
                 markup = InlineKeyboardMarkup()
                 markup.row(InlineKeyboardButton(btn_text, callback_data='cb_wallet_start'))
-                bot.send_message(message.chat.id, msg, reply_markup=markup, parse_mode='HTML')
+                send_message_with_loading(message.chat.id, msg, reply_markup=markup, parse_mode='HTML')
                 return
 
             if meta.get('is_bonus') and state != 'posts_editing':
@@ -2316,7 +2430,7 @@ def handle_messages(message):
                     log_tx(user_id, "Bonus Received", global_bonus_setup['amount'])
                     
                     msg = global_bonus_setup['msg_success'].replace('%bonus_amount%', str(global_bonus_setup['amount']))
-                    bot.send_message(message.chat.id, get_tl_and_map(replace_macros(msg, user_id, custom_btn_path), lang), parse_mode="HTML")
+                    send_message_with_loading(message.chat.id, get_tl_and_map(replace_macros(msg, user_id, custom_btn_path), lang), parse_mode="HTML")
                 else:
                     time_left_sec = int(cooldown - (now - last_time))
                     hours, remainder = divmod(time_left_sec, 3600)
@@ -2324,23 +2438,23 @@ def handle_messages(message):
                     time_str = f"{hours}h {minutes}m {seconds}s"
                     
                     msg = global_bonus_setup['msg_fail'].replace('%time_left%', time_str)
-                    bot.send_message(message.chat.id, get_tl_and_map(replace_macros(msg, user_id, custom_btn_path), lang), parse_mode="HTML")
+                    send_message_with_loading(message.chat.id, get_tl_and_map(replace_macros(msg, user_id, custom_btn_path), lang), parse_mode="HTML")
                 return
 
             if meta.get('is_calculator') and state != 'posts_editing':
                 user_state[user_id] = 'wait_calc_amount'
-                bot.send_message(message.chat.id, get_tl_and_map("🧮 <b>Profit Calculator</b>\n\nEnter the amount you want to invest (USD):", lang), parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+                send_message_with_loading(message.chat.id, get_tl_and_map("🧮 <b>Profit Calculator</b>\n\nEnter the amount you want to invest (USD):", lang), parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
                 return
 
             if meta.get('is_history') and state != 'posts_editing':
                 txs = user_db[user_id].get('transactions', [])
                 if not txs:
-                    bot.send_message(message.chat.id, get_tl_and_map("📜 You have no transaction history yet.", lang), reply_markup=get_keyboard(user_id))
+                    send_message_with_loading(message.chat.id, get_tl_and_map("📜 You have no transaction history yet.", lang), reply_markup=get_keyboard(user_id))
                 else:
                     msg = "📜 <b>Your Transaction History:</b>\n\n"
                     for tx in txs[-20:]:
                         msg += f"🗓 <code>{tx['date']}</code>\n🔹 <b>{tx['type']}</b> | <b>${tx['amount']:.2f}</b>\n\n"
-                    bot.send_message(message.chat.id, get_tl_and_map(msg, lang), parse_mode="HTML", reply_markup=get_keyboard(user_id))
+                    send_message_with_loading(message.chat.id, get_tl_and_map(msg, lang), parse_mode="HTML", reply_markup=get_keyboard(user_id))
                 return
 
             # Both is_language and is_balance now completely act as regular sub-folders automatically!
@@ -2438,6 +2552,50 @@ def handle_inline(call):
     target_btn = user_selected_button.get(user_id)
     is_admin = user_id in ADMIN_IDS
     lang = user_db.get(user_id, {}).get('lang', 'en')
+    
+    # --- LIVE API VERIFY BUTTON DEPOSIT ---
+    if call.data == 'cb_verify_deposit':
+        curr = user_action_data.get(user_id, {}).get('currency')
+        if not curr: return bot.answer_callback_query(call.id, "Session expired.", show_alert=True)
+        
+        crypto_amount = user_action_data[user_id].get('crypto_amount', 0)
+        usd_amount = user_action_data[user_id].get('usd_amount', 0)
+        addr = user_db.get(user_id, {}).get('wallets', {}).get(curr, {}).get('address', '')
+        
+        try: bot.edit_message_text("⏳ <b>Checking blockchain...</b>\n████████████████████", call.message.chat.id, call.message.message_id, parse_mode="HTML")
+        except: pass
+        
+        time.sleep(global_loading_setup.get('duration', 3.0))
+        
+        found, txid = check_deposit_live(addr, curr, crypto_amount)
+        
+        if found:
+            msg = global_dep_popups['success'].replace('%crypto_amount%', str(crypto_amount)).replace('%currency%', curr.replace('_', ' ')).replace('%usd_amount%', str(usd_amount))
+            bot.answer_callback_query(call.id, get_tl_and_map(msg, lang), show_alert=True)
+            
+            if txid not in processed_txids:
+                processed_txids.add(txid)
+                user_db[user_id]['deposit'] += usd_amount
+                log_tx(user_id, f"Auto-Deposit ({curr})", usd_amount)
+                check_and_trigger_auto_buy(user_id)
+            
+            try: bot.delete_message(call.message.chat.id, call.message.message_id)
+            except: pass
+        else:
+            msg = global_dep_popups['fail'].replace('%crypto_amount%', str(crypto_amount)).replace('%currency%', curr.replace('_', ' ')).replace('%usd_amount%', str(usd_amount))
+            bot.answer_callback_query(call.id, get_tl_and_map(msg, lang), show_alert=True)
+            
+            # Re-render original message
+            live_price = get_crypto_price(curr)
+            uname = call.from_user.username or 'Unknown'
+            live_rate_line = f"🛜 Live exchange rate: 1 {curr.replace('_', ' ')} = ${live_price:.2f}\n" if curr not in ['USDT_TRC20', 'USDT_BEP20', 'USDT_ERC20'] else ""
+            msg_orig = f"🚨 <b>DEPOSIT WALLET GENERATED</b> 🚨\n\n👤 User: {user_id} (@{uname})\n🪙 Currency: {curr.replace('_', ' ')}\n{live_rate_line}💸 Deposit amount: {crypto_amount} {curr.replace('_', ' ')}\n\nPlease send exactly <code>{crypto_amount}</code> {curr.replace('_', ' ')} to:\n👇 Tap confirm below after sending.\n\n📫 Public Address:\n<code>{addr}</code>"
+            markup = InlineKeyboardMarkup()
+            markup.row(InlineKeyboardButton("✅ Confirm", callback_data="cb_verify_deposit"))
+            try: bot.edit_message_text(get_tl_and_map(msg_orig, lang), call.message.chat.id, call.message.message_id, parse_mode='HTML', reply_markup=markup)
+            except: pass
+            
+        return
 
     # --- WALLET SETUP NATIVE INLINE ---
     if call.data == 'cb_wallet_start':
