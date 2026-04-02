@@ -720,31 +720,43 @@ def send_path_content(chat_id, user_id, path, is_editing=False, reply_keyboard=N
             if is_editing: editor_msg_ids.setdefault(user_id, []).append(sent.message_id)
 
 # --- NATIVE ENTITY EXTRACTOR (Safely translates Telegram Formatting to Database HTML) ---
-def extract_safe_html(message):
-    raw_html = ""
-    if message.photo:
-        raw_html = message.caption_html if hasattr(message, 'caption_html') and message.caption_html else message.caption or ""
-    else:
-        raw_html = message.html if hasattr(message, 'html') and message.html else message.text or ""
-        
-    if not raw_html:
-        return ""
-        
-    # Telegram's message.html safely escapes manual < and >.
-    # We selectively unescape ONLY valid Telegram HTML tags so copied templates work flawlessly.
-    tags = ['b', 'strong', 'i', 'em', 'u', 'ins', 's', 'strike', 'del', 'code', 'pre', 'tg-spoiler']
-    for tag in tags:
-        raw_html = re.sub(f"&lt;{tag}&gt;", f"<{tag}>", raw_html, flags=re.IGNORECASE)
-        raw_html = re.sub(f"&lt;/{tag}&gt;", f"</{tag}>", raw_html, flags=re.IGNORECASE)
-        
-    # Safely restore anchor tags
-    raw_html = re.sub(r'&lt;a href=(?:&quot;|"|&apos;|\')(.*?)(?:&quot;|"|&apos;|\')&gt;', r'<a href="\1">', raw_html, flags=re.IGNORECASE)
-    raw_html = re.sub(r'&lt;/a&gt;', '</a>', raw_html, flags=re.IGNORECASE)
+def extract_html(message):
+    text = message.text or message.caption or ""
+    entities = message.entities or message.caption_entities or []
     
-    # Auto-fix common typos just in case
-    raw_html = raw_html.replace('&lt;bold&gt;', '<b>').replace('&lt;/bold&gt;', '</b>')
+    if not entities:
+        return text
+        
+    encoded_text = text.encode('utf-16-le')
     
-    return raw_html
+    tags = []
+    for ent in entities:
+        open_tag, close_tag = '', ''
+        if ent.type == 'bold': open_tag, close_tag = '<b>', '</b>'
+        elif ent.type == 'italic': open_tag, close_tag = '<i>', '</i>'
+        elif ent.type == 'code': open_tag, close_tag = '<code>', '</code>'
+        elif ent.type == 'pre': open_tag, close_tag = '<pre>', '</pre>'
+        elif ent.type == 'strikethrough': open_tag, close_tag = '<s>', '</s>'
+        elif ent.type == 'underline': open_tag, close_tag = '<u>', '</u>'
+        elif ent.type == 'spoiler': open_tag, close_tag = '<tg-spoiler>', '</tg-spoiler>'
+        elif ent.type == 'text_link': open_tag, close_tag = f'<a href="{ent.url}">', '</a>'
+        
+        if open_tag:
+            start = ent.offset * 2
+            end = (ent.offset + ent.length) * 2
+            tags.append((start, open_tag, 'open', ent.length))
+            tags.append((end, close_tag, 'close', ent.length))
+            
+    # Sort backwards to not mess up offsets.
+    tags.sort(key=lambda x: (x[0], x[2] == 'open', x[3] if x[2]=='close' else -x[3]), reverse=True)
+    
+    for index, tag_str, _, _ in tags:
+        encoded_text = encoded_text[:index] + tag_str.encode('utf-16-le') + encoded_text[index:]
+        
+    try:
+        return encoded_text.decode('utf-16-le')
+    except Exception:
+        return text
 
 # --- KEYBOARD BUILDERS ---
 def get_wizard_keyboard(current_val, options=None, allow_empty=False):
@@ -1053,7 +1065,7 @@ def handle_messages(message):
     text = message.text if message.text else (message.caption if message.caption else "")
     
     # --- NEW: NATIVE FORMATTING CAPTURE ---
-    formatted_text = extract_safe_html(message)
+    formatted_text = extract_html(message)
 
     is_admin = user_id in ADMIN_IDS
     
@@ -1282,7 +1294,7 @@ def handle_messages(message):
                 new_post = {
                     'id': post_id,
                     'type': 'text',
-                    'text': 'Current Language: <b>%lang%</b>\nSelect Language to change it',
+                    'text': 'Current Language: %lang%\nSelect Language to change it',
                     'photo': None,
                     'custom_inlines': []
                 }
@@ -1336,7 +1348,7 @@ def handle_messages(message):
                 new_post = {
                     'id': post_id,
                     'type': 'text',
-                    'text': "━━━━━━━━━━━━━━━━━━\n📊 <b>G-Force Auto Trading Bot</b>\n━━━━━━━━━━━━━━━━━━\n💵 Balance: <b>%balance% USDT</b>\n💼 Active Investment: <b>%plan_invest% USDT</b>\n━━━━━━━━━━━━━━━━━━\n🎁 Bonus: <b>%bonus% USDT</b>\n⏱ Hourly Profit: <b>%hourly_profit% USDT</b>\n━━━━━━━━━━━━━━━━━━\n⚙️ Plan: <b>%plan_names%</b>\n👥 Referrals: <b>%ref_count% Users</b>\n💳 Payouts: <b>%withdrawn% USDT</b>\n━━━━━━━━━━━━━━━━━━",
+                    'text': "━━━━━━━━━━━━━━━━━━\n📊 G-Force Auto Trading Bot\n━━━━━━━━━━━━━━━━━━\n💵 Balance: %balance% USDT\n💼 Active Investment: %plan_invest% USDT\n━━━━━━━━━━━━━━━━━━\n🎁 Bonus: %bonus% USDT\n⏱ Hourly Profit: %hourly_profit% USDT\n━━━━━━━━━━━━━━━━━━\n⚙️ Plan: %plan_names%\n👥 Referrals: %ref_count% Users\n💳 Payouts: %withdrawn% USDT\n━━━━━━━━━━━━━━━━━━",
                     'photo': None,
                     'custom_inlines': []
                 }
@@ -2651,16 +2663,14 @@ def handle_inline(call):
             user_action_data[user_id] = {'post_id': post_id}
             post = next((p for p in menu_posts.get(current_path, []) if p['id'] == post_id), None)
             curr_txt = post['text'] if post else ""
-            safe_txt = html.escape(curr_txt)
-            bot.send_message(call.message.chat.id, f"Send the new text (image will be kept):\n\nℹ️ <b>Current Text (Copy this to preserve macros):</b>\n<code>{safe_txt}</code>", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+            bot.send_message(call.message.chat.id, f"Send the new text (image will be kept):\n\nℹ️ <b>Current Text:</b>\n\n{curr_txt}", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
             
         elif action == 'repall':
             user_state[user_id] = 'posts_rep_all'
             user_action_data[user_id] = {'post_id': post_id}
             post = next((p for p in menu_posts.get(current_path, []) if p['id'] == post_id), None)
             curr_txt = post['text'] if post else ""
-            safe_txt = html.escape(curr_txt)
-            bot.send_message(call.message.chat.id, f"Send the new message (text or photo):\n\nℹ️ <b>Current Text (Copy this to preserve macros):</b>\n<code>{safe_txt}</code>", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+            bot.send_message(call.message.chat.id, f"Send the new message (text or photo):\n\nℹ️ <b>Current Text:</b>\n\n{curr_txt}", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
             
         elif action == 'add':
             user_state[user_id] = 'posts_insert_after'
