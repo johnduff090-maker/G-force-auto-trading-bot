@@ -763,7 +763,19 @@ def send_path_content(chat_id, user_id, path, is_editing=False, reply_keyboard=N
             if is_editing: editor_msg_ids.setdefault(user_id, []).append(sent.message_id)
 
     posts = menu_posts.get(path, [])
+    
+    # --- GHOST MODE IMPLEMENTATION ---
     if not posts and not assigned_plan:
+        if not is_editing and path != 'root':
+            # GHOST MODE: Instantly send and delete a dummy message to force the Reply Keyboard to slide open
+            # without leaving "No messages set" clutter in the user's chat history.
+            try:
+                ghost = bot.send_message(chat_id, "🔄", reply_markup=reply_keyboard)
+                bot.delete_message(chat_id, ghost.message_id)
+            except Exception:
+                pass
+            return
+            
         msg_raw = f"📂 <b>{path.split('/')[-1]}</b>\n\n<i>(No messages set for this menu)</i>" if path != 'root' else "Welcome!"
         sent = bot.send_message(chat_id, get_tl_and_map(msg_raw, lang), parse_mode="HTML", reply_markup=reply_keyboard)
         if is_editing: editor_msg_ids.setdefault(user_id, []).append(sent.message_id)
