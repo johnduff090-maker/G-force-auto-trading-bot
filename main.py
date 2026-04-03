@@ -888,6 +888,16 @@ def send_path_content(chat_id, user_id, path, is_editing=False, reply_keyboard=N
             sent = bot.send_message(chat_id, err_msg, parse_mode="HTML", reply_markup=markup)
             if is_editing: editor_msg_ids.setdefault(user_id, []).append(sent.message_id)
 
+    # --- GUARANTEE KEYBOARD RENDER FALLBACK ---
+    if not kb_attached and reply_keyboard and posts:
+        # Check if the keyboard actually has buttons to prevent empty sending
+        has_btns = hasattr(reply_keyboard, 'keyboard') and len(reply_keyboard.keyboard) > 0
+        if has_btns:
+            try:
+                sent = bot.send_message(chat_id, get_tl_and_map("👇 <b>Menu Options</b>", lang), parse_mode="HTML", reply_markup=reply_keyboard)
+                if is_editing: editor_msg_ids.setdefault(user_id, []).append(sent.message_id)
+            except Exception: pass
+
 # --- NATIVE ENTITY EXTRACTOR (Safely translates Telegram Formatting to Database HTML) ---
 def extract_html(message):
     text = message.text or message.caption or ""
