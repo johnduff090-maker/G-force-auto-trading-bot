@@ -763,19 +763,7 @@ def send_path_content(chat_id, user_id, path, is_editing=False, reply_keyboard=N
             if is_editing: editor_msg_ids.setdefault(user_id, []).append(sent.message_id)
 
     posts = menu_posts.get(path, [])
-    
-    # --- GHOST MODE IMPLEMENTATION ---
     if not posts and not assigned_plan:
-        if not is_editing and path != 'root':
-            # GHOST MODE: Instantly send and delete a dummy message to force the Reply Keyboard to slide open
-            # without leaving "No messages set" clutter in the user's chat history.
-            try:
-                ghost = bot.send_message(chat_id, "🔄", reply_markup=reply_keyboard)
-                bot.delete_message(chat_id, ghost.message_id)
-            except Exception:
-                pass
-            return
-            
         msg_raw = f"📂 <b>{path.split('/')[-1]}</b>\n\n<i>(No messages set for this menu)</i>" if path != 'root' else "Welcome!"
         sent = bot.send_message(chat_id, get_tl_and_map(msg_raw, lang), parse_mode="HTML", reply_markup=reply_keyboard)
         if is_editing: editor_msg_ids.setdefault(user_id, []).append(sent.message_id)
@@ -873,13 +861,13 @@ def send_path_content(chat_id, user_id, path, is_editing=False, reply_keyboard=N
             for row in editor_markup.keyboard:
                 markup.row(*row)
                 
-        # INTELLIGENT KEYBOARD INJECTION: Attach the bottom menu to ANY post that doesn't already have inline buttons!
-        if not markup and not kb_attached and reply_keyboard:
+        if not markup.keyboard: 
+            markup = None
+            
+        # INTELLIGENT KEYBOARD INJECTION: Try to hide the reply keyboard inside the last normal post to avoid empty bubbles
+        if i == len(posts) - 1 and not markup and not kb_attached and reply_keyboard:
             markup = reply_keyboard
             kb_attached = True
-        
-        if not markup and not hasattr(markup, 'keyboard'): 
-            markup = None
         
         # 4. FINALLY, SEND THE REAL POST (PART B)
         try:
@@ -899,6 +887,16 @@ def send_path_content(chat_id, user_id, path, is_editing=False, reply_keyboard=N
             err_msg = f"⚠️ <b>Error rendering post:</b>\n<code>{html.escape(str(e))}</code>\n\n<i>Fix or delete this using the buttons below!</i>"
             sent = bot.send_message(chat_id, err_msg, parse_mode="HTML", reply_markup=markup)
             if is_editing: editor_msg_ids.setdefault(user_id, []).append(sent.message_id)
+
+    # --- GUARANTEE KEYBOARD RENDER FALLBACK ---
+    if not kb_attached and reply_keyboard and posts:
+        # Check if the keyboard actually has buttons to prevent empty sending
+        has_btns = hasattr(reply_keyboard, 'keyboard') and len(reply_keyboard.keyboard) > 0
+        if has_btns:
+            try:
+                sent = bot.send_message(chat_id, get_tl_and_map("👇 <b>Menu Options</b>", lang), parse_mode="HTML", reply_markup=reply_keyboard)
+                if is_editing: editor_msg_ids.setdefault(user_id, []).append(sent.message_id)
+            except Exception: pass
 
 # --- NATIVE ENTITY EXTRACTOR (Safely translates Telegram Formatting to Database HTML) ---
 def extract_html(message):
