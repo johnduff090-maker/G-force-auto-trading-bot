@@ -2616,12 +2616,18 @@ def handle_messages(message):
                     bot.send_message(message.chat.id, get_tl_and_map(msg, lang), parse_mode="HTML", reply_markup=get_keyboard(user_id))
                 return
 
-            # Both is_language and is_balance now completely act as regular sub-folders automatically!
-            new_path = custom_btn_path
-            user_current_path[user_id] = new_path
-            if new_path not in menus: menus[new_path] = []
+            # --- THE FIX: FOLDERS VS POSTS ---
+            has_submenus = custom_btn_path in menus and len(menus[custom_btn_path]) > 0
             
-            send_path_content(message.chat.id, user_id, new_path, is_editing=(state == 'posts_editing'), reply_keyboard=get_keyboard(user_id))
+            if is_admin and state in ['editing', 'posts_editing']:
+                user_current_path[user_id] = custom_btn_path
+                if custom_btn_path not in menus: menus[custom_btn_path] = []
+                send_path_content(message.chat.id, user_id, custom_btn_path, is_editing=(state == 'posts_editing'), reply_keyboard=get_keyboard(user_id))
+            elif has_submenus:
+                user_current_path[user_id] = custom_btn_path
+                send_path_content(message.chat.id, user_id, custom_btn_path, is_editing=False, reply_keyboard=get_keyboard(user_id))
+            else:
+                send_path_content(message.chat.id, user_id, custom_btn_path, is_editing=False, reply_keyboard=get_keyboard(user_id))
         else:
             bot.send_message(message.chat.id, get_tl_and_map("Unrecognized command.", lang), reply_markup=get_keyboard(user_id))
 
