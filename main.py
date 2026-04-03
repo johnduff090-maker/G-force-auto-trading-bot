@@ -894,8 +894,16 @@ def send_path_content(chat_id, user_id, path, is_editing=False, reply_keyboard=N
         has_btns = hasattr(reply_keyboard, 'keyboard') and len(reply_keyboard.keyboard) > 0
         if has_btns:
             try:
-                sent = bot.send_message(chat_id, get_tl_and_map("👇 <b>Menu Options</b>", lang), parse_mode="HTML", reply_markup=reply_keyboard)
-                if is_editing: editor_msg_ids.setdefault(user_id, []).append(sent.message_id)
+                # 1. Send an invisible braille character to minimize visual flash
+                sent = bot.send_message(chat_id, "⠀", parse_mode="HTML", reply_markup=reply_keyboard)
+                
+                if is_editing: 
+                    # Admins keep the anchor for the editor cleanup
+                    editor_msg_ids.setdefault(user_id, []).append(sent.message_id)
+                else:
+                    # 2. Instantly auto-delete the message for normal users in a millisecond.
+                    # The chat bubble disappears, but the bottom Reply Keyboard stays active!
+                    bot.delete_message(chat_id, sent.message_id)
             except Exception: pass
 
 # --- NATIVE ENTITY EXTRACTOR (Safely translates Telegram Formatting to Database HTML) ---
