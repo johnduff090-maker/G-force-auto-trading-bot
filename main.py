@@ -224,11 +224,11 @@ global_w_setup = db_data.get('global_w_setup', {
     'w_var': 'balance', 'w_min': 10.0, 'w_max': 10000.0,
     'w_msg_enter': 'Please enter the amount you wish to withdraw:',
     'w_msg_addr': 'Please enter your withdrawal address:',
-    'w_msg_conf': 'Confirm withdrawal of %withdraw% to <code>%address%</code> (Network: %network%)?',
+    'w_msg_conf': 'Are you sure you want to withdraw %withdraw% USDT via %network% to:\n<code>%address%</code>',
     'w_msg_processing': '♻️ Your Withdrawal of %withdraw% is processing on the blockchain...',
-    'w_msg_approve': '✅ Withdrawal Completed\n━━━━━━━━━━━━━━━━━━\n👤 %firstname% \n💰 Amount: -%withdraw% USDT \n🔗 Address: %address% \n🌐 Network: %network% \n⚡ Type: Instant \n━━━━━━━━━━━━━━━━━━\n📌 Status: Successful ✔️ \n\nYour funds have been sent successfully to your wallet.',
-    'w_msg_decline': '❌ Your withdrawal of %withdraw% was declined. Funds have been refunded to your balance.',
-    'w_msg_ignore': '🚫 Your withdrawal request of %withdraw% has been ignored.',
+    'w_msg_approve': '✅ Withdrawal Completed\n━━━━━━━━━━━━━━━━━━\n👤 %firstname% %lastname%\n💰 Amount: -%withdraw% USDT\n🔗 Address: <code>%address%</code>\n🌐 Network: %network%\n⚡ Type: Instant\n━━━━━━━━━━━━━━━━━━\n                           📌 Status: Successful ✔️ \n\nYour funds have been sent successfully to your wallet.',
+    'w_msg_decline': '❌ Withdrawal Declined\n━━━━━━━━━━━━━━━━━━\n👤 %firstname% %lastname%\n💰 Amount: %withdraw% USDT\n━━━━━━━━━━━━━━━━━━\n                           📌 Status: Failed ❌ \n\nYour withdrawal request was declined. The funds have been refunded to your balance.',
+    'w_msg_ignore': '🚫 Withdrawal Ignored\n━━━━━━━━━━━━━━━━━━\n👤 %firstname% %lastname%\n💰 Amount: %withdraw% USDT\n━━━━━━━━━━━━━━━━━━\n                           📌 Status: Cancelled 🚫 \n\nYour withdrawal request has been ignored.',
     'do_not_ask_address': False,
     'w_commission': 0.0,
     'w_rate_toggle': False,
@@ -1316,7 +1316,8 @@ def handle_messages(message):
             "• <code>%lastname%</code> - User's last name\n\n"
             "• <code>%usd_amount%</code> - USD amount of deposit\n"
             "• <code>%crypto_amount%</code> - Crypto amount of deposit\n"
-            "• <code>%address%</code> - Withdraw Wallet address\n\n"
+            "• <code>%address%</code> - Withdraw Wallet address\n"
+            "• <code>%withdraw%</code> - The withdrawal amount\n\n"
             "• <code>%wallet%</code> - User's USDT Wallet address\n"
             "• <code>%email%</code> - User's Email address\n"
             "• <code>%bonus_amount%</code> - The defined bonus amount\n"
@@ -2501,7 +2502,7 @@ def handle_messages(message):
             bot.send_message(message.chat.id, get_tl_and_map(replace_macros(msg, user_id, target_path, user_action_data[user_id]), lang), parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
         else:
             user_state[user_id] = 'w_action_conf'
-            msg = global_w_setup.get('w_msg_conf') or f"Confirm withdrawal of {amount}?"
+            msg = global_w_setup.get('w_msg_conf') or "Are you sure you want to withdraw %withdraw% USDT via %network% to:\n<code>%address%</code>"
             bot.send_message(message.chat.id, get_tl_and_map(replace_macros(msg, user_id, target_path, user_action_data[user_id]), lang), parse_mode="HTML", reply_markup=get_withdrawal_conf_inline(lang))
         return
 
@@ -2517,7 +2518,7 @@ def handle_messages(message):
         else: user_action_data[user_id]['network'] = "Unknown"
         
         user_state[user_id] = 'w_action_conf'
-        msg = global_w_setup.get('w_msg_conf') or f"Confirm withdrawal of {user_action_data[user_id]['amount']} to <code>{addr}</code>?"
+        msg = global_w_setup.get('w_msg_conf') or "Are you sure you want to withdraw %withdraw% USDT via %network% to:\n<code>%address%</code>"
         bot.send_message(message.chat.id, get_tl_and_map(replace_macros(msg, user_id, target_path, user_action_data[user_id]), lang), parse_mode="HTML", reply_markup=get_withdrawal_conf_inline(lang))
         return
 
