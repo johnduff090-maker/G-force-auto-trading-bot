@@ -3108,7 +3108,7 @@ def handle_messages(message):
                 bot.send_message(message.chat.id, get_tl_and_map("🧮 <b>Profit Calculator</b>\n\nEnter the amount you want to invest (USD):", lang), parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
                 return
 
-           if meta.get('is_history') and state != 'posts_editing':
+            if meta.get('is_history') and state != 'posts_editing':
                 txs = user_db[user_id].get('transactions', [])
                 if not txs:
                     bot.send_message(message.chat.id, get_tl_and_map("📜 You have no transaction history yet.", lang), reply_markup=get_keyboard(user_id))
