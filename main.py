@@ -820,7 +820,7 @@ def send_path_content(chat_id, user_id, path, is_editing=False, reply_keyboard=N
                     temp_msg = bot.send_photo(chat_id, p['photo'], caption=temp_msg_text, parse_mode="HTML")
                 else:
                     temp_msg = bot.send_message(chat_id, temp_msg_text, parse_mode="HTML")
-                # 2. PAUSE THE MENU AND ANIMATE IT SYNCHRONOUSLY
+                # 2. PAUSE THE MENU AND ANIMATE it SYNCHRONOUSLY
                 execute_loading_animation(chat_id, temp_msg.message_id, part_a, style, p['type'] == 'photo', total_loading_time)
             except: pass
             
@@ -2825,6 +2825,9 @@ def handle_inline(call):
     target_btn = user_selected_button.get(user_id)
     is_admin = user_id in ADMIN_IDS
     lang = user_db.get(user_id, {}).get('lang', 'en')
+    
+    # Declare it globally ONCE at the very top of the function
+    global pending_withdrawals
 
     # --- NEW: ADMIN WITHDRAWAL NOTIFICATION INLINES ---
     if call.data.startswith('cb_wad_'):
@@ -3311,7 +3314,7 @@ def handle_inline(call):
             
             # Add to pending global dictionary
             w_id = str(uuid.uuid4())[:8]
-            global pending_withdrawals
+            
             if 'pending_withdrawals' not in globals():
                 pending_withdrawals = {}
             
