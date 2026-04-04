@@ -3655,9 +3655,7 @@ def handle_inline(call):
             render_pi_manager(call.message.chat.id, post, call.message.message_id)
         elif action == 'right' and idx < len(inlines) - 1:
             inlines[idx], inlines[idx+1] = inlines[idx+1], inlines[idx]
-            render_pi_manager(call.message.chat.id, post, call.message.message
-
-_id)
+            render_pi_manager(call.message.chat.id, post, call.message.message_id)
             
         bot.answer_callback_query(call.id)
         return
