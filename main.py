@@ -1,3 +1,4 @@
+
 import telebot
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 import uuid
@@ -155,7 +156,9 @@ def save_database():
         'global_wallet_setup': global_wallet_setup,
         'global_bonus_setup': global_bonus_setup,
         'global_ui_settings': global_ui_settings,
-        'processed_txids': list(processed_txids) # Convert set to list for database
+        'processed_txids': list(processed_txids), # Convert set to list for database
+        'blocked_users': list(blocked_users),     # NEW: Blocked users saving
+        'block_settings': block_settings          # NEW: Block messages saving
     }
     try:
         conn = psycopg2.connect(DATABASE_URL)
@@ -209,6 +212,13 @@ menus = db_data.get('menus', {'root': []})
 menu_posts = db_data.get('menu_posts', {'root': [{'id': 'init', 'type': 'text', 'text': 'Welcome to the Main Menu! Select an option below:', 'photo': None}]})
 btn_metadata = db_data.get('btn_metadata', {})
 processed_txids = set(db_data.get('processed_txids', []))
+
+# NEW: Blocked Users Persistent Data
+blocked_users = set(db_data.get('blocked_users', []))
+block_settings = db_data.get('block_settings', {
+    'msg_block': '🚫 You have been blocked by the admin and cannot use this bot.',
+    'msg_unblock': '✅ You have been unblocked. Welcome back!'
+})
 
 global_ui_settings = db_data.get('global_ui_settings', {'loading_bar_style': '1', 'loading_bar_time': 3.0})
 
@@ -1019,6 +1029,13 @@ def get_loading_bar_keyboard():
     markup.row(KeyboardButton('🔙 Back to Admin'))
     return markup
 
+def get_admin_block_keyboard():
+    markup = ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.row(KeyboardButton('🚫 Block'), KeyboardButton('✅ Unblock'))
+    markup.row(KeyboardButton('💬 Edit Block Msg'), KeyboardButton('💬 Edit Unblock Msg'))
+    markup.row(KeyboardButton('🔙 Back to Admin'))
+    return markup
+
 def get_assign_command_keyboard(full_path):
     markup = ReplyKeyboardMarkup(resize_keyboard=True)
     meta = btn_metadata.get(full_path, get_default_metadata())
@@ -1056,7 +1073,7 @@ def get_keyboard_raw(user_id):
             markup.row(KeyboardButton('🏦 Deposit Settings'), KeyboardButton('Withdrawal Settings')) 
             markup.row(KeyboardButton('💳 Wallet Settings'), KeyboardButton('🎁 Bonus Settings')) 
             markup.row(KeyboardButton('🧮 Calculator'), KeyboardButton('📜 Transactions'))
-            markup.row(KeyboardButton('Loading Bar Settings'))
+            markup.row(KeyboardButton('Loading Bar Settings'), KeyboardButton('🚫 Block User System'))
             markup.row(KeyboardButton('🔙 Back to Main'))
             return markup
 
@@ -1064,6 +1081,7 @@ def get_keyboard_raw(user_id):
         if state == 'admin_wallet_menu': return get_admin_wallet_keyboard()
         if state == 'admin_bonus_menu': return get_admin_bonus_keyboard()
         if state == 'admin_loading_bar': return get_loading_bar_keyboard()
+        if state == 'admin_block_menu': return get_admin_block_keyboard()
 
         if state == 'admin_dep_menu':
             for c in deposit_settings.keys():
@@ -1086,7 +1104,7 @@ def get_keyboard_raw(user_id):
             markup.row(KeyboardButton('🔙 Back to Deposit Menu'))
             return markup
 
-        if state.startswith('dep_setup_') or state.startswith('wallet_setup_') or state.startswith('bonus_setup_') or state == 'admin_loading_time':
+        if state.startswith('dep_setup_') or state.startswith('wallet_setup_') or state.startswith('bonus_setup_') or state == 'admin_loading_time' or state.startswith('wait_block_') or state.startswith('wait_edit_block') or state.startswith('wait_edit_unblock'):
             return get_cancel_action_keyboard()
 
         if state == 'admin_plans':
@@ -1249,6 +1267,25 @@ def get_withdrawal_conf_inline(lang='en'):
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     user_id = message.from_user.id
+    
+    # --- NEW: INTERCEPT BLOCKED USERS ---
+    if user_id in blocked_users:
+        lang = user_db.get(user_id, {}).get('lang', 'en')
+        bot.send_message(message.chat.id, get_tl_and_map(block_settings['msg_block'], lang), parse_mode="HTML")
+        return
+
+    # --- NEW: HOMEPAGE HARDCODED LOADING BAR (Independent) ---
+    frames = ["[▯▯▯▯▯▯▯▯▯▯] 0%", "[■■▯▯▯▯▯▯▯▯] 20%", "[■■■■▯▯▯▯▯▯] 40%", "[■■■■■■▯▯▯▯] 60%", "[■■■■■■■■▯▯] 80%", "[■■■■■■■■■■] 100%"]
+    try:
+        loading_msg = bot.send_message(message.chat.id, f"♻️ <b>INITIALIZING SYSTEM...</b>\n{frames[0]}", parse_mode="HTML")
+        for bar in frames[1:]:
+            time.sleep(0.3)
+            bot.edit_message_text(f"♻️ <b>INITIALIZING SYSTEM...</b>\n{bar}", chat_id=message.chat.id, message_id=loading_msg.message_id, parse_mode="HTML")
+        time.sleep(0.2)
+        bot.delete_message(message.chat.id, loading_msg.message_id)
+    except Exception:
+        pass
+
     init_user_db(message)
     user_current_path[user_id] = 'root'
     user_state[user_id] = 'normal'
@@ -1260,6 +1297,12 @@ def send_welcome(message):
 def handle_messages(message):
     user_id = message.from_user.id
     text = message.text if message.text else (message.caption if message.caption else "")
+    
+    # --- NEW: INTERCEPT BLOCKED USERS ---
+    if user_id in blocked_users:
+        lang = user_db.get(user_id, {}).get('lang', 'en')
+        bot.send_message(message.chat.id, get_tl_and_map(block_settings['msg_block'], lang), parse_mode="HTML")
+        return
     
     # --- NEW: NATIVE FORMATTING CAPTURE ---
     formatted_text = extract_html(message)
@@ -1382,6 +1425,10 @@ def handle_messages(message):
             user_state[user_id] = 'admin_loading_bar'
             bot.send_message(message.chat.id, get_tl_and_map("Action cancelled.", lang), reply_markup=get_keyboard(user_id))
             return
+        elif state.startswith('wait_block') or state.startswith('wait_edit_block') or state.startswith('wait_edit_unblock'):
+            user_state[user_id] = 'admin_block_menu'
+            bot.send_message(message.chat.id, get_tl_and_map("Action cancelled.", lang), reply_markup=get_keyboard(user_id))
+            return
         else:
             user_state[user_id] = 'normal'
             bot.send_message(message.chat.id, get_tl_and_map("❌ Action Cancelled.", lang), reply_markup=get_keyboard(user_id))
@@ -1399,7 +1446,7 @@ def handle_messages(message):
     if text == '🔙 Back':
         if current_path != 'root':
             parts = current_path.split('/')[:-1]
-            new_path = '/'.join(parts) if len(parts) > 1 else 'root'
+            new_path = '/join'.join(parts) if len(parts) > 1 else 'root'
             user_current_path[user_id] = new_path
             if state in ['w_action_amount', 'w_action_addr', 'buyplan_wait_amount', 'dep_wait_amount', 'dep_wait_proof', 'wait_calc_amount', 'wallet_wait_email', 'wallet_wait_address']:
                 user_state[user_id] = 'normal'
@@ -2276,7 +2323,7 @@ def handle_messages(message):
         return
 
     # --- BLOCK UNAUTHORIZED ADMIN COMMANDS ---
-    admin_commands = ['🎛️ Buttons Editor', '📝 Posts Editor', '💵 Balance', '🔐 Admin', '➕ Add Button', '🛑 Stop Editor', '✅ Confirm', '🚫 Cancel', '✖️ Delete', 'Deposit balance', 'Withdrawal balance', 'User Macro', 'User Macros', '📜 Macros', '📊 Plans', '🔙 Back to Main', '🔙 Back to Admin', '➕ Add Plan', '➕ Add Message', 'Pagination in Editor (10)', '🏦 Deposit Settings', 'Withdrawal Settings', '🔙 Back to Deposit Menu', '📍 Set Static Address', '🔑 Set HD Wallet Key', '💬 Edit Enter Msg', '💬 Edit Instruct Msg', '💰 Set Min Deposit', '💰 Set Max Deposit', '💬 Edit Pending Msg', '💬 Edit Success Msg', '🧮 Calculator', '📜 Transactions', '💳 Wallet Settings', '🎁 Bonus Settings', 'Loading Bar Settings']
+    admin_commands = ['🎛️ Buttons Editor', '📝 Posts Editor', '💵 Balance', '🔐 Admin', '➕ Add Button', '🛑 Stop Editor', '✅ Confirm', '🚫 Cancel', '✖️ Delete', 'Deposit balance', 'Withdrawal balance', 'User Macro', 'User Macros', '📜 Macros', '📊 Plans', '🔙 Back to Main', '🔙 Back to Admin', '➕ Add Plan', '➕ Add Message', 'Pagination in Editor (10)', '🏦 Deposit Settings', 'Withdrawal Settings', '🔙 Back to Deposit Menu', '📍 Set Static Address', '🔑 Set HD Wallet Key', '💬 Edit Enter Msg', '💬 Edit Instruct Msg', '💰 Set Min Deposit', '💰 Set Max Deposit', '💬 Edit Pending Msg', '💬 Edit Success Msg', '🧮 Calculator', '📜 Transactions', '💳 Wallet Settings', '🎁 Bonus Settings', 'Loading Bar Settings', '🚫 Block User System', '🚫 Block', '✅ Unblock', '💬 Edit Block Msg', '💬 Edit Unblock Msg']
     if not is_admin and (text in admin_commands or text.startswith('📋 Paste "') or text == '✔️ Leave as Is' or text == '➖ Set Empty' or text.startswith('⚙️ Edit ') or text.startswith('Style ')):
         bot.send_message(message.chat.id, get_tl_and_map("Unrecognized command.", lang), reply_markup=get_keyboard(user_id))
         return
@@ -2323,6 +2370,64 @@ def handle_messages(message):
         elif text.startswith('Pagination'):
             bot.send_message(message.chat.id, "Pagination settings acknowledged. (Logic pending).", reply_markup=get_keyboard(user_id))
             return
+
+    # --- NEW: ADMIN BLOCK SYSTEM LOGIC ---
+    if text == '🚫 Block User System' and is_admin:
+        user_state[user_id] = 'admin_block_menu'
+        bot.send_message(message.chat.id, "🚫 <b>Block User System</b>", parse_mode="HTML", reply_markup=get_keyboard(user_id))
+        return
+
+    if state == 'admin_block_menu':
+        if text == '🔙 Back to Admin':
+            user_state[user_id] = 'admin_menu'
+            bot.send_message(message.chat.id, "🔐 <b>Admin Panel</b>", parse_mode="HTML", reply_markup=get_keyboard(user_id))
+        elif text == '🚫 Block':
+            user_state[user_id] = 'wait_block_id'
+            bot.send_message(message.chat.id, "Enter the User ID to block:", reply_markup=get_cancel_action_keyboard())
+        elif text == '✅ Unblock':
+            if not blocked_users:
+                bot.send_message(message.chat.id, "There are no blocked users.", reply_markup=get_keyboard(user_id))
+            else:
+                msg = "🚫 <b>Blocked Users List:</b>\nClick a user below to Unblock them.\n\n"
+                markup = InlineKeyboardMarkup()
+                for buid in blocked_users:
+                    uname = user_db.get(buid, {}).get('first_name', 'Unknown')
+                    markup.row(InlineKeyboardButton(f"✅ Unblock {uname} ({buid})", callback_data=f"cb_unblock_{buid}"))
+                bot.send_message(message.chat.id, msg, parse_mode="HTML", reply_markup=markup)
+        elif text == '💬 Edit Block Msg':
+            user_state[user_id] = 'wait_edit_block_msg'
+            bot.send_message(message.chat.id, f"Enter new Block Message:\n\nCurrent:\n{block_settings['msg_block']}", reply_markup=get_cancel_action_keyboard())
+        elif text == '💬 Edit Unblock Msg':
+            user_state[user_id] = 'wait_edit_unblock_msg'
+            bot.send_message(message.chat.id, f"Enter new Unblock Message:\n\nCurrent:\n{block_settings['msg_unblock']}", reply_markup=get_cancel_action_keyboard())
+        return
+
+    if state == 'wait_block_id':
+        try:
+            target_id = int(text.strip())
+            blocked_users.add(target_id)
+            user_state[user_id] = 'admin_block_menu'
+            bot.send_message(message.chat.id, f"✅ User {target_id} has been permanently blocked.", reply_markup=get_keyboard(user_id))
+            
+            # Send the block message directly to the targeted user
+            target_lang = user_db.get(target_id, {}).get('lang', 'en')
+            try: bot.send_message(target_id, get_tl_and_map(block_settings['msg_block'], target_lang), parse_mode="HTML")
+            except: pass
+        except ValueError:
+            bot.send_message(message.chat.id, "⚠️ Invalid User ID. Must be a number.")
+        return
+
+    if state == 'wait_edit_block_msg':
+        block_settings['msg_block'] = formatted_text
+        user_state[user_id] = 'admin_block_menu'
+        bot.send_message(message.chat.id, "✅ Block message updated successfully.", reply_markup=get_keyboard(user_id))
+        return
+
+    if state == 'wait_edit_unblock_msg':
+        block_settings['msg_unblock'] = formatted_text
+        user_state[user_id] = 'admin_block_menu'
+        bot.send_message(message.chat.id, "✅ Unblock message updated successfully.", reply_markup=get_keyboard(user_id))
+        return
 
     # --- ADMIN PANEL & PLANS ENGINE ---
     if state == 'admin_menu':
@@ -2829,6 +2934,38 @@ def handle_inline(call):
     
     # Declare it globally ONCE at the very top of the function
     global pending_withdrawals
+
+    # --- NEW: INTERCEPT BLOCKED USERS INLINE CALLS ---
+    if user_id in blocked_users:
+        bot.answer_callback_query(call.id, get_tl_and_map("🚫 You are currently blocked.", lang), show_alert=True)
+        return
+
+    # --- NEW: UNBLOCK USER INLINE BUTTON ---
+    if call.data.startswith('cb_unblock_'):
+        if not is_admin: return bot.answer_callback_query(call.id, "Action not permitted.", show_alert=True)
+        target_id = int(call.data.replace('cb_unblock_', ''))
+        
+        if target_id in blocked_users:
+            blocked_users.remove(target_id)
+            bot.answer_callback_query(call.id, f"✅ User {target_id} successfully unblocked.", show_alert=True)
+            
+            # Notify the unblocked user
+            target_lang = user_db.get(target_id, {}).get('lang', 'en')
+            try: bot.send_message(target_id, get_tl_and_map(block_settings['msg_unblock'], target_lang), parse_mode="HTML")
+            except: pass
+            
+            # Refresh the inline menu list
+            if not blocked_users:
+                bot.edit_message_text("All users are now unblocked.", call.message.chat.id, call.message.message_id)
+            else:
+                markup = InlineKeyboardMarkup()
+                for buid in blocked_users:
+                    uname = user_db.get(buid, {}).get('first_name', 'Unknown')
+                    markup.row(InlineKeyboardButton(f"✅ Unblock {uname} ({buid})", callback_data=f"cb_unblock_{buid}"))
+                bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=markup)
+        else:
+            bot.answer_callback_query(call.id, "User is not currently blocked.", show_alert=True)
+        return
 
     # --- NEW: ADMIN WITHDRAWAL NOTIFICATION INLINES ---
     if call.data.startswith('cb_wad_'):
