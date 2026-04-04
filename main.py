@@ -3113,27 +3113,10 @@ def handle_messages(message):
                 if not txs:
                     bot.send_message(message.chat.id, get_tl_and_map("📜 You have no transaction history yet.", lang), reply_markup=get_keyboard(user_id))
                 else:
-                    # Reverse to put newest at the top
-                    reversed_txs = list(reversed(txs))
-                    items_per_page = 7
-                    total_pages = (len(reversed_txs) + items_per_page - 1) // items_per_page
-                    
-                    # Slice for the first page
-                    current_page_txs = reversed_txs[0:items_per_page]
-                    
                     msg = "📜 <b>Your Transaction History:</b>\n\n"
-                    for tx in current_page_txs:
+                    for tx in txs[-20:]:
                         msg += f"🗓 <code>{tx['date']}</code>\n🔹 <b>{tx['type']}</b> | <b>${tx['amount']:.2f}</b>\n\n"
-                    
-                    if total_pages > 1:
-                        markup = InlineKeyboardMarkup()
-                        markup.row(
-                            InlineKeyboardButton(f"Page 1/{total_pages}", callback_data="cb_ignore"),
-                            InlineKeyboardButton("Next ➡️", callback_data="cb_hist_1")
-                        )
-                        bot.send_message(message.chat.id, get_tl_and_map(msg, lang), parse_mode="HTML", reply_markup=markup)
-                    else:
-                        bot.send_message(message.chat.id, get_tl_and_map(msg, lang), parse_mode="HTML", reply_markup=get_keyboard(user_id))
+                    bot.send_message(message.chat.id, get_tl_and_map(msg, lang), parse_mode="HTML", reply_markup=get_keyboard(user_id))
                 return
 
             if meta.get('is_reinvest') and state != 'posts_editing':
@@ -3605,7 +3588,7 @@ def handle_inline(call):
             
         return bot.answer_callback_query(call.id, "Approved successfully.")
 
-    elif call.data.startswith('cb_deprej_'):
+elif call.data.startswith('cb_deprej_'):
         if not is_admin: return bot.answer_callback_query(call.id, "Action not permitted.", show_alert=True)
         dep_id = call.data.split('_')[2]
         if dep_id not in pending_deposits: return bot.answer_callback_query(call.id, "Already processed.", show_alert=True)
@@ -3628,57 +3611,7 @@ def handle_inline(call):
             for p in posts:
                 for b in p.get('custom_inlines', []):
                     if b['id'] == btn_id:
-return bot.answer_callback_query(call.id, get_tl_and_map(b['data'], lang), show_alert=True)
-        return bot.answer_callback_query(call.id)
-        
-    # --- TRANSACTION HISTORY PAGINATION ---
-    elif call.data.startswith('cb_hist_'):
-        # Get the page number the user wants to go to
-        page = int(call.data.replace('cb_hist_', ''))
-        txs = user_db[user_id].get('transactions', [])
-        
-        if not txs:
-            return bot.answer_callback_query(call.id, get_tl_and_map("No history found.", lang), show_alert=True)
-            
-        # Reverse the list so newest is top
-        reversed_txs = list(reversed(txs))
-        items_per_page = 7
-        total_pages = (len(reversed_txs) + items_per_page - 1) // items_per_page
-        
-        # Stop them if they try to go out of bounds
-        if page < 0 or page >= total_pages:
-            return bot.answer_callback_query(call.id, "Invalid page.")
-            
-        # Slice the list for the exact page they requested
-        current_page_txs = reversed_txs[page*items_per_page : (page+1)*items_per_page]
-        
-        # Build the message text
-        msg = "📜 <b>Your Transaction History:</b>\n\n"
-        for tx in current_page_txs:
-            msg += f"🗓 <code>{tx['date']}</code>\n🔹 <b>{tx['type']}</b> | <b>${tx['amount']:.2f}</b>\n\n"
-            
-        # Build the dynamic Next/Prev buttons
-        markup = InlineKeyboardMarkup()
-        nav_btns = []
-        
-        if page > 0:
-            nav_btns.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"cb_hist_{page-1}"))
-            
-        nav_btns.append(InlineKeyboardButton(f"Page {page+1}/{total_pages}", callback_data="cb_ignore"))
-        
-        if page < total_pages - 1:
-            nav_btns.append(InlineKeyboardButton("Next ➡️", callback_data=f"cb_hist_{page+1}"))
-            
-        markup.row(*nav_btns)
-        
-        # Edit the existing message to show the new page
-        try: bot.edit_message_text(get_tl_and_map(msg, lang), call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=markup)
-        except Exception: pass 
-        
-        return bot.answer_callback_query(call.id)
-        
-    elif call.data == 'cb_ignore':
-        # This just stops the loading icon when they click the "Page 1/2" text button
+                        return bot.answer_callback_query(call.id, get_tl_and_map(b['data'], lang), show_alert=True)
         return bot.answer_callback_query(call.id)
         
     elif call.data.startswith('cb_cmd_'):
