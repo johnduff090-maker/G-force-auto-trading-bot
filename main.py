@@ -156,6 +156,7 @@ def save_database():
         'global_bonus_setup': global_bonus_setup,
         'global_ui_settings': global_ui_settings,
         'reinvest_settings': reinvest_settings,
+        'global_messages_setup': global_messages_setup,
         'processed_txids': list(processed_txids), # Convert set to list for database
         'blocked_users': list(blocked_users),     # NEW: Blocked users saving
         'block_settings': block_settings          # NEW: Block messages saving
@@ -222,6 +223,12 @@ block_settings = db_data.get('block_settings', {
 
 global_ui_settings = db_data.get('global_ui_settings', {'loading_bar_style': '1', 'loading_bar_time': 3.0})
 
+# NEW: Global Messages Manager Data
+global_messages_setup = db_data.get('global_messages_setup', {
+    'hourly_dm': '💰You have received +{hourly_amount} USDT hourly profits.\nTime left: {time_left}',
+    'expiry_dm': '💰You have received a total profit of +{total_profit} USDT.\n⏰Trading Completed'
+})
+
 # NEW: Reinvest Settings Persistent Data
 reinvest_settings = db_data.get('reinvest_settings', {
     'msg_success': '✅ <b>Reinvest Successful!</b>\nYou have successfully reinvested <b>$%amount%</b> into <b>%plan_name%</b>.',
@@ -263,7 +270,7 @@ global_wallet_setup = db_data.get('global_wallet_setup', {
 })
 
 global_bonus_setup = db_data.get('global_bonus_setup', {
-    'amount': 5.0, 'cooldown_hours': 24.0,
+    'amount': 5.0, 'cooldown_hours': 24.0, 'min_withdraw': 50.0,
     'msg_success': '🎉 Congratulations! You have received $%bonus_amount% as a bonus.',
     'msg_fail': '⏳ You have already claimed your bonus. Please wait %time_left%.'
 })
@@ -591,18 +598,43 @@ def process_accruals(user_id):
         if p['status'] != 'active': continue
         
         elapsed_sec = now - p['last_accrual']
-        elapsed_hours = elapsed_sec / 3600.0
+        full_hours = int(elapsed_sec // 3600)
         
-        if elapsed_hours > 0:
-            earned = p['amount'] * (p['profit_pct'] / 100.0) * elapsed_hours
-            u['balance'] += earned  
-            p['last_accrual'] = now
-            p['earned'] += earned
-            
+        if full_hours > 0:
+            for _ in range(full_hours):
+                hourly_earned = p['amount'] * (p['profit_pct'] / 100.0)
+                u['balance'] += hourly_earned
+                p['earned'] += hourly_earned
+                p['last_accrual'] += 3600
+                
+                # Calculate time left for DM
+                time_left_str = "Lifetime"
+                if p['length_hours'] > 0:
+                    time_left_sec = (p['start_time'] + (p['length_hours'] * 3600)) - p['last_accrual']
+                    if time_left_sec > 0:
+                        hours, remainder = divmod(time_left_sec, 3600)
+                        minutes, seconds = divmod(remainder, 60)
+                        time_left_str = f"{int(hours)}h {int(minutes)}m {int(seconds)}s"
+                    else:
+                        time_left_str = "0h 0m 0s"
+                        
+                try:
+                    msg = global_messages_setup.get('hourly_dm', '💰You have received +{hourly_amount} USDT hourly profits.\nTime left: {time_left}')
+                    msg = msg.replace('{hourly_amount}', f"{hourly_earned:.2f}").replace('{time_left}', time_left_str)
+                    lang = u.get('lang', 'en')
+                    bot.send_message(user_id, get_tl_and_map(msg, lang))
+                except: pass
+                
         if p['length_hours'] > 0:
             total_elapsed = (now - p['start_time']) / 3600.0
             if total_elapsed >= p['length_hours']:
                 p['status'] = 'expired'
+                try:
+                    msg = global_messages_setup.get('expiry_dm', '💰You have received a total profit of +{total_profit} USDT.\n⏰Trading Completed')
+                    msg = msg.replace('{total_profit}', f"{p['earned']:.2f}")
+                    lang = u.get('lang', 'en')
+                    bot.send_message(user_id, get_tl_and_map(msg, lang))
+                except: pass
 
 def change_menu_paths(old_base, new_base):
     for k in list(menus.keys()):
@@ -1049,6 +1081,7 @@ def get_admin_bonus_keyboard():
     markup = ReplyKeyboardMarkup(resize_keyboard=True)
     markup.row(KeyboardButton('💰 Set Amount'), KeyboardButton('⏱ Set Cooldown (hrs)'))
     markup.row(KeyboardButton('💬 Edit Success Msg'), KeyboardButton('💬 Edit Fail Msg'))
+    markup.row(KeyboardButton('💰 Min Auto-Transfer'))
     markup.row(KeyboardButton('🔙 Back to Admin'))
     return markup
 
@@ -1112,7 +1145,13 @@ def get_keyboard_raw(user_id):
             markup.row(KeyboardButton('🧮 Calculator'), KeyboardButton('📜 Transactions'))
             markup.row(KeyboardButton('📢 Broadcast Message'), KeyboardButton('🔄 Reinvest Settings'))
             markup.row(KeyboardButton('Loading Bar Settings'), KeyboardButton('🚫 Block User System'))
+            markup.row(KeyboardButton('💬 Messages'))
             markup.row(KeyboardButton('🔙 Back to Main'))
+            return markup
+            
+        if state == 'admin_messages_menu':
+            markup.row(KeyboardButton('Edit Hourly DM'), KeyboardButton('Edit Expiry DM'))
+            markup.row(KeyboardButton('🔙 Back to Admin'))
             return markup
 
         if state == 'admin_broadcast_action':
@@ -1158,7 +1197,7 @@ def get_keyboard_raw(user_id):
             markup.row(KeyboardButton('🔙 Back to Deposit Menu'))
             return markup
 
-        if state.startswith('dep_setup_') or state.startswith('wallet_setup_') or state.startswith('bonus_setup_') or state.startswith('reinvest_setup_') or state == 'admin_loading_time' or state.startswith('wait_block_') or state.startswith('wait_edit_block') or state.startswith('wait_edit_unblock') or state in ['admin_broadcast_input', 'bc_wait_text']:
+        if state.startswith('dep_setup_') or state.startswith('wallet_setup_') or state.startswith('bonus_setup_') or state.startswith('reinvest_setup_') or state.startswith('msg_setup_') or state == 'admin_loading_time' or state.startswith('wait_block_') or state.startswith('wait_edit_block') or state.startswith('wait_edit_unblock') or state in ['admin_broadcast_input', 'bc_wait_text']:
             return get_cancel_action_keyboard()
 
         if state == 'admin_plans':
@@ -1428,6 +1467,32 @@ def handle_messages(message):
     selected_btn = user_selected_button.get(user_id)
     full_path = f"{current_path}/{selected_btn}" if selected_btn else None
 
+    # --- ADMIN MESSAGES MANAGER ---
+    if state == 'admin_menu' and text == '💬 Messages':
+        user_state[user_id] = 'admin_messages_menu'
+        bot.send_message(message.chat.id, "💬 <b>Messages Manager</b>", parse_mode="HTML", reply_markup=get_keyboard(user_id))
+        return
+
+    if state == 'admin_messages_menu':
+        if text == '🔙 Back to Admin':
+            user_state[user_id] = 'admin_menu'
+            bot.send_message(message.chat.id, "🔐 <b>Admin Panel</b>", parse_mode="HTML", reply_markup=get_keyboard(user_id))
+        elif text == 'Edit Hourly DM':
+            user_state[user_id] = 'msg_setup_hourly'
+            bot.send_message(message.chat.id, f"Enter the Hourly Accrual DM (Macros: {{hourly_amount}}, {{time_left}}):\n\nCurrent:\n{global_messages_setup['hourly_dm']}", reply_markup=get_cancel_action_keyboard())
+        elif text == 'Edit Expiry DM':
+            user_state[user_id] = 'msg_setup_expiry'
+            bot.send_message(message.chat.id, f"Enter the Plan Expiry DM (Macro: {{total_profit}}):\n\nCurrent:\n{global_messages_setup['expiry_dm']}", reply_markup=get_cancel_action_keyboard())
+        return
+
+    if state.startswith('msg_setup_'):
+        if state == 'msg_setup_hourly': global_messages_setup['hourly_dm'] = formatted_text
+        elif state == 'msg_setup_expiry': global_messages_setup['expiry_dm'] = formatted_text
+        
+        user_state[user_id] = 'admin_messages_menu'
+        bot.send_message(message.chat.id, "✅ Message updated successfully!", reply_markup=get_keyboard(user_id))
+        return
+
     # --- NEW: BROADCAST SYSTEM ENTRY ---
     if text == '📢 Broadcast Message' and is_admin:
         user_state[user_id] = 'admin_broadcast_input'
@@ -1644,6 +1709,10 @@ def handle_messages(message):
         elif state.startswith('reinvest_setup_'):
             user_state[user_id] = 'admin_reinvest_menu'
             bot.send_message(message.chat.id, get_tl_and_map("Reinvest setting cancelled.", lang), reply_markup=get_keyboard(user_id))
+            return
+        elif state.startswith('msg_setup_'):
+            user_state[user_id] = 'admin_messages_menu'
+            bot.send_message(message.chat.id, get_tl_and_map("Action cancelled.", lang), reply_markup=get_keyboard(user_id))
             return
         elif state == 'admin_loading_time':
             user_state[user_id] = 'admin_loading_bar'
@@ -2049,6 +2118,9 @@ def handle_messages(message):
         elif text == '💬 Edit Fail Msg':
             user_state[user_id] = 'bonus_setup_fail'
             bot.send_message(message.chat.id, f"Enter fail msg (macro: %time_left%):\n\nCurrent:\n{global_bonus_setup['msg_fail']}", reply_markup=get_cancel_action_keyboard())
+        elif text == '💰 Min Auto-Transfer':
+            user_state[user_id] = 'bonus_setup_min_withdraw'
+            bot.send_message(message.chat.id, f"Enter the minimum bonus balance required before it auto-transfers to Withdrawable Balance:\n\nCurrent: ${global_bonus_setup.get('min_withdraw', 50.0)}", reply_markup=get_cancel_action_keyboard())
         return
 
     if state.startswith('bonus_setup_'):
@@ -2057,6 +2129,9 @@ def handle_messages(message):
             except: return bot.send_message(message.chat.id, "⚠️ Invalid number.")
         elif state == 'bonus_setup_cooldown':
             try: global_bonus_setup['cooldown_hours'] = float(text)
+            except: return bot.send_message(message.chat.id, "⚠️ Invalid number.")
+        elif state == 'bonus_setup_min_withdraw':
+            try: global_bonus_setup['min_withdraw'] = float(text)
             except: return bot.send_message(message.chat.id, "⚠️ Invalid number.")
         elif state == 'bonus_setup_success': global_bonus_setup['msg_success'] = formatted_text
         elif state == 'bonus_setup_fail': global_bonus_setup['msg_fail'] = formatted_text
@@ -2629,7 +2704,7 @@ def handle_messages(message):
         return
 
     # --- BLOCK UNAUTHORIZED ADMIN COMMANDS ---
-    admin_commands = ['🎛️ Buttons Editor', '📝 Posts Editor', '💵 Balance', '🔐 Admin', '➕ Add Button', '🛑 Stop Editor', '✅ Confirm', '🚫 Cancel', '✖️ Delete', 'Deposit balance', 'Withdrawal balance', 'User Macro', 'User Macros', '📜 Macros', '📊 Plans', '🔙 Back to Main', '🔙 Back to Admin', '➕ Add Plan', '➕ Add Message', 'Pagination in Editor (10)', '🏦 Deposit Settings', 'Withdrawal Settings', '🔙 Back to Deposit Menu', '📍 Set Static Address', '🔑 Set HD Wallet Key', '💬 Edit Enter Msg', '💬 Edit Instruct Msg', '💰 Set Min Deposit', '💰 Set Max Deposit', '💬 Edit Pending Msg', '💬 Edit Success Msg', '🧮 Calculator', '📜 Transactions', '💳 Wallet Settings', '🎁 Bonus Settings', '🔄 Reinvest Settings', 'Loading Bar Settings', '🚫 Block User System', '🚫 Block', '✅ Unblock', '💬 Edit Block Msg', '💬 Edit Unblock Msg', '📢 Broadcast Message']
+    admin_commands = ['🎛️ Buttons Editor', '📝 Posts Editor', '💵 Balance', '🔐 Admin', '➕ Add Button', '🛑 Stop Editor', '✅ Confirm', '🚫 Cancel', '✖️ Delete', 'Deposit balance', 'Withdrawal balance', 'User Macro', 'User Macros', '📜 Macros', '📊 Plans', '🔙 Back to Main', '🔙 Back to Admin', '➕ Add Plan', '➕ Add Message', 'Pagination in Editor (10)', '🏦 Deposit Settings', 'Withdrawal Settings', '🔙 Back to Deposit Menu', '📍 Set Static Address', '🔑 Set HD Wallet Key', '💬 Edit Enter Msg', '💬 Edit Instruct Msg', '💰 Set Min Deposit', '💰 Set Max Deposit', '💬 Edit Pending Msg', '💬 Edit Success Msg', '🧮 Calculator', '📜 Transactions', '💳 Wallet Settings', '🎁 Bonus Settings', '🔄 Reinvest Settings', 'Loading Bar Settings', '🚫 Block User System', '🚫 Block', '✅ Unblock', '💬 Edit Block Msg', '💬 Edit Unblock Msg', '📢 Broadcast Message', '💬 Messages']
     if not is_admin and (text in admin_commands or text.startswith('📋 Paste "') or text == '✔️ Leave as Is' or text == '➖ Set Empty' or text.startswith('⚙️ Edit ') or text.startswith('Style ')):
         bot.send_message(message.chat.id, get_tl_and_map("Unrecognized command.", lang), reply_markup=get_keyboard(user_id))
         return
@@ -3087,12 +3162,22 @@ def handle_messages(message):
                 cooldown = global_bonus_setup['cooldown_hours'] * 3600
                 
                 if now - last_time >= cooldown:
-                    user_db[user_id]['balance'] += global_bonus_setup['amount']
+                    user_db[user_id]['bonus'] += global_bonus_setup['amount']
                     user_db[user_id]['last_bonus_time'] = now
                     log_tx(user_id, "Bonus Received", global_bonus_setup['amount'])
                     
                     msg = global_bonus_setup['msg_success'].replace('%bonus_amount%', str(global_bonus_setup['amount']))
                     bot.send_message(message.chat.id, get_tl_and_map(replace_macros(msg, user_id, custom_btn_path), lang), parse_mode="HTML")
+                    
+                    # NEW: Auto-transfer logic for Bonus
+                    min_w = global_bonus_setup.get('min_withdraw', 50.0)
+                    if user_db[user_id]['bonus'] >= min_w:
+                        transfer_amt = user_db[user_id]['bonus']
+                        user_db[user_id]['balance'] += transfer_amt
+                        user_db[user_id]['bonus'] = 0.0
+                        log_tx(user_id, "Bonus Auto-Transfer", transfer_amt)
+                        notify_msg = f"🎉 <b>Bonus Threshold Reached!</b>\nYour bonus balance has automatically been transferred to your Withdrawable Balance.\nAmount: <b>${transfer_amt:.2f}</b>"
+                        bot.send_message(message.chat.id, get_tl_and_map(notify_msg, lang), parse_mode="HTML")
                 else:
                     time_left_sec = int(cooldown - (now - last_time))
                     hours, remainder = divmod(time_left_sec, 3600)
