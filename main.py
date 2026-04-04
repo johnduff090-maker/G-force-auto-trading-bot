@@ -3588,7 +3588,7 @@ def handle_inline(call):
             
         return bot.answer_callback_query(call.id, "Approved successfully.")
 
-elif call.data.startswith('cb_deprej_'):
+    elif call.data.startswith('cb_deprej_'):
         if not is_admin: return bot.answer_callback_query(call.id, "Action not permitted.", show_alert=True)
         dep_id = call.data.split('_')[2]
         if dep_id not in pending_deposits: return bot.answer_callback_query(call.id, "Already processed.", show_alert=True)
