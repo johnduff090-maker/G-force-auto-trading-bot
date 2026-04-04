@@ -3113,22 +3113,18 @@ def handle_messages(message):
                 if not txs:
                     bot.send_message(message.chat.id, get_tl_and_map("📜 You have no transaction history yet.", lang), reply_markup=get_keyboard(user_id))
                 else:
-                    # 1. Reverse the list so the NEWEST is at the top
+                    # Reverse to put newest at the top
                     reversed_txs = list(reversed(txs))
-                    
-                    # 2. Set up our pagination math
                     items_per_page = 7
                     total_pages = (len(reversed_txs) + items_per_page - 1) // items_per_page
                     
-                    # 3. Grab ONLY the first 7 items (Page 0)
+                    # Slice for the first page
                     current_page_txs = reversed_txs[0:items_per_page]
                     
-                    # 4. Build the message text
                     msg = "📜 <b>Your Transaction History:</b>\n\n"
                     for tx in current_page_txs:
                         msg += f"🗓 <code>{tx['date']}</code>\n🔹 <b>{tx['type']}</b> | <b>${tx['amount']:.2f}</b>\n\n"
                     
-                    # 5. If we have more than 1 page, attach the "Next" button
                     if total_pages > 1:
                         markup = InlineKeyboardMarkup()
                         markup.row(
