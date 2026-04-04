@@ -3113,10 +3113,20 @@ def handle_messages(message):
                 if not txs:
                     bot.send_message(message.chat.id, get_tl_and_map("📜 You have no transaction history yet.", lang), reply_markup=get_keyboard(user_id))
                 else:
-                    msg = "📜 <b>Your Transaction History:</b>\n\n"
-                    for tx in txs[-20:]:
+                    txs_reversed = txs[::-1]
+                    limit = 7
+                    current_txs = txs_reversed[0:limit]
+                    
+                    msg = f"📜 <b>Your Transaction History (Page 1):</b>\n\n"
+                    for tx in current_txs:
                         msg += f"🗓 <code>{tx['date']}</code>\n🔹 <b>{tx['type']}</b> | <b>${tx['amount']:.2f}</b>\n\n"
-                    bot.send_message(message.chat.id, get_tl_and_map(msg, lang), parse_mode="HTML", reply_markup=get_keyboard(user_id))
+                    
+                    markup = InlineKeyboardMarkup()
+                    if len(txs_reversed) > limit:
+                        markup.row(InlineKeyboardButton(get_tl_and_map('Next ➡️', lang), callback_data='cb_txpage_1'))
+                        bot.send_message(message.chat.id, get_tl_and_map(msg, lang), parse_mode="HTML", reply_markup=markup)
+                    else:
+                        bot.send_message(message.chat.id, get_tl_and_map(msg, lang), parse_mode="HTML", reply_markup=get_keyboard(user_id))
                 return
 
             if meta.get('is_reinvest') and state != 'posts_editing':
@@ -3270,6 +3280,39 @@ def handle_inline(call):
     if user_id in blocked_users:
         bot.answer_callback_query(call.id, get_tl_and_map("🚫 You are currently blocked.", lang), show_alert=True)
         return
+
+    # --- NEW: TRANSACTION PAGINATION INLINE ---
+    if call.data.startswith('cb_txpage_'):
+        page = int(call.data.replace('cb_txpage_', ''))
+        txs = user_db.get(user_id, {}).get('transactions', [])
+        if not txs:
+            return bot.answer_callback_query(call.id, get_tl_and_map("No transactions found.", lang), show_alert=True)
+        
+        txs_reversed = txs[::-1]
+        limit = 7
+        start_idx = page * limit
+        end_idx = start_idx + limit
+        current_txs = txs_reversed[start_idx:end_idx]
+        
+        msg = f"📜 <b>Your Transaction History (Page {page + 1}):</b>\n\n"
+        for tx in current_txs:
+            msg += f"🗓 <code>{tx['date']}</code>\n🔹 <b>{tx['type']}</b> | <b>${tx['amount']:.2f}</b>\n\n"
+        
+        markup = InlineKeyboardMarkup()
+        btns = []
+        if page > 0:
+            btns.append(InlineKeyboardButton(get_tl_and_map('⬅️ Previous', lang), callback_data=f'cb_txpage_{page - 1}'))
+        if end_idx < len(txs_reversed):
+            btns.append(InlineKeyboardButton(get_tl_and_map('Next ➡️', lang), callback_data=f'cb_txpage_{page + 1}'))
+        
+        if btns:
+            markup.row(*btns)
+        
+        try:
+            bot.edit_message_text(get_tl_and_map(msg, lang), call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=markup if btns else None)
+        except Exception:
+            pass
+        return bot.answer_callback_query(call.id)
 
     # --- NEW: ADMIN BROADCAST INLINE COMMANDS ---
     if call.data.startswith('cb_cmd_bc_'):
