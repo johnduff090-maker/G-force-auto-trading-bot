@@ -273,6 +273,22 @@ if not bot_plans:
             'redirect_cmd': None, 'is_free': (i == 0), 'bonus_amount': 50.0 if i == 0 else 0.0
         }
 
+# --- NEW: BACKGROUND CACHE PRELOADER ---
+def preload_core_languages():
+    """Background-translates and caches the bot's core strings and active menus for new users."""
+    all_strings = set([
+        '🏠 Home', '🔙 Back', '❌ Cancel Action', '💵 Balance', '🔐 Admin',
+        'Deposit balance', 'Withdrawal balance', '✔️ Leave as Is', '➖ Set Empty'
+    ])
+    for menu_list in menus.values():
+        all_strings.update(menu_list)
+        
+    langs = ['zh-CN', 'pt', 'nl', 'es', 'de', 'fr', 'ar', 'ru', 'id', 'hi']
+    for lang in langs:
+        for text in all_strings:
+            get_tl_and_map(text, lang)
+        time.sleep(0.5)
+
 # --- TRANSACTION LEDGER LOGGER ---
 def log_tx(uid, t_type, amt):
     if uid in user_db:
@@ -299,7 +315,9 @@ def get_default_metadata():
 
 def init_user_db(message):
     user_id = message.from_user.id
+    is_new_user = False
     if user_id not in user_db:
+        is_new_user = True
         # ALL NEW USERS START AT ZERO
         user_db[user_id] = {
             'balance': 0.00, 'bonus': 0.00, 'deposit': 0.00, 
@@ -330,6 +348,8 @@ def init_user_db(message):
         if 'ref_count' not in user_db[user_id]: user_db[user_id]['ref_count'] = 0
         if 'total_withdrawn' not in user_db[user_id]: user_db[user_id]['total_withdrawn'] = 0.0
         if 'lang' not in user_db[user_id]: user_db[user_id]['lang'] = 'en'
+    
+    return is_new_user
 
 # --- 2. LIVE PRICE ORACLE ENGINE (WITH FALLBACKS) ---
 def get_crypto_price(currency_code):
@@ -1074,7 +1094,23 @@ def get_keyboard_raw(user_id):
             markup.row(KeyboardButton('💳 Wallet Settings'), KeyboardButton('🎁 Bonus Settings')) 
             markup.row(KeyboardButton('🧮 Calculator'), KeyboardButton('📜 Transactions'))
             markup.row(KeyboardButton('Loading Bar Settings'), KeyboardButton('🚫 Block User System'))
+            markup.row(KeyboardButton('📢 Broadcast Message'))
             markup.row(KeyboardButton('🔙 Back to Main'))
+            return markup
+
+        if state == 'admin_broadcast_action':
+            markup.row(KeyboardButton('➕ Add Inline'), KeyboardButton('✅ Proceed'))
+            markup.row(KeyboardButton('❌ Cancel Action'))
+            return markup
+            
+        if state == 'admin_broadcast_preview':
+            markup.row(KeyboardButton('🚀 Send Broadcast'), KeyboardButton('❌ Cancel Action'))
+            return markup
+            
+        if state == 'bc_wait_mode':
+            markup.row(KeyboardButton('🔗 URL or Share'), KeyboardButton('🚀 Command'))
+            markup.row(KeyboardButton('🛒 Buy Plan'), KeyboardButton('🏦 Deposit'))
+            markup.row(KeyboardButton('❌ Cancel Action'))
             return markup
 
         if state == 'admin_w_menu': return get_global_withdrawal_keyboard()
@@ -1104,7 +1140,7 @@ def get_keyboard_raw(user_id):
             markup.row(KeyboardButton('🔙 Back to Deposit Menu'))
             return markup
 
-        if state.startswith('dep_setup_') or state.startswith('wallet_setup_') or state.startswith('bonus_setup_') or state == 'admin_loading_time' or state.startswith('wait_block_') or state.startswith('wait_edit_block') or state.startswith('wait_edit_unblock'):
+        if state.startswith('dep_setup_') or state.startswith('wallet_setup_') or state.startswith('bonus_setup_') or state == 'admin_loading_time' or state.startswith('wait_block_') or state.startswith('wait_edit_block') or state.startswith('wait_edit_unblock') or state in ['admin_broadcast_input', 'bc_wait_text']:
             return get_cancel_action_keyboard()
 
         if state == 'admin_plans':
@@ -1179,7 +1215,7 @@ def get_keyboard_raw(user_id):
         if state == 'assign_command': return get_assign_command_keyboard(f"{current_path}/{user_selected_button.get(user_id)}")
         if state == 'assign_plan': return get_cancel_action_keyboard()
         
-        if state in ['adding_button', 'renaming_button', 'pi_wait_text', 'pi_wait_data']:
+        if state in ['adding_button', 'renaming_button', 'pi_wait_text', 'pi_wait_data', 'bc_wait_data']:
             markup.row(KeyboardButton('❌ Cancel Action'))
             return markup
 
@@ -1286,7 +1322,23 @@ def send_welcome(message):
     except Exception:
         pass
 
-    init_user_db(message)
+    # --- NEW: NEW USER ADMIN ALERT & PRELOAD ---
+    is_new = init_user_db(message)
+    if is_new:
+        total_bot_users = len(user_db)
+        alert_msg = (
+            f"🆕 New User!\n"
+            f"User ID: <code>{user_id}</code>\n"
+            f"Total: [{total_bot_users}]\n"
+            f"Name: {message.from_user.first_name}"
+        )
+        for admin in ADMIN_IDS:
+            try: bot.send_message(admin, alert_msg, parse_mode="HTML")
+            except: pass
+            
+        # Trigger background language preload
+        threading.Thread(target=preload_core_languages, daemon=True).start()
+
     user_current_path[user_id] = 'root'
     user_state[user_id] = 'normal'
     user_selected_button[user_id] = None
@@ -1309,7 +1361,22 @@ def handle_messages(message):
 
     is_admin = user_id in ADMIN_IDS
     
-    init_user_db(message)
+    # Initialize and check if new user
+    is_new = init_user_db(message)
+    if is_new:
+        total_bot_users = len(user_db)
+        alert_msg = (
+            f"🆕 New User!\n"
+            f"User ID: <code>{user_id}</code>\n"
+            f"Total: [{total_bot_users}]\n"
+            f"Name: {message.from_user.first_name}"
+        )
+        for admin in ADMIN_IDS:
+            try: bot.send_message(admin, alert_msg, parse_mode="HTML")
+            except: pass
+        # Trigger background language preload
+        threading.Thread(target=preload_core_languages, daemon=True).start()
+
     process_accruals(user_id) 
     
     if user_id not in user_current_path: user_current_path[user_id] = 'root'
@@ -1342,6 +1409,141 @@ def handle_messages(message):
     state = user_state[user_id]
     selected_btn = user_selected_button.get(user_id)
     full_path = f"{current_path}/{selected_btn}" if selected_btn else None
+
+    # --- NEW: BROADCAST SYSTEM ENTRY ---
+    if text == '📢 Broadcast Message' and is_admin:
+        user_state[user_id] = 'admin_broadcast_input'
+        user_action_data[user_id] = {'broadcast': {'text': '', 'photo': None, 'inlines': []}}
+        bot.send_message(message.chat.id, "Send the text or photo for the broadcast message:", reply_markup=get_cancel_action_keyboard())
+        return
+
+    if state == 'admin_broadcast_input':
+        user_action_data[user_id]['broadcast']['text'] = formatted_text
+        if message.photo:
+            user_action_data[user_id]['broadcast']['photo'] = message.photo[-1].file_id
+        user_state[user_id] = 'admin_broadcast_action'
+        markup = ReplyKeyboardMarkup(resize_keyboard=True)
+        markup.row(KeyboardButton('➕ Add Inline'), KeyboardButton('✅ Proceed'))
+        markup.row(KeyboardButton('❌ Cancel Action'))
+        bot.send_message(message.chat.id, "Message captured. What would you like to do?", reply_markup=markup)
+        return
+
+    if state == 'admin_broadcast_action':
+        if text == '➕ Add Inline':
+            user_state[user_id] = 'bc_wait_mode'
+            markup = ReplyKeyboardMarkup(resize_keyboard=True)
+            markup.row(KeyboardButton('🔗 URL or Share'), KeyboardButton('🚀 Command'))
+            markup.row(KeyboardButton('🛒 Buy Plan'), KeyboardButton('🏦 Deposit'))
+            markup.row(KeyboardButton('❌ Cancel Action'))
+            bot.send_message(message.chat.id, "Select action for the inline button:", reply_markup=markup)
+        elif text == '✅ Proceed':
+            user_state[user_id] = 'admin_broadcast_preview'
+            bc_data = user_action_data[user_id]['broadcast']
+            markup = InlineKeyboardMarkup()
+            for b in bc_data['inlines']:
+                # Build InlineKeyboardButton based on mode
+                if b['mode'] == 'url': markup.add(InlineKeyboardButton(b['text'], url=b['data']))
+                elif b['mode'] == 'command': markup.add(InlineKeyboardButton(b['text'], callback_data=f"cb_cmd_bc_{b['data']}"))
+                elif b['mode'] == 'buy_plan': markup.add(InlineKeyboardButton(b['text'], callback_data=f"cb_buy_bc_{b['data']}"))
+                elif b['mode'] == 'deposit': markup.add(InlineKeyboardButton(b['text'], callback_data=f"cb_dep_bc_{b['data']}"))
+            
+            rmarkup = ReplyKeyboardMarkup(resize_keyboard=True)
+            rmarkup.row(KeyboardButton('🚀 Send Broadcast'), KeyboardButton('❌ Cancel Action'))
+            
+            bot.send_message(message.chat.id, "<b>Preview of Broadcast:</b>", parse_mode="HTML", reply_markup=rmarkup)
+            if bc_data['photo']:
+                bot.send_photo(message.chat.id, bc_data['photo'], caption=bc_data['text'], parse_mode="HTML", reply_markup=markup if markup.keyboard else None)
+            else:
+                bot.send_message(message.chat.id, bc_data['text'] or " ", parse_mode="HTML", reply_markup=markup if markup.keyboard else None)
+        return
+
+    if state == 'bc_wait_mode':
+        if text not in ['🔗 URL or Share', '🚀 Command', '🛒 Buy Plan', '🏦 Deposit']:
+            return bot.send_message(message.chat.id, "Invalid option. Select from keyboard.")
+        user_action_data[user_id]['bc_mode'] = text
+        user_state[user_id] = 'bc_wait_text'
+        bot.send_message(message.chat.id, "Enter the TEXT for this button:", reply_markup=get_cancel_action_keyboard())
+        return
+
+    if state == 'bc_wait_text':
+        user_action_data[user_id]['bc_text'] = text
+        mode = user_action_data[user_id]['bc_mode']
+        user_state[user_id] = 'bc_wait_data'
+        if mode == '🔗 URL or Share': bot.send_message(message.chat.id, "Enter the URL (e.g. https://...):")
+        elif mode == '🚀 Command': bot.send_message(message.chat.id, "Enter the exact command/button name to trigger:")
+        elif mode == '🛒 Buy Plan':
+            markup = ReplyKeyboardMarkup(resize_keyboard=True)
+            for p in bot_plans: markup.row(KeyboardButton(p))
+            markup.row(KeyboardButton('❌ Cancel Action'))
+            bot.send_message(message.chat.id, "Select the Plan to trigger:", reply_markup=markup)
+        elif mode == '🏦 Deposit':
+            markup = ReplyKeyboardMarkup(resize_keyboard=True)
+            for c in deposit_settings: markup.row(KeyboardButton(c))
+            markup.row(KeyboardButton('❌ Cancel Action'))
+            bot.send_message(message.chat.id, "Select the Deposit currency to trigger:", reply_markup=markup)
+        return
+
+    if state == 'bc_wait_data':
+        mode_map = {'🔗 URL or Share': 'url', '🚀 Command': 'command', '🛒 Buy Plan': 'buy_plan', '🏦 Deposit': 'deposit'}
+        b_mode = mode_map[user_action_data[user_id]['bc_mode']]
+        user_action_data[user_id]['broadcast']['inlines'].append({
+            'text': user_action_data[user_id]['bc_text'],
+            'mode': b_mode,
+            'data': text
+        })
+        user_state[user_id] = 'admin_broadcast_action'
+        markup = ReplyKeyboardMarkup(resize_keyboard=True)
+        markup.row(KeyboardButton('➕ Add Inline'), KeyboardButton('✅ Proceed'))
+        markup.row(KeyboardButton('❌ Cancel Action'))
+        bot.send_message(message.chat.id, "✅ Button added! What next?", reply_markup=markup)
+        return
+
+    if state == 'admin_broadcast_preview' and text == '🚀 Send Broadcast':
+        bc_data = user_action_data[user_id]['broadcast']
+        # Prepare inline markup
+        markup = InlineKeyboardMarkup()
+        for b in bc_data['inlines']:
+            if b['mode'] == 'url': markup.add(InlineKeyboardButton(b['text'], url=b['data']))
+            elif b['mode'] == 'command': markup.add(InlineKeyboardButton(b['text'], callback_data=f"cb_cmd_bc_{b['data']}"))
+            elif b['mode'] == 'buy_plan': markup.add(InlineKeyboardButton(b['text'], callback_data=f"cb_buy_bc_{b['data']}"))
+            elif b['mode'] == 'deposit': markup.add(InlineKeyboardButton(b['text'], callback_data=f"cb_dep_bc_{b['data']}"))
+        if not markup.keyboard: markup = None
+        
+        bot.send_message(message.chat.id, "🚀 Broadcast is sending in the background...", reply_markup=get_keyboard(user_id))
+        user_state[user_id] = 'admin_menu'
+        
+        def send_bc():
+            sent_count = 0
+            for uid in user_db.keys():
+                try:
+                    lang = user_db.get(uid, {}).get('lang', 'en')
+                    tl_text = get_tl_and_map(replace_macros(bc_data['text'], uid, 'root'), lang) if bc_data['text'] else None
+                    
+                    # Translate inline buttons for broadcast too
+                    tl_markup = None
+                    if markup:
+                        tl_markup = InlineKeyboardMarkup()
+                        for row in markup.keyboard:
+                            tl_row = []
+                            for btn in row:
+                                tl_btn_text = get_tl_and_map(btn.text, lang)
+                                if btn.url: tl_row.append(InlineKeyboardButton(tl_btn_text, url=btn.url))
+                                else: tl_row.append(InlineKeyboardButton(tl_btn_text, callback_data=btn.callback_data))
+                            tl_markup.row(*tl_row)
+
+                    if bc_data['photo']:
+                        bot.send_photo(uid, bc_data['photo'], caption=tl_text, parse_mode="HTML", reply_markup=tl_markup)
+                    else:
+                        bot.send_message(uid, tl_text or " ", parse_mode="HTML", reply_markup=tl_markup)
+                    sent_count += 1
+                    time.sleep(0.05) # Prevent flood wait
+                except Exception:
+                    pass
+            bot.send_message(message.chat.id, f"✅ Broadcast finished! Sent to {sent_count} users.")
+            
+        threading.Thread(target=send_bc, daemon=True).start()
+        return
+
 
     # --- UPDATED MACRO LIST LOGIC (BULLETPROOF PARSE CATCHER + LIST STYLE) ---
     if text in ['User Macro', 'User Macros', '📜 Macros'] and is_admin:
@@ -1428,6 +1630,10 @@ def handle_messages(message):
         elif state.startswith('wait_block') or state.startswith('wait_edit_block') or state.startswith('wait_edit_unblock'):
             user_state[user_id] = 'admin_block_menu'
             bot.send_message(message.chat.id, get_tl_and_map("Action cancelled.", lang), reply_markup=get_keyboard(user_id))
+            return
+        elif state in ['admin_broadcast_input', 'admin_broadcast_action', 'admin_broadcast_preview', 'bc_wait_mode', 'bc_wait_text', 'bc_wait_data']:
+            user_state[user_id] = 'admin_menu'
+            bot.send_message(message.chat.id, get_tl_and_map("Broadcast cancelled.", lang), reply_markup=get_keyboard(user_id))
             return
         else:
             user_state[user_id] = 'normal'
@@ -2323,7 +2529,7 @@ def handle_messages(message):
         return
 
     # --- BLOCK UNAUTHORIZED ADMIN COMMANDS ---
-    admin_commands = ['🎛️ Buttons Editor', '📝 Posts Editor', '💵 Balance', '🔐 Admin', '➕ Add Button', '🛑 Stop Editor', '✅ Confirm', '🚫 Cancel', '✖️ Delete', 'Deposit balance', 'Withdrawal balance', 'User Macro', 'User Macros', '📜 Macros', '📊 Plans', '🔙 Back to Main', '🔙 Back to Admin', '➕ Add Plan', '➕ Add Message', 'Pagination in Editor (10)', '🏦 Deposit Settings', 'Withdrawal Settings', '🔙 Back to Deposit Menu', '📍 Set Static Address', '🔑 Set HD Wallet Key', '💬 Edit Enter Msg', '💬 Edit Instruct Msg', '💰 Set Min Deposit', '💰 Set Max Deposit', '💬 Edit Pending Msg', '💬 Edit Success Msg', '🧮 Calculator', '📜 Transactions', '💳 Wallet Settings', '🎁 Bonus Settings', 'Loading Bar Settings', '🚫 Block User System', '🚫 Block', '✅ Unblock', '💬 Edit Block Msg', '💬 Edit Unblock Msg']
+    admin_commands = ['🎛️ Buttons Editor', '📝 Posts Editor', '💵 Balance', '🔐 Admin', '➕ Add Button', '🛑 Stop Editor', '✅ Confirm', '🚫 Cancel', '✖️ Delete', 'Deposit balance', 'Withdrawal balance', 'User Macro', 'User Macros', '📜 Macros', '📊 Plans', '🔙 Back to Main', '🔙 Back to Admin', '➕ Add Plan', '➕ Add Message', 'Pagination in Editor (10)', '🏦 Deposit Settings', 'Withdrawal Settings', '🔙 Back to Deposit Menu', '📍 Set Static Address', '🔑 Set HD Wallet Key', '💬 Edit Enter Msg', '💬 Edit Instruct Msg', '💰 Set Min Deposit', '💰 Set Max Deposit', '💬 Edit Pending Msg', '💬 Edit Success Msg', '🧮 Calculator', '📜 Transactions', '💳 Wallet Settings', '🎁 Bonus Settings', 'Loading Bar Settings', '🚫 Block User System', '🚫 Block', '✅ Unblock', '💬 Edit Block Msg', '💬 Edit Unblock Msg', '📢 Broadcast Message']
     if not is_admin and (text in admin_commands or text.startswith('📋 Paste "') or text == '✔️ Leave as Is' or text == '➖ Set Empty' or text.startswith('⚙️ Edit ') or text.startswith('Style ')):
         bot.send_message(message.chat.id, get_tl_and_map("Unrecognized command.", lang), reply_markup=get_keyboard(user_id))
         return
@@ -2940,6 +3146,33 @@ def handle_inline(call):
         bot.answer_callback_query(call.id, get_tl_and_map("🚫 You are currently blocked.", lang), show_alert=True)
         return
 
+    # --- NEW: ADMIN BROADCAST INLINE COMMANDS ---
+    if call.data.startswith('cb_cmd_bc_'):
+        cmd = call.data.replace('cb_cmd_bc_', '')
+        try: bot.delete_message(call.message.chat.id, call.message.message_id)
+        except Exception: pass
+        msg = call.message
+        msg.from_user = call.from_user
+        msg.text = cmd
+        handle_messages(msg)
+        return bot.answer_callback_query(call.id)
+        
+    elif call.data.startswith('cb_buy_bc_'):
+        plan = call.data.replace('cb_buy_bc_', '')
+        if plan in bot_plans:
+            execute_plan_purchase_via_popup(user_id, call.message.chat.id, call.message.message_id, call.id, plan)
+        return bot.answer_callback_query(call.id)
+        
+    elif call.data.startswith('cb_dep_bc_'):
+        curr = call.data.replace('cb_dep_bc_', '')
+        if curr in deposit_settings:
+            user_action_data[user_id] = {'currency': curr}
+            user_state[user_id] = 'dep_wait_amount'
+            try: bot.delete_message(call.message.chat.id, call.message.message_id)
+            except Exception: pass
+            bot.send_message(call.message.chat.id, get_tl_and_map(deposit_settings[curr]['msg_enter'], lang), parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+        return bot.answer_callback_query(call.id)
+
     # --- NEW: UNBLOCK USER INLINE BUTTON ---
     if call.data.startswith('cb_unblock_'):
         if not is_admin: return bot.answer_callback_query(call.id, "Action not permitted.", show_alert=True)
@@ -3422,7 +3655,9 @@ def handle_inline(call):
             render_pi_manager(call.message.chat.id, post, call.message.message_id)
         elif action == 'right' and idx < len(inlines) - 1:
             inlines[idx], inlines[idx+1] = inlines[idx+1], inlines[idx]
-            render_pi_manager(call.message.chat.id, post, call.message.message_id)
+            render_pi_manager(call.message.chat.id, post, call.message.message
+
+_id)
             
         bot.answer_callback_query(call.id)
         return
