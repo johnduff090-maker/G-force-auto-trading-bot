@@ -888,24 +888,6 @@ def send_path_content(chat_id, user_id, path, is_editing=False, reply_keyboard=N
             sent = bot.send_message(chat_id, err_msg, parse_mode="HTML", reply_markup=markup)
             if is_editing: editor_msg_ids.setdefault(user_id, []).append(sent.message_id)
 
-    # --- GUARANTEE KEYBOARD RENDER FALLBACK ---
-    if not kb_attached and reply_keyboard and posts:
-        # Check if the keyboard actually has buttons to prevent empty sending
-        has_btns = hasattr(reply_keyboard, 'keyboard') and len(reply_keyboard.keyboard) > 0
-        if has_btns:
-            try:
-                # 1. Send an invisible braille character to minimize visual flash
-                sent = bot.send_message(chat_id, "⠀", parse_mode="HTML", reply_markup=reply_keyboard)
-                
-                if is_editing: 
-                    # Admins keep the anchor for the editor cleanup
-                    editor_msg_ids.setdefault(user_id, []).append(sent.message_id)
-                else:
-                    # 2. Instantly auto-delete the message for normal users in a millisecond.
-                    # The chat bubble disappears, but the bottom Reply Keyboard stays active!
-                    bot.delete_message(chat_id, sent.message_id)
-            except Exception: pass
-
 # --- NATIVE ENTITY EXTRACTOR (Safely translates Telegram Formatting to Database HTML) ---
 def extract_html(message):
     text = message.text or message.caption or ""
@@ -2483,10 +2465,20 @@ def handle_messages(message):
             if meta.get('move_by_command') and meta.get('command') == text:
                 if meta.get('admin_only') and not is_admin:
                     return bot.send_message(message.chat.id, get_tl_and_map("⛔️ You do not have permission to use this button.", lang))
+                
                 user_current_path[user_id] = path
                 if path not in menus: menus[path] = []
                 
-                send_path_content(message.chat.id, user_id, path, is_editing=(state == 'posts_editing'), reply_keyboard=get_keyboard(user_id))
+                # --- BREADCRUMB LOGIC FOR COMMANDS ---
+                has_submenus = len(menus[path]) > 0
+                if has_submenus and not (is_admin and state == 'posts_editing'):
+                    btn_name = path.split('/')[-1]
+                    breadcrumb_text = f"📂 <b>{btn_name}</b>"
+                    try: bot.send_message(message.chat.id, get_tl_and_map(breadcrumb_text, lang), parse_mode="HTML", reply_markup=get_keyboard(user_id))
+                    except Exception: pass
+                    send_path_content(message.chat.id, user_id, path, is_editing=False, reply_keyboard=None)
+                else:
+                    send_path_content(message.chat.id, user_id, path, is_editing=(state == 'posts_editing'), reply_keyboard=get_keyboard(user_id) if (is_admin and state == 'posts_editing') else None)
                 return
 
     # --- HANDLE BUTTONS EDITOR ADD / RENAME ---
@@ -2624,18 +2616,39 @@ def handle_messages(message):
                     bot.send_message(message.chat.id, get_tl_and_map(msg, lang), parse_mode="HTML", reply_markup=get_keyboard(user_id))
                 return
 
-            # --- THE FIX: FOLDERS VS POSTS ---
+            # --- THE FIX: FOLDERS VS POSTS (BREADCRUMB LOGIC) ---
             has_submenus = custom_btn_path in menus and len(menus[custom_btn_path]) > 0
             
             if is_admin and state in ['editing', 'posts_editing']:
                 user_current_path[user_id] = custom_btn_path
                 if custom_btn_path not in menus: menus[custom_btn_path] = []
                 send_path_content(message.chat.id, user_id, custom_btn_path, is_editing=(state == 'posts_editing'), reply_keyboard=get_keyboard(user_id))
+                
             elif has_submenus:
+                # 1. IT HAS SUB-MENUS: Deploy the Breadcrumb Header to carry the bottom keyboard!
                 user_current_path[user_id] = custom_btn_path
-                send_path_content(message.chat.id, user_id, custom_btn_path, is_editing=False, reply_keyboard=get_keyboard(user_id))
+                
+                # The Breadcrumb is hardcoded and uneditable by the Posts Editor
+                breadcrumb_text = f"📂 <b>{text}</b>"
+                
+                try:
+                    bot.send_message(
+                        message.chat.id, 
+                        get_tl_and_map(breadcrumb_text, lang), 
+                        parse_mode="HTML", 
+                        reply_markup=get_keyboard(user_id) # The bottom keyboard rides on the Breadcrumb
+                    )
+                except Exception: pass
+                
+                # Send the actual text/assigned content BELOW the Breadcrumb.
+                # Notice we pass reply_keyboard=None so it doesn't try to attach a bottom keyboard again!
+                send_path_content(message.chat.id, user_id, custom_btn_path, is_editing=False, reply_keyboard=None)
+                
             else:
-                send_path_content(message.chat.id, user_id, custom_btn_path, is_editing=False, reply_keyboard=get_keyboard(user_id))
+                # 2. NO SUB-MENUS: It's just a regular button (a Leaf)
+                # We skip the Breadcrumb entirely, and we DO NOT change the bottom keyboard.
+                send_path_content(message.chat.id, user_id, custom_btn_path, is_editing=False, reply_keyboard=None)
+                
         else:
             bot.send_message(message.chat.id, get_tl_and_map("Unrecognized command.", lang), reply_markup=get_keyboard(user_id))
 
