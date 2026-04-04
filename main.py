@@ -3304,12 +3304,35 @@ def handle_inline(call):
             user_db[user_id]['total_withdrawn'] = user_db[user_id].get('total_withdrawn', 0.0) + amount
             log_tx(user_id, "Withdrawal Pending", -amount)
             
-            # Send Processing message
-            proc_msg = global_w_setup.get('w_msg_processing', '♻️ Your Withdrawal of %withdraw% is processing on blockchain...')
-            bot.send_message(call.message.chat.id, get_tl_and_map(replace_macros(proc_msg, user_id, data['path'], data), lang), parse_mode="HTML", reply_markup=get_keyboard(user_id))
+            # Delete confirm inline msg FIRST
+            try: bot.delete_message(call.message.chat.id, call.message.message_id)
+            except: pass
+
+            # Send Processing message (Now with %loading_bar% support!)
+            proc_msg = global_w_setup.get('w_msg_processing', '♻️ Your Withdrawal of %withdraw% is processing on the blockchain...')
+            raw_text = get_tl_and_map(replace_macros(proc_msg, user_id, data['path'], data), lang)
             
-            # Delete confirm inline msg
-            bot.delete_message(call.message.chat.id, call.message.message_id)
+            match = re.search(r'%loading_bar(?:_(\d+(?:\.\d+)?)s)?%', raw_text)
+            if match:
+                total_loading_time = float(match.group(1)) if match.group(1) else float(global_ui_settings.get('loading_bar_time', 3.0))
+                part_a = raw_text[:match.start()].strip()
+                part_b = raw_text[match.end():].strip()
+                
+                style = global_ui_settings.get('loading_bar_style', '1')
+                bars = ["[▯▯▯▯▯▯▯▯▯▯] 0%", "░░░░░░░░░░ 0%", "▒▒▒▒▒▒▒▒▒▒ 0%"]
+                initial_bar = bars[int(style)-1] if style in ['1', '2', '3'] else bars[0]
+                
+                sep = "\n\n" if part_a else ""
+                temp_msg_text = f"{part_a}{sep}♻️ <b>LOADING...</b>\n{initial_bar}"
+                
+                temp_msg = bot.send_message(call.message.chat.id, temp_msg_text, parse_mode="HTML")
+                execute_loading_animation(call.message.chat.id, temp_msg.message_id, part_a, style, False, total_loading_time)
+                
+                final_text = part_a + ("\n\n" if part_a and part_b else "") + part_b
+                if final_text:
+                    bot.send_message(call.message.chat.id, final_text, parse_mode="HTML", reply_markup=get_keyboard(user_id))
+            else:
+                bot.send_message(call.message.chat.id, raw_text, parse_mode="HTML", reply_markup=get_keyboard(user_id))
             
             user_state[user_id] = 'normal'
             
