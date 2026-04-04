@@ -1,4 +1,3 @@
-
 import telebot
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 import uuid
@@ -156,6 +155,7 @@ def save_database():
         'global_wallet_setup': global_wallet_setup,
         'global_bonus_setup': global_bonus_setup,
         'global_ui_settings': global_ui_settings,
+        'reinvest_settings': reinvest_settings,
         'processed_txids': list(processed_txids), # Convert set to list for database
         'blocked_users': list(blocked_users),     # NEW: Blocked users saving
         'block_settings': block_settings          # NEW: Block messages saving
@@ -221,6 +221,13 @@ block_settings = db_data.get('block_settings', {
 })
 
 global_ui_settings = db_data.get('global_ui_settings', {'loading_bar_style': '1', 'loading_bar_time': 3.0})
+
+# NEW: Reinvest Settings Persistent Data
+reinvest_settings = db_data.get('reinvest_settings', {
+    'msg_success': '✅ <b>Reinvest Successful!</b>\nYou have successfully reinvested <b>$%amount%</b> into <b>%plan_name%</b>.',
+    'msg_fail': '❌ You can not invest right now: You need at least %min_amount% USDT to invest!',
+    'inline_deposit_text': '🏦 Deposit Now'
+})
 
 deposit_settings = db_data.get('deposit_settings', {
     'USDT_TRC20': {'mode': 'auto', 'address': 'Not Set', 'hd_key': 'Not Set', 'min': 10.0, 'max': 10000.0, 'msg_enter': 'Enter amount of USDT TRC20 (in USD) to deposit:', 'msg_instruct': 'Please send exactly <code>%crypto_amount%</code> USDT to:\n\n<code>%address%</code>\n\n<i>The system is monitoring the blockchain and will credit you automatically.</i>', 'msg_pending': '✅ Your deposit request for $%usd_amount% has been submitted to the administrators.', 'msg_success': '✅ <b>Deposit Approved!</b>\n<b>$%usd_amount%</b> has been successfully added to your deposit balance.'},
@@ -310,7 +317,8 @@ def get_default_metadata():
         'assigned_plan': None, 
         'is_calculator': False, 
         'is_history': False,
-        'is_language': False
+        'is_language': False,
+        'is_reinvest': False
     }
 
 def init_user_db(message):
@@ -997,6 +1005,7 @@ def get_settings_keyboard(full_path):
     wal_text = "☑️ On" if meta.get('is_wallet') else "⬜️ Off"
     bon_text = "☑️ On" if meta.get('is_bonus') else "⬜️ Off"
     bal_text = "☑️ On" if meta.get('is_balance') else "⬜️ Off"
+    reinv_text = "☑️ On" if meta.get('is_reinvest') else "⬜️ Off"
     
     markup.row(KeyboardButton(f'Random Message ({rm_text})'), KeyboardButton(f'Admin Only ({ao_text})'))
     markup.row(KeyboardButton(f'Invisible ({inv_text})'), KeyboardButton('Subscription (Join)'))
@@ -1004,6 +1013,7 @@ def get_settings_keyboard(full_path):
     markup.row(KeyboardButton(f'Assign Calculator ({calc_text})'), KeyboardButton(f'Assign History ({hist_text})'))
     markup.row(KeyboardButton(f'Assign Withdrawal ({w_text})'), KeyboardButton(f'Assign Wallet ({wal_text})'))
     markup.row(KeyboardButton(f'Assign Bonus ({bon_text})'), KeyboardButton(f'Assign Balance ({bal_text})'))
+    markup.row(KeyboardButton(f'Assign Reinvest ({reinv_text})'))
     markup.row(KeyboardButton('Assign Editor'), KeyboardButton('Form Settings'), KeyboardButton('Shop Editor'))
     markup.row(KeyboardButton('🔙 Exit Button Settings'))
     return markup
@@ -1039,6 +1049,13 @@ def get_admin_bonus_keyboard():
     markup = ReplyKeyboardMarkup(resize_keyboard=True)
     markup.row(KeyboardButton('💰 Set Amount'), KeyboardButton('⏱ Set Cooldown (hrs)'))
     markup.row(KeyboardButton('💬 Edit Success Msg'), KeyboardButton('💬 Edit Fail Msg'))
+    markup.row(KeyboardButton('🔙 Back to Admin'))
+    return markup
+
+def get_admin_reinvest_keyboard():
+    markup = ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.row(KeyboardButton('💬 Edit Success Msg'), KeyboardButton('💬 Edit Fail Msg'))
+    markup.row(KeyboardButton('🔘 Edit Deposit Inline'))
     markup.row(KeyboardButton('🔙 Back to Admin'))
     return markup
 
@@ -1093,8 +1110,8 @@ def get_keyboard_raw(user_id):
             markup.row(KeyboardButton('🏦 Deposit Settings'), KeyboardButton('Withdrawal Settings')) 
             markup.row(KeyboardButton('💳 Wallet Settings'), KeyboardButton('🎁 Bonus Settings')) 
             markup.row(KeyboardButton('🧮 Calculator'), KeyboardButton('📜 Transactions'))
+            markup.row(KeyboardButton('📢 Broadcast Message'), KeyboardButton('🔄 Reinvest Settings'))
             markup.row(KeyboardButton('Loading Bar Settings'), KeyboardButton('🚫 Block User System'))
-            markup.row(KeyboardButton('📢 Broadcast Message'))
             markup.row(KeyboardButton('🔙 Back to Main'))
             return markup
 
@@ -1116,6 +1133,7 @@ def get_keyboard_raw(user_id):
         if state == 'admin_w_menu': return get_global_withdrawal_keyboard()
         if state == 'admin_wallet_menu': return get_admin_wallet_keyboard()
         if state == 'admin_bonus_menu': return get_admin_bonus_keyboard()
+        if state == 'admin_reinvest_menu': return get_admin_reinvest_keyboard()
         if state == 'admin_loading_bar': return get_loading_bar_keyboard()
         if state == 'admin_block_menu': return get_admin_block_keyboard()
 
@@ -1140,7 +1158,7 @@ def get_keyboard_raw(user_id):
             markup.row(KeyboardButton('🔙 Back to Deposit Menu'))
             return markup
 
-        if state.startswith('dep_setup_') or state.startswith('wallet_setup_') or state.startswith('bonus_setup_') or state == 'admin_loading_time' or state.startswith('wait_block_') or state.startswith('wait_edit_block') or state.startswith('wait_edit_unblock') or state in ['admin_broadcast_input', 'bc_wait_text']:
+        if state.startswith('dep_setup_') or state.startswith('wallet_setup_') or state.startswith('bonus_setup_') or state.startswith('reinvest_setup_') or state == 'admin_loading_time' or state.startswith('wait_block_') or state.startswith('wait_edit_block') or state.startswith('wait_edit_unblock') or state in ['admin_broadcast_input', 'bc_wait_text']:
             return get_cancel_action_keyboard()
 
         if state == 'admin_plans':
@@ -1219,7 +1237,7 @@ def get_keyboard_raw(user_id):
             markup.row(KeyboardButton('❌ Cancel Action'))
             return markup
 
-    if state in ['buyplan_wait_amount', 'wait_calc_amount', 'wallet_wait_email', 'wallet_wait_address']:
+    if state in ['buyplan_wait_amount', 'wait_calc_amount', 'wallet_wait_email', 'wallet_wait_address', 'wait_reinvest_amount']:
         return get_cancel_action_keyboard()
 
     if current_path in menus and menus[current_path]:
@@ -1402,7 +1420,7 @@ def handle_messages(message):
                         break
 
     # Reset normal users if stuck in certain states
-    if not is_admin and user_state[user_id] not in ['w_action_amount', 'w_action_addr', 'dep_wait_amount', 'dep_wait_proof', 'buyplan_wait_amount', 'wait_calc_amount', 'wallet_wait_email', 'wallet_wait_address']: 
+    if not is_admin and user_state[user_id] not in ['w_action_amount', 'w_action_addr', 'dep_wait_amount', 'dep_wait_proof', 'buyplan_wait_amount', 'wait_calc_amount', 'wallet_wait_email', 'wallet_wait_address', 'wait_reinvest_amount']: 
         user_state[user_id] = 'normal'
         
     current_path = user_current_path[user_id]
@@ -1623,6 +1641,10 @@ def handle_messages(message):
             user_state[user_id] = 'admin_bonus_menu'
             bot.send_message(message.chat.id, get_tl_and_map("Bonus setup cancelled.", lang), reply_markup=get_keyboard(user_id))
             return
+        elif state.startswith('reinvest_setup_'):
+            user_state[user_id] = 'admin_reinvest_menu'
+            bot.send_message(message.chat.id, get_tl_and_map("Reinvest setting cancelled.", lang), reply_markup=get_keyboard(user_id))
+            return
         elif state == 'admin_loading_time':
             user_state[user_id] = 'admin_loading_bar'
             bot.send_message(message.chat.id, get_tl_and_map("Action cancelled.", lang), reply_markup=get_keyboard(user_id))
@@ -1644,7 +1666,7 @@ def handle_messages(message):
     if text == '🏠 Home':
         user_current_path[user_id] = 'root'
         user_state[user_id] = 'normal' if not is_admin else state # Maintain editing states if admin
-        if state in ['posts_adding', 'w_action_amount', 'w_action_addr', 'buyplan_wait_amount', 'dep_wait_amount', 'dep_wait_proof', 'wait_calc_amount', 'wallet_wait_email', 'wallet_wait_address']:
+        if state in ['posts_adding', 'w_action_amount', 'w_action_addr', 'buyplan_wait_amount', 'dep_wait_amount', 'dep_wait_proof', 'wait_calc_amount', 'wallet_wait_email', 'wallet_wait_address', 'wait_reinvest_amount']:
             user_state[user_id] = 'normal'
         send_path_content(message.chat.id, user_id, 'root', is_editing=(user_state[user_id] == 'posts_editing'), reply_keyboard=get_keyboard(user_id))
         return
@@ -1654,7 +1676,7 @@ def handle_messages(message):
             parts = current_path.split('/')[:-1]
             new_path = '/join'.join(parts) if len(parts) > 1 else 'root'
             user_current_path[user_id] = new_path
-            if state in ['w_action_amount', 'w_action_addr', 'buyplan_wait_amount', 'dep_wait_amount', 'dep_wait_proof', 'wait_calc_amount', 'wallet_wait_email', 'wallet_wait_address']:
+            if state in ['w_action_amount', 'w_action_addr', 'buyplan_wait_amount', 'dep_wait_amount', 'dep_wait_proof', 'wait_calc_amount', 'wallet_wait_email', 'wallet_wait_address', 'wait_reinvest_amount']:
                 user_state[user_id] = 'normal'
             send_path_content(message.chat.id, user_id, new_path, is_editing=(user_state[user_id] == 'posts_editing'), reply_keyboard=get_keyboard(user_id))
         return
@@ -1798,6 +1820,10 @@ def handle_messages(message):
             meta['is_bonus'] = not meta.get('is_bonus', False)
             btn_metadata[btn_path] = meta
             bot.send_message(message.chat.id, "Bonus toggled.", reply_markup=get_keyboard(user_id))
+        elif text.startswith('Assign Reinvest'):
+            meta['is_reinvest'] = not meta.get('is_reinvest', False)
+            btn_metadata[btn_path] = meta
+            bot.send_message(message.chat.id, "Reinvest toggled.", reply_markup=get_keyboard(user_id))
         elif text.startswith('Assign Balance'):
             meta['is_balance'] = not meta.get('is_balance', False)
             btn_metadata[btn_path] = meta
@@ -2037,6 +2063,80 @@ def handle_messages(message):
         
         user_state[user_id] = 'admin_bonus_menu'
         bot.send_message(message.chat.id, "✅ Setting updated successfully!", reply_markup=get_keyboard(user_id))
+        return
+
+    # --- ADMIN REINVEST SETTINGS ---
+    if state == 'admin_reinvest_menu':
+        if text == '🔙 Back to Admin':
+            user_state[user_id] = 'admin_menu'
+            bot.send_message(message.chat.id, "🔐 <b>Admin Panel</b>", parse_mode="HTML", reply_markup=get_keyboard(user_id))
+        elif text == '💬 Edit Success Msg':
+            user_state[user_id] = 'reinvest_setup_success'
+            bot.send_message(message.chat.id, f"Enter Reinvest Success Message (macros: %amount%, %plan_name%):\n\nCurrent:\n{reinvest_settings['msg_success']}", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+        elif text == '💬 Edit Fail Msg':
+            user_state[user_id] = 'reinvest_setup_fail'
+            bot.send_message(message.chat.id, f"Enter Reinvest Fail Message (macro: %min_amount%):\n\nCurrent:\n{reinvest_settings['msg_fail']}", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+        elif text == '🔘 Edit Deposit Inline':
+            user_state[user_id] = 'reinvest_setup_inline'
+            bot.send_message(message.chat.id, f"Enter the text for the fallback deposit button:\n\nCurrent: {reinvest_settings['inline_deposit_text']}", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+        return
+
+    if state.startswith('reinvest_setup_'):
+        if state == 'reinvest_setup_success': reinvest_settings['msg_success'] = formatted_text
+        elif state == 'reinvest_setup_fail': reinvest_settings['msg_fail'] = formatted_text
+        elif state == 'reinvest_setup_inline': reinvest_settings['inline_deposit_text'] = text
+        
+        user_state[user_id] = 'admin_reinvest_menu'
+        bot.send_message(message.chat.id, "✅ Setting updated successfully!", reply_markup=get_keyboard(user_id))
+        return
+
+    # --- REINVEST SYSTEM AMOUNT INPUT HANDLER ---
+    if state == 'wait_reinvest_amount':
+        try: amount = float(text)
+        except ValueError: return bot.send_message(message.chat.id, get_tl_and_map("⚠️ Invalid amount. Numbers only.", lang))
+
+        valid_plans = {pid: p for pid, p in bot_plans.items() if pid != 'plan0'}
+        if not valid_plans: return bot.send_message(message.chat.id, get_tl_and_map("⚠️ No valid plans available.", lang))
+
+        u_dep = user_db[user_id].get('deposit', 0)
+        u_bal = user_db[user_id].get('balance', 0)
+        total_avail = u_dep + u_bal
+
+        if amount > total_avail:
+            return bot.send_message(message.chat.id, get_tl_and_map(f"⚠️ Insufficient funds. You only have ${total_avail:.2f} available.", lang))
+
+        matched_plan_id = None
+        matched_plan_data = None
+        for pid, p in valid_plans.items():
+            if p['min'] <= amount <= p['max']:
+                matched_plan_id = pid
+                matched_plan_data = p
+                break
+
+        if not matched_plan_id:
+            min_plan_amount = min(p['min'] for p in valid_plans.values())
+            max_plan_amount = max(p['max'] for p in valid_plans.values())
+            return bot.send_message(message.chat.id, get_tl_and_map(f"⚠️ Amount does not match any plan. Please enter an amount between ${min_plan_amount:.2f} and ${max_plan_amount:.2f}.", lang))
+
+        if u_dep >= amount:
+            user_db[user_id]['deposit'] -= amount
+        else:
+            rem = amount - u_dep
+            user_db[user_id]['deposit'] = 0
+            user_db[user_id]['balance'] -= rem
+
+        log_tx(user_id, f"Reinvested {matched_plan_data['name']}", -amount)
+
+        new_plan = {
+            'id': str(uuid.uuid4())[:8], 'macro': matched_plan_id, 'amount': amount,
+            'profit_pct': matched_plan_data['profit'], 'length_hours': matched_plan_data.get('length', 0),
+            'start_time': time.time(), 'last_accrual': time.time(), 'earned': 0.0, 'status': 'active'
+        }
+        user_db[user_id]['active_plans'].append(new_plan)
+
+        succ_msg = reinvest_settings['msg_success'].replace('%amount%', f"{amount:.2f}").replace('%plan_name%', matched_plan_data['name'])
+        bot.send_message(message.chat.id, get_tl_and_map(replace_macros(succ_msg, user_id, user_current_path[user_id]), lang), parse_mode="HTML", reply_markup=get_keyboard(user_id))
+        user_state[user_id] = 'normal'
         return
 
     # --- ADMIN LOADING BAR SETTINGS ---
@@ -2529,7 +2629,7 @@ def handle_messages(message):
         return
 
     # --- BLOCK UNAUTHORIZED ADMIN COMMANDS ---
-    admin_commands = ['🎛️ Buttons Editor', '📝 Posts Editor', '💵 Balance', '🔐 Admin', '➕ Add Button', '🛑 Stop Editor', '✅ Confirm', '🚫 Cancel', '✖️ Delete', 'Deposit balance', 'Withdrawal balance', 'User Macro', 'User Macros', '📜 Macros', '📊 Plans', '🔙 Back to Main', '🔙 Back to Admin', '➕ Add Plan', '➕ Add Message', 'Pagination in Editor (10)', '🏦 Deposit Settings', 'Withdrawal Settings', '🔙 Back to Deposit Menu', '📍 Set Static Address', '🔑 Set HD Wallet Key', '💬 Edit Enter Msg', '💬 Edit Instruct Msg', '💰 Set Min Deposit', '💰 Set Max Deposit', '💬 Edit Pending Msg', '💬 Edit Success Msg', '🧮 Calculator', '📜 Transactions', '💳 Wallet Settings', '🎁 Bonus Settings', 'Loading Bar Settings', '🚫 Block User System', '🚫 Block', '✅ Unblock', '💬 Edit Block Msg', '💬 Edit Unblock Msg', '📢 Broadcast Message']
+    admin_commands = ['🎛️ Buttons Editor', '📝 Posts Editor', '💵 Balance', '🔐 Admin', '➕ Add Button', '🛑 Stop Editor', '✅ Confirm', '🚫 Cancel', '✖️ Delete', 'Deposit balance', 'Withdrawal balance', 'User Macro', 'User Macros', '📜 Macros', '📊 Plans', '🔙 Back to Main', '🔙 Back to Admin', '➕ Add Plan', '➕ Add Message', 'Pagination in Editor (10)', '🏦 Deposit Settings', 'Withdrawal Settings', '🔙 Back to Deposit Menu', '📍 Set Static Address', '🔑 Set HD Wallet Key', '💬 Edit Enter Msg', '💬 Edit Instruct Msg', '💰 Set Min Deposit', '💰 Set Max Deposit', '💬 Edit Pending Msg', '💬 Edit Success Msg', '🧮 Calculator', '📜 Transactions', '💳 Wallet Settings', '🎁 Bonus Settings', '🔄 Reinvest Settings', 'Loading Bar Settings', '🚫 Block User System', '🚫 Block', '✅ Unblock', '💬 Edit Block Msg', '💬 Edit Unblock Msg', '📢 Broadcast Message']
     if not is_admin and (text in admin_commands or text.startswith('📋 Paste "') or text == '✔️ Leave as Is' or text == '➖ Set Empty' or text.startswith('⚙️ Edit ') or text.startswith('Style ')):
         bot.send_message(message.chat.id, get_tl_and_map("Unrecognized command.", lang), reply_markup=get_keyboard(user_id))
         return
@@ -2652,6 +2752,9 @@ def handle_messages(message):
         elif text == '🎁 Bonus Settings':
             user_state[user_id] = 'admin_bonus_menu'
             bot.send_message(message.chat.id, "🎁 <b>Bonus Settings</b>", parse_mode="HTML", reply_markup=get_keyboard(user_id))
+        elif text == '🔄 Reinvest Settings':
+            user_state[user_id] = 'admin_reinvest_menu'
+            bot.send_message(message.chat.id, "🔄 <b>Reinvest Settings</b>", parse_mode="HTML", reply_markup=get_keyboard(user_id))
         elif text == '📊 Plans':
             user_state[user_id] = 'admin_plans'
             bot.send_message(message.chat.id, "📊 <b>Plans Manager</b>", parse_mode="HTML", reply_markup=get_keyboard(user_id))
@@ -3016,6 +3119,28 @@ def handle_messages(message):
                     bot.send_message(message.chat.id, get_tl_and_map(msg, lang), parse_mode="HTML", reply_markup=get_keyboard(user_id))
                 return
 
+            if meta.get('is_reinvest') and state != 'posts_editing':
+                valid_plans = [p for pid, p in bot_plans.items() if pid != 'plan0']
+                if not valid_plans:
+                    bot.send_message(message.chat.id, get_tl_and_map("⚠️ No valid plans available.", lang))
+                    return
+                min_plan_amount = min(p['min'] for p in valid_plans)
+
+                u_dep = user_db[user_id].get('deposit', 0)
+                u_bal = user_db[user_id].get('balance', 0)
+                total_avail = u_dep + u_bal
+
+                if total_avail < min_plan_amount:
+                    fail_msg = reinvest_settings['msg_fail'].replace('%min_amount%', f"{min_plan_amount:.2f}")
+                    markup = InlineKeyboardMarkup()
+                    btn_text = get_tl_and_map(reinvest_settings['inline_deposit_text'], lang)
+                    markup.row(InlineKeyboardButton(btn_text, callback_data='cb_reinv_dep_menu'))
+                    bot.send_message(message.chat.id, get_tl_and_map(replace_macros(fail_msg, user_id, custom_btn_path), lang), parse_mode="HTML", reply_markup=markup)
+                else:
+                    user_state[user_id] = 'wait_reinvest_amount'
+                    bot.send_message(message.chat.id, get_tl_and_map(f"🔄 <b>Reinvest</b>\n\nAvailable Balance: ${total_avail:.2f}\nMinimum Investment: ${min_plan_amount:.2f}\n\nEnter the amount you wish to reinvest:", lang), parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+                return
+
             # --- THE FIX: FOLDERS VS POSTS (BREADCRUMB LOGIC) ---
             has_submenus = custom_btn_path in menus and len(menus[custom_btn_path]) > 0
             
@@ -3172,6 +3297,16 @@ def handle_inline(call):
             except Exception: pass
             bot.send_message(call.message.chat.id, get_tl_and_map(deposit_settings[curr]['msg_enter'], lang), parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
         return bot.answer_callback_query(call.id)
+        
+    elif call.data == 'cb_reinv_dep_menu':
+        try: bot.delete_message(call.message.chat.id, call.message.message_id)
+        except: pass
+        dep_markup = InlineKeyboardMarkup()
+        for c in deposit_settings:
+            dep_markup.add(InlineKeyboardButton(c.replace('_', ' '), callback_data=f"cb_dep_{c}"))
+        bot.send_message(call.message.chat.id, get_tl_and_map("Select a currency to deposit:", lang), reply_markup=dep_markup)
+        bot.answer_callback_query(call.id)
+        return
 
     # --- NEW: UNBLOCK USER INLINE BUTTON ---
     if call.data.startswith('cb_unblock_'):
