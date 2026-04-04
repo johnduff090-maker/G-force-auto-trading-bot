@@ -1,3 +1,4 @@
+
 import telebot
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 import uuid
@@ -200,7 +201,8 @@ admin_bal_comment_text = {}
 user_plan_setup = {}          
 pending_deposits = {}
 admin_dep_setup = {}
-pending_auto_txids = {} # NEW: Tracks when the auto-watcher first saw a transaction
+pending_auto_txids = {}
+pending_withdrawals = {} # Tracker for Admin Withdrawal System
 
 # --- PERSISTENT DATA (Loaded from Neon DB) ---
 user_db = db_data.get('user_db', {})
@@ -223,8 +225,17 @@ global_w_setup = db_data.get('global_w_setup', {
     'w_var': 'balance', 'w_min': 10.0, 'w_max': 10000.0,
     'w_msg_enter': 'Please enter the amount you wish to withdraw:',
     'w_msg_addr': 'Please enter your withdrawal address:',
-    'w_msg_conf': 'Confirm withdrawal of %withdraw% to <code>%address%</code>?',
-    'do_not_ask_address': False
+    'w_msg_conf': 'Confirm withdrawal of %withdraw% to <code>%address%</code> (Network: %network%)?',
+    'w_msg_processing': '♻️ Your Withdrawal of %withdraw% is processing on the blockchain...',
+    'w_msg_approve': '✅ Withdrawal Completed\n━━━━━━━━━━━━━━━━━━\n👤 %firstname% \n💰 Amount: -%withdraw% USDT \n🔗 Address: %address% \n🌐 Network: %network% \n⚡ Type: Instant \n━━━━━━━━━━━━━━━━━━\n📌 Status: Successful ✔️ \n\nYour funds have been sent successfully to your wallet.',
+    'w_msg_decline': '❌ Your withdrawal of %withdraw% was declined. Funds have been refunded to your balance.',
+    'w_msg_ignore': '🚫 Your withdrawal request of %withdraw% has been ignored.',
+    'do_not_ask_address': False,
+    'w_commission': 0.0,
+    'w_rate_toggle': False,
+    'public_report': None,
+    'private_report': None,
+    'addr_var': 'wallet'
 })
 
 global_wallet_setup = db_data.get('global_wallet_setup', {
@@ -605,6 +616,7 @@ def replace_macros(text, user_id, full_path, action_data=None):
     t = t.replace('%wallet%', bals.get('wallet', 'Not Set'))
     t = t.replace('%email%', bals.get('email', 'Not Set'))
     t = t.replace('%bonus_amount%', str(global_bonus_setup['amount']))
+    t = t.replace('%commission%', str(global_w_setup.get('w_commission', 0.0)))
     
     # Use GLOBAL withdrawal settings for macros
     t = t.replace('%min%', str(global_w_setup.get('w_min') or 0))
@@ -638,9 +650,11 @@ def replace_macros(text, user_id, full_path, action_data=None):
     if action_data:
         t = t.replace('%withdraw%', f"{action_data.get('amount', 0):.2f}")
         t = t.replace('%address%', action_data.get('address', bals.get('address', 'Not Set')))
+        t = t.replace('%network%', action_data.get('network', bals.get('wallet_net', 'Unknown')))
     else:
         t = t.replace('%withdraw%', "0.00")
         t = t.replace('%address%', bals.get('address', 'Not Set'))
+        t = t.replace('%network%', bals.get('wallet_net', 'Unknown'))
         
     return t
 
@@ -968,15 +982,17 @@ def get_settings_keyboard(full_path):
 def get_global_withdrawal_keyboard():
     markup = ReplyKeyboardMarkup(resize_keyboard=True)
     addr_text = "☑️ On" if global_w_setup.get('do_not_ask_address') else "⬜️ Off"
+    rate_text = "☑️ On" if global_w_setup.get('w_rate_toggle') else "⬜️ Off"
+    comm_val = global_w_setup.get('w_commission', 0.0)
     
     markup.row(KeyboardButton('Set Withdrawal Var'), KeyboardButton('Set Min/Max'))
     markup.row(KeyboardButton('Edit Enter Msg'), KeyboardButton('Edit Address Msg'))
-    markup.row(KeyboardButton('Edit Confirm Msg'), KeyboardButton('Success Message'))
-    markup.row(KeyboardButton('Fail Message'), KeyboardButton('Decline Msg.'), KeyboardButton('Ignore Msg.'))
+    markup.row(KeyboardButton('Edit Confirm Msg'), KeyboardButton('Processing Message'))
+    markup.row(KeyboardButton('Approve Msg'), KeyboardButton('Decline Msg.'), KeyboardButton('Ignore Msg.'))
     markup.row(KeyboardButton('Public Group Report'), KeyboardButton('Private Group Report'))
-    markup.row(KeyboardButton('Address Condition'), KeyboardButton('Address Variable'))
+    markup.row(KeyboardButton('Address Variable'))
     markup.row(KeyboardButton(f'Do not ask for Address ({addr_text})'))
-    markup.row(KeyboardButton('Commission'), KeyboardButton('Rate'))
+    markup.row(KeyboardButton(f'Commission ({comm_val}%)'), KeyboardButton(f'Rate ({rate_text})'))
     markup.row(KeyboardButton('🔙 Back to Admin'))
     return markup
 
@@ -1137,6 +1153,10 @@ def get_keyboard_raw(user_id):
             if state == 'w_setup_enter': return get_wizard_keyboard(global_w_setup.get('w_msg_enter'), allow_empty=True)
             if state == 'w_setup_addr': return get_wizard_keyboard(global_w_setup.get('w_msg_addr'), allow_empty=True)
             if state == 'w_setup_conf': return get_wizard_keyboard(global_w_setup.get('w_msg_conf'), allow_empty=True)
+            if state == 'w_setup_proc': return get_wizard_keyboard(global_w_setup.get('w_msg_processing'), allow_empty=True)
+            if state == 'w_setup_appr': return get_wizard_keyboard(global_w_setup.get('w_msg_approve'), allow_empty=True)
+            if state == 'w_setup_dec': return get_wizard_keyboard(global_w_setup.get('w_msg_decline'), allow_empty=True)
+            if state == 'w_setup_ign': return get_wizard_keyboard(global_w_setup.get('w_msg_ignore'), allow_empty=True)
 
         if state == 'button_settings': return get_settings_keyboard(f"{current_path}/{user_selected_button.get(user_id)}")
         if state == 'assign_command': return get_assign_command_keyboard(f"{current_path}/{user_selected_button.get(user_id)}")
@@ -1312,6 +1332,8 @@ def handle_messages(message):
             "• <code>%plan_names%</code> - Names of active plans\n"
             "• <code>%ref_count%</code> - Number of referrals\n"
             "• <code>%withdrawn%</code> - Total amount withdrawn\n"
+            "• <code>%network%</code> - User's Withdrawal Network\n"
+            "• <code>%commission%</code> - Configured withdrawal commission %\n"
         )
         try:
             bot.send_message(message.chat.id, macros_msg, parse_mode="HTML", reply_markup=get_keyboard(user_id))
@@ -2089,9 +2111,35 @@ def handle_messages(message):
             user_state[user_id] = 'w_setup_conf'
             curr = global_w_setup.get('w_msg_conf')
             bot.send_message(message.chat.id, f"✨ Enter the MESSAGE shown BEFORE the operation commit.\n\n❗️ Ask User to CONFIRM withdraw operation.\n\nℹ️ Current message:\n{curr}", reply_markup=get_keyboard(user_id))
+        elif text == 'Processing Message':
+            user_state[user_id] = 'w_setup_proc'
+            curr = global_w_setup.get('w_msg_processing')
+            bot.send_message(message.chat.id, f"✨ Enter the Processing Message shown AFTER confirming.\n\nℹ️ Current:\n{curr}", reply_markup=get_cancel_action_keyboard())
+        elif text == 'Approve Msg':
+            user_state[user_id] = 'w_setup_appr'
+            curr = global_w_setup.get('w_msg_approve')
+            bot.send_message(message.chat.id, f"✨ Enter the Approve Message to send to users upon successful payout.\n\nℹ️ Current:\n{curr}", reply_markup=get_cancel_action_keyboard())
+        elif text == 'Decline Msg.':
+            user_state[user_id] = 'w_setup_dec'
+            curr = global_w_setup.get('w_msg_decline')
+            bot.send_message(message.chat.id, f"✨ Enter the Decline Message.\n\nℹ️ Current:\n{curr}", reply_markup=get_cancel_action_keyboard())
+        elif text == 'Ignore Msg.':
+            user_state[user_id] = 'w_setup_ign'
+            curr = global_w_setup.get('w_msg_ignore')
+            bot.send_message(message.chat.id, f"✨ Enter the Ignore Message.\n\nℹ️ Current:\n{curr}", reply_markup=get_cancel_action_keyboard())
+        elif text == 'Public Group Report':
+            user_state[user_id] = 'w_setup_pub'
+            curr = global_w_setup.get('public_report')
+            bot.send_message(message.chat.id, f"Send the Channel/Group ID (e.g. -100123456789) for public reports:\n\nℹ️ Current: {curr}", reply_markup=get_cancel_action_keyboard())
         elif text.startswith('Do not ask for Address'):
             global_w_setup['do_not_ask_address'] = not global_w_setup.get('do_not_ask_address', False)
             bot.send_message(message.chat.id, "Address setting toggled.", reply_markup=get_keyboard(user_id))
+        elif text.startswith('Commission'):
+            user_state[user_id] = 'w_setup_comm'
+            bot.send_message(message.chat.id, "Enter withdrawal commission percentage (e.g. 5 for 5%):", reply_markup=get_cancel_action_keyboard())
+        elif text.startswith('Rate'):
+            global_w_setup['w_rate_toggle'] = not global_w_setup.get('w_rate_toggle', False)
+            bot.send_message(message.chat.id, "Rate/Multi-currency withdrawal toggled.", reply_markup=get_keyboard(user_id))
         else:
             bot.send_message(message.chat.id, f"🛠 <b>{text}</b> is acknowledged. Setup feature coming soon!", parse_mode="HTML", reply_markup=get_keyboard(user_id))
         return
@@ -2106,6 +2154,14 @@ def handle_messages(message):
             elif state == 'w_setup_enter': global_w_setup['w_msg_enter'] = formatted_val
             elif state == 'w_setup_addr': global_w_setup['w_msg_addr'] = formatted_val
             elif state == 'w_setup_conf': global_w_setup['w_msg_conf'] = formatted_val
+            elif state == 'w_setup_proc': global_w_setup['w_msg_processing'] = formatted_val
+            elif state == 'w_setup_appr': global_w_setup['w_msg_approve'] = formatted_val
+            elif state == 'w_setup_dec': global_w_setup['w_msg_decline'] = formatted_val
+            elif state == 'w_setup_ign': global_w_setup['w_msg_ignore'] = formatted_val
+            elif state == 'w_setup_pub': global_w_setup['public_report'] = text
+            elif state == 'w_setup_comm': 
+                try: global_w_setup['w_commission'] = float(text)
+                except ValueError: bot.send_message(message.chat.id, "⚠️ Invalid percentage.")
 
         if state == 'w_setup_var':
             user_state[user_id] = 'admin_w_menu'
@@ -2117,9 +2173,9 @@ def handle_messages(message):
         elif state == 'w_setup_max':
             user_state[user_id] = 'admin_w_menu'
             bot.send_message(message.chat.id, "✅ Limits saved!", reply_markup=get_keyboard(user_id))
-        elif state == 'w_setup_enter' or state == 'w_setup_addr' or state == 'w_setup_conf':
+        elif state in ['w_setup_enter', 'w_setup_addr', 'w_setup_conf', 'w_setup_proc', 'w_setup_appr', 'w_setup_dec', 'w_setup_ign', 'w_setup_pub', 'w_setup_comm']:
             user_state[user_id] = 'admin_w_menu'
-            bot.send_message(message.chat.id, "✅ Messages updated successfully!", reply_markup=get_keyboard(user_id))
+            bot.send_message(message.chat.id, "✅ Settings updated successfully!", reply_markup=get_keyboard(user_id))
         return
 
     # --- ADMIN PLANS MANAGER ---
@@ -2443,7 +2499,7 @@ def handle_messages(message):
         if not global_w_setup.get('do_not_ask_address'):
             user_state[user_id] = 'w_action_addr'
             msg = global_w_setup.get('w_msg_addr') or "Please enter your withdrawal address:"
-            bot.send_message(message.chat.id, get_tl_and_map(replace_macros(msg, user_id, target_path, user_action_data[user_id]), lang), parse_mode="HTML")
+            bot.send_message(message.chat.id, get_tl_and_map(replace_macros(msg, user_id, target_path, user_action_data[user_id]), lang), parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
         else:
             user_state[user_id] = 'w_action_conf'
             msg = global_w_setup.get('w_msg_conf') or f"Confirm withdrawal of {amount}?"
@@ -2452,10 +2508,17 @@ def handle_messages(message):
 
     if state == 'w_action_addr':
         target_path = user_action_data[user_id]['path']
-        user_action_data[user_id]['address'] = text
+        addr = text.strip()
+        user_action_data[user_id]['address'] = addr
+        
+        # Simple Network Deduction Fallback
+        if addr.startswith('T') and len(addr) >= 33: user_action_data[user_id]['network'] = "USDT (TRC20)"
+        elif addr.startswith('0x') and len(addr) == 42: user_action_data[user_id]['network'] = "USDT (BEP20)"
+        elif addr.startswith('1') or addr.startswith('3') or addr.startswith('bc1'): user_action_data[user_id]['network'] = "BTC"
+        else: user_action_data[user_id]['network'] = "Unknown"
         
         user_state[user_id] = 'w_action_conf'
-        msg = global_w_setup.get('w_msg_conf') or f"Confirm withdrawal of {user_action_data[user_id]['amount']} to <code>{text}</code>?"
+        msg = global_w_setup.get('w_msg_conf') or f"Confirm withdrawal of {user_action_data[user_id]['amount']} to <code>{addr}</code>?"
         bot.send_message(message.chat.id, get_tl_and_map(replace_macros(msg, user_id, target_path, user_action_data[user_id]), lang), parse_mode="HTML", reply_markup=get_withdrawal_conf_inline(lang))
         return
 
@@ -2562,8 +2625,34 @@ def handle_messages(message):
                 return bot.send_message(message.chat.id, get_tl_and_map("⛔️ You do not have permission to use this button.", lang))
 
             if meta.get('withdrawal') and state != 'posts_editing':
-                user_state[user_id] = 'w_action_amount'
                 user_action_data[user_id] = {'path': custom_btn_path}
+                
+                # Check Auto-Redirection if Do Not Ask Address is active
+                if global_w_setup.get('do_not_ask_address'):
+                    addr_var = global_w_setup.get('addr_var', 'wallet')
+                    user_addr = user_db[user_id].get(addr_var, 'Not Set')
+                    if user_addr == 'Not Set':
+                        temp_msg = bot.send_message(message.chat.id, get_tl_and_map("⚠️ <b>Address Not Set!</b>\nYou have not set up your withdrawal address yet. Redirecting you to wallet setup...", lang), parse_mode="HTML")
+                        
+                        def redirect_to_wallet():
+                            time.sleep(2.5)
+                            try: bot.delete_message(message.chat.id, temp_msg.message_id)
+                            except: pass
+                            
+                            if global_wallet_setup['ask_email'] and user_db[user_id].get('email', 'Not Set') == 'Not Set':
+                                user_state[user_id] = 'wallet_wait_email'
+                                bot.send_message(message.chat.id, get_tl_and_map(global_wallet_setup['msg_email_prompt'], lang), reply_markup=get_cancel_action_keyboard())
+                            else:
+                                user_state[user_id] = 'wallet_wait_address'
+                                bot.send_message(message.chat.id, get_tl_and_map(global_wallet_setup['msg_prompt'], lang), parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+                                
+                        threading.Thread(target=redirect_to_wallet, daemon=True).start()
+                        return
+                    else:
+                        user_action_data[user_id]['address'] = user_addr
+                        user_action_data[user_id]['network'] = user_db[user_id].get('wallet_net', 'Unknown')
+                
+                user_state[user_id] = 'w_action_amount'
                 msg = global_w_setup.get('w_msg_enter') or "Please enter the amount you wish to withdraw:"
                 bot.send_message(message.chat.id, get_tl_and_map(replace_macros(msg, user_id, custom_btn_path), lang), parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
                 return
@@ -2737,6 +2826,68 @@ def handle_inline(call):
     target_btn = user_selected_button.get(user_id)
     is_admin = user_id in ADMIN_IDS
     lang = user_db.get(user_id, {}).get('lang', 'en')
+
+    # --- NEW: ADMIN WITHDRAWAL NOTIFICATION INLINES ---
+    if call.data.startswith('cb_wad_'):
+        if not is_admin: return bot.answer_callback_query(call.id, "Action not permitted.", show_alert=True)
+        parts = call.data.split('_')
+        action = parts[2] # 'app', 'dec', 'ign'
+        mode = parts[3] # 's' (silent), 'm' (message)
+        w_id = parts[4]
+        
+        if 'pending_withdrawals' not in globals() or w_id not in pending_withdrawals:
+            return bot.answer_callback_query(call.id, "Withdrawal no longer pending or expired.", show_alert=True)
+            
+        w_data = pending_withdrawals.pop(w_id)
+        target = w_data['user_id']
+        amt = w_data['amount']
+        w_var = w_data['currency_var']
+        target_lang = user_db.get(target, {}).get('lang', 'en')
+        
+        if action == 'app':
+            log_tx(target, "Withdrawal Approved", 0) 
+            bot.edit_message_text(f"{call.message.text}\n\n✅ <b>APPROVED ({'Silent' if mode=='s' else 'Msg sent'})</b>", call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=None)
+            
+            if mode == 'm':
+                msg_template = global_w_setup.get('w_msg_approve')
+                if msg_template:
+                    msg = replace_macros(msg_template, target, w_data['path'], w_data)
+                    try: bot.send_message(target, get_tl_and_map(msg, target_lang), parse_mode="HTML")
+                    except: pass
+            
+            pub_chat = global_w_setup.get('public_report')
+            if pub_chat:
+                try:
+                    pub_msg = f"💸 <b>SUCCESSFUL WITHDRAWAL</b> 💸\n\n👤 User: {user_db.get(target, {}).get('first_name', 'Unknown')}\n💰 Amount: {amt}\n🌐 Network: {w_data['network']}\n🔗 Address: {w_data['address'][:6]}...{w_data['address'][-4:]}"
+                    bot.send_message(pub_chat, pub_msg, parse_mode="HTML")
+                except: pass
+
+        elif action == 'dec':
+            if target in user_db:
+                user_db[target][w_var] = user_db[target].get(w_var, 0) + amt
+                user_db[target]['total_withdrawn'] = max(0, user_db[target].get('total_withdrawn', 0.0) - amt)
+                log_tx(target, "Withdrawal Refunded", amt)
+                
+            bot.edit_message_text(f"{call.message.text}\n\n❌ <b>DECLINED (Refunded to user)</b>", call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=None)
+            
+            if mode == 'm':
+                msg_template = global_w_setup.get('w_msg_decline')
+                if msg_template:
+                    msg = replace_macros(msg_template, target, w_data['path'], w_data)
+                    try: bot.send_message(target, get_tl_and_map(msg, target_lang), parse_mode="HTML")
+                    except: pass
+
+        elif action == 'ign':
+            bot.edit_message_text(f"{call.message.text}\n\n🚫 <b>IGNORED (No Refund)</b>", call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=None)
+            if mode == 'm':
+                msg_template = global_w_setup.get('w_msg_ignore')
+                if msg_template:
+                    msg = replace_macros(msg_template, target, w_data['path'], w_data)
+                    try: bot.send_message(target, get_tl_and_map(msg, target_lang), parse_mode="HTML")
+                    except: pass
+        
+        return bot.answer_callback_query(call.id, "Action executed successfully.")
+
 
     # --- ON-DEMAND DEPOSIT BLOCKCHAIN SCAN ---
     if call.data.startswith('cb_depcheck_'):
@@ -3142,14 +3293,68 @@ def handle_inline(call):
             data = user_action_data[user_id]
             meta = btn_metadata.get(data['path'], get_default_metadata())
             
+            amount = data['amount']
             w_var = global_w_setup.get('w_var', 'balance')
-            user_db[user_id][w_var] -= data['amount']
-            user_db[user_id]['total_withdrawn'] = user_db[user_id].get('total_withdrawn', 0.0) + data['amount']
-            log_tx(user_id, "Withdrawal", -data['amount'])
+            
+            # Deduct balance
+            user_db[user_id][w_var] -= amount
+            user_db[user_id]['total_withdrawn'] = user_db[user_id].get('total_withdrawn', 0.0) + amount
+            log_tx(user_id, "Withdrawal Pending", -amount)
+            
+            # Send Processing message
+            proc_msg = global_w_setup.get('w_msg_processing', '♻️ Your Withdrawal of %withdraw% is processing on blockchain...')
+            bot.send_message(call.message.chat.id, get_tl_and_map(replace_macros(proc_msg, user_id, data['path'], data), lang), parse_mode="HTML", reply_markup=get_keyboard(user_id))
+            
+            # Delete confirm inline msg
+            bot.delete_message(call.message.chat.id, call.message.message_id)
             
             user_state[user_id] = 'normal'
-            bot.delete_message(call.message.chat.id, call.message.message_id)
-            bot.send_message(call.message.chat.id, get_tl_and_map("✅ Withdrawal request processed successfully!", lang), reply_markup=get_keyboard(user_id))
+            
+            # Add to pending global dictionary
+            w_id = str(uuid.uuid4())[:8]
+            global pending_withdrawals
+            if 'pending_withdrawals' not in globals():
+                pending_withdrawals = {}
+            
+            # Retrieve the correct address/network depending on if it was manual or pre-set
+            addr = data.get('address', user_db[user_id].get('wallet', 'Unknown'))
+            net = data.get('network', user_db[user_id].get('wallet_net', 'Unknown'))
+            comm_pct = global_w_setup.get('w_commission', 0.0)
+            final_amt = amount - (amount * (comm_pct / 100.0))
+            
+            pending_withdrawals[w_id] = {
+                'user_id': user_id, 'amount': amount, 'final_amt': final_amt,
+                'address': addr, 'network': net, 'currency_var': w_var,
+                'path': data['path']
+            }
+            
+            # Build Admin Inline Keyboard
+            adm_markup = InlineKeyboardMarkup()
+            adm_markup.row(
+                InlineKeyboardButton('Approve ✅', callback_data=f'cb_wad_app_s_{w_id}'),
+                InlineKeyboardButton('Decline', callback_data=f'cb_wad_dec_s_{w_id}'),
+                InlineKeyboardButton('Ignore', callback_data=f'cb_wad_ign_s_{w_id}')
+            )
+            adm_markup.row(
+                InlineKeyboardButton('Approve 🗒️', callback_data=f'cb_wad_app_m_{w_id}'),
+                InlineKeyboardButton('Decline 🗒️', callback_data=f'cb_wad_dec_m_{w_id}'),
+                InlineKeyboardButton('Ignore 🗒️', callback_data=f'cb_wad_ign_m_{w_id}')
+            )
+            
+            admin_alert = (
+                f"🚨 <b>NEW WITHDRAWAL REQUEST</b> 🚨\n\n"
+                f"👤 User: <code>{user_id}</code> (@{call.from_user.username or 'None'})\n"
+                f"💰 Requested: <b>{amount}</b>\n"
+                f"💸 Final (after {comm_pct}% comm): <b>{final_amt}</b>\n"
+                f"🔗 Address: <code>{addr}</code>\n"
+                f"🌐 Network: {net}\n"
+                f"🗃 Variable: {w_var}"
+            )
+            
+            for admin in ADMIN_IDS:
+                try: bot.send_message(admin, admin_alert, parse_mode="HTML", reply_markup=adm_markup)
+                except: pass
+                
         return
         
     elif call.data == 'cb_w_no':
