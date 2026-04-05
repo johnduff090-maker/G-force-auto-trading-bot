@@ -4790,16 +4790,24 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                     
                     if resp.status_code == 200:
                         data = resp.json()
-                        services = data.get('data', [])
+                        services = data.get('data', {}).get('services', [])
+                        
                         if services:
-                            # Grabs the RAM usage of your bot
-                            service = services[0]
-                            metrics = service.get('metrics', {})
-                            ram_bytes = metrics.get('memory', {}).get('usageBytes', 0)
-                            ram_limit = metrics.get('memory', {}).get('limitBytes', 536870912) # Default 512MB
-                            
+                            # 🧠 THE FIX: Read the exact RAM directly from the Linux server!
+                            try:
+                                # Standard Northflank / Docker container memory (cgroup v2)
+                                with open('/sys/fs/cgroup/memory.current', 'r') as f:
+                                    ram_bytes = int(f.read().strip())
+                            except FileNotFoundError:
+                                try:
+                                    # Fallback for older Linux containers (cgroup v1)
+                                    with open('/sys/fs/cgroup/memory/memory.usage_in_bytes', 'r') as f:
+                                        ram_bytes = int(f.read().strip())
+                                except FileNotFoundError:
+                                    ram_bytes = 0 # Safety net if testing on Windows
+                                    
                             stats['northflank']['used_mb'] = round(ram_bytes / (1024 * 1024), 2)
-                            stats['northflank']['total_mb'] = round(ram_limit / (1024 * 1024), 2)
+                            stats['northflank']['total_mb'] = 512.00 # Standard Northflank free tier limit
                             stats['northflank']['status'] = 'Active'
                         else:
                             stats['northflank']['status'] = 'No Services Found'
