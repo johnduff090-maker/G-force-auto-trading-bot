@@ -469,7 +469,7 @@ def process_referral_commission(user_id, amount, is_deposit=True):
                 lang = user_db[inviter].get('lang', 'en')
                 msg = global_messages_setup.get('ref_commission_msg', '💵 You received +{amount} USDT from your referral activity!')
                 msg = msg.replace('{amount}', f"{comm:.2f}")
-                bot.send_message(inviter, get_tl_and_map(msg, lang))
+                bot.send_message(inviter, get_tl_and_map(msg, lang), parse_mode="HTML")
             except: pass
         if is_deposit:
             user_db[inviter]['team_deposits'] += amount
@@ -643,6 +643,7 @@ def check_and_trigger_auto_buy(user_id):
             bot.send_message(user_id, get_tl_and_map(msg, lang), parse_mode="HTML")
         except Exception: pass
 
+# --- TRUE BACKGROUND HOURLY ALERTS (FIX APPLIED HERE) ---
 def process_accruals(user_id):
     u = user_db.get(user_id)
     if not u or not u.get('active_plans'): return
@@ -676,7 +677,8 @@ def process_accruals(user_id):
                     msg = global_messages_setup.get('hourly_dm', '💰You have received +{hourly_amount} USDT hourly profits.\nTime left: {time_left}')
                     msg = msg.replace('{hourly_amount}', f"{hourly_earned:.2f}").replace('{time_left}', time_left_str)
                     lang = u.get('lang', 'en')
-                    bot.send_message(user_id, get_tl_and_map(msg, lang))
+                    # FIX: parse_mode HTML added so your bold/mono styling works flawlessly!
+                    bot.send_message(user_id, get_tl_and_map(msg, lang), parse_mode="HTML")
                 except: pass
                 
         if p['length_hours'] > 0:
@@ -687,7 +689,8 @@ def process_accruals(user_id):
                     msg = global_messages_setup.get('expiry_dm', '💰You have received a total profit of +{total_profit} USDT.\n⏰Trading Completed')
                     msg = msg.replace('{total_profit}', f"{p['earned']:.2f}")
                     lang = u.get('lang', 'en')
-                    bot.send_message(user_id, get_tl_and_map(msg, lang))
+                    # FIX: parse_mode HTML added here as well
+                    bot.send_message(user_id, get_tl_and_map(msg, lang), parse_mode="HTML")
                 except: pass
 
 def change_menu_paths(old_base, new_base):
@@ -1686,6 +1689,12 @@ def handle_messages(message):
             bot.send_message(message.chat.id, get_tl_and_map("❌ Action Cancelled.", lang), reply_markup=get_keyboard(user_id))
             return
 
+    # --- INTERCEPT MENU CLICKS WHILE IN SETUP ---
+    msg_menu_cmds = ['Edit Hourly DM', 'Edit Expiry DM', 'Edit Ref Join Msg', 'Edit Ref Comm Msg', 'Edit Level Up Msg', 'Edit Admin Change Msg']
+    if text in msg_menu_cmds and state.startswith('msg_setup_'):
+        user_state[user_id] = 'admin_messages_menu'
+        state = 'admin_messages_menu'
+
     # --- ADMIN MESSAGES MANAGER ---
     if state == 'admin_menu' and text == '💬 Messages':
         user_state[user_id] = 'admin_messages_menu'
@@ -1698,22 +1707,22 @@ def handle_messages(message):
             bot.send_message(message.chat.id, "🔐 <b>Admin Panel</b>", parse_mode="HTML", reply_markup=get_keyboard(user_id))
         elif text == 'Edit Hourly DM':
             user_state[user_id] = 'msg_setup_hourly'
-            bot.send_message(message.chat.id, f"Enter the Hourly Accrual DM (Macros: {{hourly_amount}}, {{time_left}}):\n\nCurrent:\n{global_messages_setup['hourly_dm']}", reply_markup=get_cancel_action_keyboard())
+            bot.send_message(message.chat.id, f"Enter the Hourly Accrual DM (Macros: {{hourly_amount}}, {{time_left}}):\n\n<b>Current:</b>\n{global_messages_setup['hourly_dm']}", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
         elif text == 'Edit Expiry DM':
             user_state[user_id] = 'msg_setup_expiry'
-            bot.send_message(message.chat.id, f"Enter the Plan Expiry DM (Macro: {{total_profit}}):\n\nCurrent:\n{global_messages_setup['expiry_dm']}", reply_markup=get_cancel_action_keyboard())
+            bot.send_message(message.chat.id, f"Enter the Plan Expiry DM (Macro: {{total_profit}}):\n\n<b>Current:</b>\n{global_messages_setup['expiry_dm']}", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
         elif text == 'Edit Ref Join Msg':
             user_state[user_id] = 'msg_setup_ref_join'
-            bot.send_message(message.chat.id, f"Enter the msg sent when someone uses their referral link:\n\nCurrent:\n{global_messages_setup['ref_join_msg']}", reply_markup=get_cancel_action_keyboard())
+            bot.send_message(message.chat.id, f"Enter the msg sent when someone uses their referral link:\n\n<b>Current:</b>\n{global_messages_setup['ref_join_msg']}", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
         elif text == 'Edit Ref Comm Msg':
             user_state[user_id] = 'msg_setup_ref_comm'
-            bot.send_message(message.chat.id, f"Enter the msg sent when earning a referral commission (Macro: {{amount}}):\n\nCurrent:\n{global_messages_setup['ref_commission_msg']}", reply_markup=get_cancel_action_keyboard())
+            bot.send_message(message.chat.id, f"Enter the msg sent when earning a referral commission (Macro: {{amount}}):\n\n<b>Current:</b>\n{global_messages_setup['ref_commission_msg']}", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
         elif text == 'Edit Level Up Msg':
             user_state[user_id] = 'msg_setup_lvl_up'
-            bot.send_message(message.chat.id, f"Enter the msg sent when hitting a new invite level (Macros: {{level}}, {{reward}}):\n\nCurrent:\n{global_messages_setup['level_up_msg']}", reply_markup=get_cancel_action_keyboard())
+            bot.send_message(message.chat.id, f"Enter the msg sent when hitting a new invite level (Macros: {{level}}, {{reward}}):\n\n<b>Current:</b>\n{global_messages_setup['level_up_msg']}", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
         elif text == 'Edit Admin Change Msg':
             user_state[user_id] = 'msg_setup_adm_change'
-            bot.send_message(message.chat.id, f"Enter the msg sent when Admin updates balance directly (Macros: {{btype}}, {{new_bal}}):\n\nCurrent:\n{global_messages_setup['admin_change_msg']}", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+            bot.send_message(message.chat.id, f"Enter the msg sent when Admin updates balance directly (Macros: {{btype}}, {{new_bal}}):\n\n<b>Current:</b>\n{global_messages_setup['admin_change_msg']}", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
         return
 
     if state.startswith('msg_setup_'):
@@ -1740,11 +1749,11 @@ def handle_messages(message):
             bot.send_message(message.chat.id, "🔐 <b>Admin Panel</b>", parse_mode="HTML", reply_markup=get_keyboard(user_id))
         elif text == '💬 Edit Post Message':
             user_state[user_id] = 'wait_invite_msg'
-            bot.send_message(message.chat.id, f"Enter new template (Macros: %levels_display%, %team_deposits%, %affiliate_earnings%):\n\nCurrent:\n{invite_settings['msg_template']}", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+            bot.send_message(message.chat.id, f"Enter new template (Macros: %levels_display%, %team_deposits%, %affiliate_earnings%):\n\n<b>Current:</b>\n{invite_settings['msg_template']}", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
         elif text == '📊 Set Levels':
             user_state[user_id] = 'wait_invite_levels'
             curr_lvl = ", ".join([f"{l['users']}-{l['reward']}" for l in invite_settings['levels']])
-            bot.send_message(message.chat.id, f"Enter comma-separated levels as Users-Reward (e.g. 10-5, 25-15, 100-50):\n\nCurrent: {curr_lvl}", reply_markup=get_cancel_action_keyboard())
+            bot.send_message(message.chat.id, f"Enter comma-separated levels as Users-Reward (e.g. 10-5, 25-15, 100-50):\n\n<b>Current:</b>\n{curr_lvl}", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
         elif text.startswith('⏳ Toggle Loading Bar'):
             invite_settings['use_loading_bar'] = not invite_settings.get('use_loading_bar', True)
             bot.send_message(message.chat.id, "✅ Loading bar toggled.", reply_markup=get_keyboard(user_id))
@@ -4631,7 +4640,22 @@ def run_web_server():
     print(f"🌐 Web server running on port {port} for UptimeRobot & Admin Dashboard.")
     server.serve_forever()
 
+# --- TRUE BACKGROUND HOURLY ALERTS (FIX APPLIED HERE) ---
+def background_accruals_loop():
+    """Runs continuously in the background to send hourly alerts exactly when due, even if user is AFK."""
+    while True:
+        try:
+            for uid in list(user_db.keys()):
+                process_accruals(uid)
+        except Exception as e:
+            print(f"Background Accrual Error: {e}")
+        time.sleep(60) # Scans every 60 seconds independently
+
 if __name__ == '__main__':
+    # Start the Background Accruals Engine (True Hourly Alerts)
+    print("🕒 Starting background accruals and alert thread...")
+    threading.Thread(target=background_accruals_loop, daemon=True).start()
+
     # Start the Web Server (Required for Render and Dashboard)
     threading.Thread(target=run_web_server, daemon=True).start()
     
