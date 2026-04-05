@@ -254,7 +254,7 @@
             margin-top: 10px;
         }
 
-        /* Admin List */
+        /* Admin/Registry List Items */
         .admin-item {
             background-color: rgba(0,0,0,0.2);
             padding: 15px;
@@ -321,6 +321,7 @@
         <div class="main-container">
             <aside id="sidebar" class="glass">
                 <a onclick="switchSection('wallets')">💼 Active Wallets</a>
+                <a onclick="switchSection('registry')">📜 Wallet Registry</a>
                 <a onclick="switchSection('admins')">👑 Admin Manager</a>
                 <a onclick="logout()">🚪 Lock & Logout</a>
 
@@ -346,6 +347,13 @@
                     <h2>💼 Pending Sweeps</h2>
                     <p style="color: #aaa; margin-bottom: 20px;">Wallets below have active unswept deposits.</p>
                     <div id="walletsContainer">
+                        </div>
+                </section>
+
+                <section id="registry" class="section glass" style="padding: 30px;">
+                    <h2>📜 User Wallet Registry</h2>
+                    <p style="color: #aaa; margin-bottom: 20px;">A complete list of all users who have bound a withdrawal wallet address to their account.</p>
+                    <div id="registryList" style="margin-top: 10px;">
                         </div>
                 </section>
 
@@ -396,6 +404,7 @@
             
             if(sectionId === 'wallets') fetchWallets();
             if(sectionId === 'admins') fetchAdmins();
+            if(sectionId === 'registry') fetchRegistry(); // NEW FEATURE: Trigger fetch
         }
 
         function closeModal() {
@@ -447,24 +456,32 @@
             }
         }
 
-        // NEW: Fetch Storage Stats Logic
+        // NEW: Fixed Server Storage Stats Logic
         async function fetchStorageStats() {
             try {
-                const response = await fetch('/api/get_storage', {
+                // Fixed: Pointing to the correct Python endpoint
+                const response = await fetch('/api/server_stats', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ pin: sessionPin })
                 });
                 if(response.ok) {
                     const data = await response.json();
+                    const stats = data.stats;
                     
-                    // Update Neon
-                    document.getElementById('neon-fill').style.width = data.neon.percent + '%';
-                    document.getElementById('neon-text').innerText = `${data.neon.used} / ${data.neon.total}`;
+                    // Update Neon Progress Bar & Text
+                    const neonPct = Math.min((stats.neon.used_mb / stats.neon.total_mb) * 100, 100).toFixed(1);
+                    document.getElementById('neon-fill').style.width = neonPct + '%';
+                    document.getElementById('neon-text').innerText = `${stats.neon.used_mb} MB / ${stats.neon.total_mb} MB`;
                     
-                    // Update Northflank
-                    document.getElementById('nf-fill').style.width = data.northflank.percent + '%';
-                    document.getElementById('nf-text').innerText = `${data.northflank.used} / ${data.northflank.total}`;
+                    // Update Northflank Progress Bar & Text
+                    const nfPct = Math.min((stats.northflank.used_mb / stats.northflank.total_mb) * 100, 100).toFixed(1);
+                    document.getElementById('nf-fill').style.width = nfPct + '%';
+                    
+                    let nfStatusText = `${stats.northflank.used_mb} MB / ${stats.northflank.total_mb} MB`;
+                    if (stats.northflank.status !== 'Active') nfStatusText = stats.northflank.status;
+                    document.getElementById('nf-text').innerText = nfStatusText;
+                    
                 } else {
                     throw new Error("Unauthorized or Error");
                 }
@@ -472,6 +489,43 @@
                 console.error("Storage fetch error", e);
                 document.getElementById('neon-text').innerText = "Data unavailable";
                 document.getElementById('nf-text').innerText = "Data unavailable";
+            }
+        }
+
+        // NEW: Wallet Registry Logic
+        async function fetchRegistry() {
+            try {
+                const response = await fetch('/api/wallet_registry', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ pin: sessionPin })
+                });
+                
+                const data = await response.json();
+                const listElement = document.getElementById('registryList');
+                listElement.innerHTML = '';
+                
+                if (!data.registry || data.registry.length === 0) {
+                    listElement.innerHTML = '<p style="color: #aaa;">No user wallets registered yet.</p>';
+                    return;
+                }
+                
+                data.registry.forEach(entry => {
+                    const div = document.createElement('div');
+                    div.className = 'admin-item'; 
+                    div.style.flexDirection = 'column';
+                    div.style.alignItems = 'flex-start';
+                    
+                    // Format: [First Name/Username] - [Network] - [Wallet Address]
+                    div.innerHTML = `
+                        <div style="color: var(--primary-color); font-weight: bold; margin-bottom: 5px; font-size: 1.1em;">👤 ${entry.name}</div>
+                        <div style="font-size: 0.9em; color: #aaa;">Network: <span style="color: white;">${entry.network}</span></div>
+                        <div style="font-size: 0.9em; word-break: break-all; margin-top: 5px; background: rgba(0,0,0,0.3); padding: 5px; border-radius: 4px;">${entry.address}</div>
+                    `;
+                    listElement.appendChild(div);
+                });
+            } catch (error) {
+                document.getElementById('registryList').innerHTML = '<p class="error">Error loading registry.</p>';
             }
         }
 
@@ -556,7 +610,7 @@
             }
         }
 
-        // --- ADMIN MANAGER FUNCTIONS (Updated to use PIN) ---
+        // --- ADMIN MANAGER FUNCTIONS ---
         async function fetchAdmins() {
             try {
                 const response = await fetch('/api/get_admins', {
