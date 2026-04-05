@@ -4790,16 +4790,26 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                     }
                     url = f"https://api.northflank.com/v1/projects/{NORTHFLANK_PROJECT}/volumes/{NORTHFLANK_VOLUME}"
                     resp = requests.get(url, headers=headers, timeout=5)
+                    
                     if resp.status_code == 200:
                         nf_data = resp.json()
+                        # Extracting metrics safely
                         nf_used_bytes = nf_data.get('data', {}).get('metrics', {}).get('storage', {}).get('usedBytes', 0)
                         nf_total_bytes = nf_data.get('data', {}).get('metrics', {}).get('storage', {}).get('capacityBytes', 1073741824) # Default 1GB
                         
                         stats['northflank']['used_mb'] = round(nf_used_bytes / (1024 * 1024), 2)
                         stats['northflank']['total_mb'] = round(nf_total_bytes / (1024 * 1024), 2)
                         stats['northflank']['status'] = 'Active'
+                    else:
+                        # NEW: Print the exact error from Northflank to your console!
+                        print(f"⚠️ NORTHFLANK API ERROR: {resp.status_code} - {resp.text}")
+                        stats['northflank']['status'] = f'Error {resp.status_code}'
                 except Exception as e:
+                    print(f"⚠️ NORTHFLANK REQUEST FAILED: {e}")
                     stats['northflank']['status'] = 'Fetch Failed'
+            else:
+                print("⚠️ NORTHFLANK SKIPPED: Missing API Key, Project ID, or Volume ID in .env file.")
+                stats['northflank']['status'] = 'Missing .env Data'
 
             self.send_response(200)
             self.send_header('Content-type', 'application/json')
