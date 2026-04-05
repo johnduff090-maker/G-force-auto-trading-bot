@@ -2804,6 +2804,23 @@ def handle_messages(message):
         elif text == '➕ Add Button':
             user_state[user_id] = 'adding_button'
             bot.send_message(message.chat.id, "Send the name for the new button:", reply_markup=get_cancel_action_keyboard())
+        elif text.startswith('📋 Paste "'):
+            clip = user_clipboard.get(user_id)
+            if clip and text == f'📋 Paste "{clip["name"]}"':
+                btn_name = clip['name']
+                old_path = clip['full_path']
+                new_path = f"{current_path}/{btn_name}"
+                
+                if current_path not in menus: menus[current_path] = []
+                
+                if btn_name in menus[current_path]:
+                    bot.send_message(message.chat.id, f"⚠️ A button named '{btn_name}' already exists here.", reply_markup=get_keyboard(user_id))
+                else:
+                    menus[current_path].append(btn_name)
+                    change_menu_paths(old_path, new_path)
+                    user_clipboard.pop(user_id, None)
+                    bot.send_message(message.chat.id, f"📋 Pasted '{btn_name}' successfully!", reply_markup=get_keyboard(user_id))
+            return
         elif text == '📝 Posts Editor':
             user_state[user_id] = 'posts_editing'
             bot.send_message(message.chat.id, "📝 <b>Posts Editor Activated</b>", parse_mode="HTML", reply_markup=get_keyboard(user_id))
