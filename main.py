@@ -4756,7 +4756,7 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps({'registry': registry}).encode())
 
-        # --- NEW FEATURE 1: SERVER RESOURCE METRICS ---
+        # --- FINAL WORKING VERSION: SERVER RESOURCE METRICS ---
         elif parsed_path.path == '/api/server_stats':
             if pin != ADMIN_PIN:
                 self.send_response(401)
@@ -4765,10 +4765,10 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                 
             stats = {
                 'neon': {'used_mb': 0, 'total_mb': 500},
-                'northflank': {'used_mb': 0, 'total_mb': 512, 'status': 'Error'}
+                'northflank': {'used_mb': 0, 'total_mb': 512, 'status': 'Loading...'}
             }
             
-            # 1. Fetch Neon Database Size (Working)
+            # 1. Fetch Neon Database Size
             if DATABASE_URL:
                 try:
                     conn = psycopg2.connect(DATABASE_URL)
@@ -4781,40 +4781,43 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                 except Exception as e:
                     print(f"⚠️ Neon Error: {e}")
 
-            # 2. NEW NORTHFLANK RAM METRICS LOGIC
+            # 2. Fetch Northflank RAM Usage
             if NORTHFLANK_API_KEY and NORTHFLANK_PROJECT:
                 try:
                     headers = {"Authorization": f"Bearer {NORTHFLANK_API_KEY}"}
-                    # This pulls all services in your project
                     url = f"https://api.northflank.com/v1/projects/{NORTHFLANK_PROJECT}/services"
                     resp = requests.get(url, headers=headers, timeout=5)
                     
                     if resp.status_code == 200:
                         data = resp.json()
-                        # Selects the first service found in your project
-                        service_list = data.get('data', [])
-                        if service_list:
-                            service = service_list[0]
+                        services = data.get('data', [])
+                        if services:
+                            # Grabs the RAM usage of your bot
+                            service = services[0]
                             metrics = service.get('metrics', {})
-                            
-                            # Convert Bytes to Megabytes
                             ram_bytes = metrics.get('memory', {}).get('usageBytes', 0)
                             ram_limit = metrics.get('memory', {}).get('limitBytes', 536870912) # Default 512MB
                             
                             stats['northflank']['used_mb'] = round(ram_bytes / (1024 * 1024), 2)
                             stats['northflank']['total_mb'] = round(ram_limit / (1024 * 1024), 2)
                             stats['northflank']['status'] = 'Active'
+                        else:
+                            stats['northflank']['status'] = 'No Services Found'
                     else:
-                        stats['northflank']['status'] = f'API Error {resp.status_code}'
+                        print(f"❌ Northflank API Error: {resp.status_code} - {resp.text}")
+                        stats['northflank']['status'] = f"API Error {resp.status_code}"
                 except Exception as e:
-                    stats['northflank']['status'] = 'Metrics Failed'
+                    print(f"❌ Northflank Connection Error: {e}")
+                    stats['northflank']['status'] = 'Connection Error'
+            else:
+                stats['northflank']['status'] = 'Missing API Keys'
 
             self.send_response(200)
             self.send_header('Content-type', 'application/json')
             self.end_headers()
             self.wfile.write(json.dumps({'stats': stats}).encode())
 
-        # --- Catch-all 404 (KEEP AT THE VERY BOTTOM OF do_POST) ---
+        # --- Catch-all 404 (MUST BE AT THE VERY BOTTOM OF do_POST) ---
         else:
             self.send_response(404)
             self.end_headers()
