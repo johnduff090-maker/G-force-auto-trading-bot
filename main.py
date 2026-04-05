@@ -4756,7 +4756,7 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps({'registry': registry}).encode())
 
-        # --- NEW FEATURE 1: SERVER STORAGE API ---
+        # --- NEW FEATURE 1: SERVER STORAGE API (STATELESS VERSION) ---
         elif parsed_path.path == '/api/server_stats':
             if pin != ADMIN_PIN:
                 self.send_response(401)
@@ -4765,10 +4765,10 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                 
             stats = {
                 'neon': {'used_mb': 0, 'total_mb': 500},
-                'northflank': {'used_mb': 0, 'total_mb': 1024, 'status': 'Error'}
+                'northflank': {'used_mb': 0, 'total_mb': 1, 'status': 'Checking...'}
             }
             
-            # Fetch Neon Database Size
+            # 1. Fetch Neon Database Size
             if DATABASE_URL:
                 try:
                     conn = psycopg2.connect(DATABASE_URL)
@@ -4779,43 +4779,34 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                     conn.close()
                     stats['neon']['used_mb'] = round(size_bytes / (1024 * 1024), 2)
                 except Exception as e:
-                    pass
+                    print(f"⚠️ Neon Storage Error: {e}")
 
-            # Fetch Northflank Storage Metrics (If API Key is provided)
-            if NORTHFLANK_API_KEY and NORTHFLANK_PROJECT and NORTHFLANK_VOLUME:
+            # 2. Fetch Northflank Status (No Volume Required)
+            if NORTHFLANK_API_KEY and NORTHFLANK_PROJECT:
                 try:
-                    headers = {
-                        "Authorization": f"Bearer {NORTHFLANK_API_KEY}",
-                        "Content-Type": "application/json"
-                    }
-                    url = f"https://api.northflank.com/v1/projects/{NORTHFLANK_PROJECT}/volumes/{NORTHFLANK_VOLUME}"
+                    headers = {"Authorization": f"Bearer {NORTHFLANK_API_KEY}"}
+                    # We ping the Project URL instead of a Volume URL
+                    url = f"https://api.northflank.com/v1/projects/{NORTHFLANK_PROJECT}"
                     resp = requests.get(url, headers=headers, timeout=5)
                     
                     if resp.status_code == 200:
-                        nf_data = resp.json()
-                        # Extracting metrics safely
-                        nf_used_bytes = nf_data.get('data', {}).get('metrics', {}).get('storage', {}).get('usedBytes', 0)
-                        nf_total_bytes = nf_data.get('data', {}).get('metrics', {}).get('storage', {}).get('capacityBytes', 1073741824) # Default 1GB
-                        
-                        stats['northflank']['used_mb'] = round(nf_used_bytes / (1024 * 1024), 2)
-                        stats['northflank']['total_mb'] = round(nf_total_bytes / (1024 * 1024), 2)
-                        stats['northflank']['status'] = 'Active'
+                        stats['northflank']['status'] = 'Online'
+                        stats['northflank']['used_mb'] = 1  # Fills the bar to 100%
                     else:
-                        # NEW: Print the exact error from Northflank to your console!
-                        print(f"⚠️ NORTHFLANK API ERROR: {resp.status_code} - {resp.text}")
-                        stats['northflank']['status'] = f'Error {resp.status_code}'
+                        print(f"⚠️ Northflank API Error: {resp.status_code}")
+                        stats['northflank']['status'] = f'API Error {resp.status_code}'
                 except Exception as e:
-                    print(f"⚠️ NORTHFLANK REQUEST FAILED: {e}")
-                    stats['northflank']['status'] = 'Fetch Failed'
+                    print(f"⚠️ Northflank Connection Failed: {e}")
+                    stats['northflank']['status'] = 'Offline'
             else:
-                print("⚠️ NORTHFLANK SKIPPED: Missing API Key, Project ID, or Volume ID in .env file.")
-                stats['northflank']['status'] = 'Missing .env Data'
+                stats['northflank']['status'] = 'Missing API Config'
 
             self.send_response(200)
             self.send_header('Content-type', 'application/json')
             self.end_headers()
             self.wfile.write(json.dumps({'stats': stats}).encode())
             
+        # --- Catch-all 404 (KEEP THIS AT THE BOTTOM OF THE LIST) ---
         else:
             self.send_response(404)
             self.end_headers()
