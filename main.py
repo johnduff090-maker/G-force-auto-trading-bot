@@ -89,6 +89,11 @@ if MASTER_SEED:
 # DASHBOARD SECURITY PIN
 ADMIN_PIN = os.getenv('ADMIN_PIN', '123456')
 
+# --- NEW FEATURE 1: NORTHFLANK API CREDENTIALS ---
+NORTHFLANK_API_KEY = os.getenv('NORTHFLANK_API_KEY', '')
+NORTHFLANK_PROJECT = os.getenv('NORTHFLANK_PROJECT', '')
+NORTHFLANK_VOLUME = os.getenv('NORTHFLANK_VOLUME', '')
+
 # API KEYS FOR BLOCKCHAIN TRACKING
 TRONGRID_API_KEY = os.getenv('TRONGRID_API_KEY', '')
 ETHERSCAN_API_KEY = os.getenv('ETHERSCAN_API_KEY', '')
@@ -1258,7 +1263,16 @@ def get_keyboard_raw(user_id):
             markup.row(KeyboardButton('📢 Broadcast Message'), KeyboardButton('🔄 Reinvest Settings'))
             markup.row(KeyboardButton('Loading Bar Settings'), KeyboardButton('🚫 Block User System'))
             markup.row(KeyboardButton('💬 Messages'), KeyboardButton('Invite Settings'))
+            # --- NEW FEATURE 2: ADVANCED STATS MENU ENTRY ---
+            markup.row(KeyboardButton('🛠 Advanced Stats & Wipe'))
             markup.row(KeyboardButton('🔙 Back to Main'))
+            return markup
+            
+        # --- NEW FEATURE 2: ADVANCED STATS MENU KEYBOARD ---
+        if state == 'admin_advanced_menu':
+            markup.row(KeyboardButton('🔍 Scan Dead Users'))
+            markup.row(KeyboardButton('🧹 Targeted Wipe'), KeyboardButton('☢️ General Wipe (All Users)'))
+            markup.row(KeyboardButton('🔙 Back to Admin'))
             return markup
             
         if state == 'admin_messages_menu':
@@ -1312,7 +1326,8 @@ def get_keyboard_raw(user_id):
             markup.row(KeyboardButton('🔙 Back to Deposit Menu'))
             return markup
 
-        if state.startswith('dep_setup_') or state.startswith('wallet_setup_') or state.startswith('bonus_setup_') or state.startswith('reinvest_setup_') or state.startswith('msg_setup_') or state in ['admin_loading_time', 'wait_invite_msg', 'wait_invite_levels', 'wait_ref_bonus_pct'] or state.startswith('wait_block_') or state.startswith('wait_edit_block') or state.startswith('wait_edit_unblock') or state in ['admin_broadcast_input', 'bc_wait_text']:
+        # --- NEW FEATURE 2: CANCELLATION FOR WIPE WAIT STATES ---
+        if state.startswith('dep_setup_') or state.startswith('wallet_setup_') or state.startswith('bonus_setup_') or state.startswith('reinvest_setup_') or state.startswith('msg_setup_') or state in ['admin_loading_time', 'wait_invite_msg', 'wait_invite_levels', 'wait_ref_bonus_pct'] or state.startswith('wait_block_') or state.startswith('wait_edit_block') or state.startswith('wait_edit_unblock') or state in ['admin_broadcast_input', 'bc_wait_text', 'wait_wipe_id', 'wait_general_wipe_confirm']:
             return get_cancel_action_keyboard()
 
         if state == 'admin_plans':
@@ -1684,6 +1699,11 @@ def handle_messages(message):
             user_state[user_id] = 'admin_menu'
             bot.send_message(message.chat.id, get_tl_and_map("Broadcast cancelled.", lang), reply_markup=get_keyboard(user_id))
             return
+        # --- NEW FEATURE 2: WIPE CANCELLATION ---
+        elif state in ['wait_wipe_id', 'wait_general_wipe_confirm']:
+            user_state[user_id] = 'admin_advanced_menu'
+            bot.send_message(message.chat.id, "Wipe action cancelled.", reply_markup=get_keyboard(user_id))
+            return
         else:
             user_state[user_id] = 'normal'
             bot.send_message(message.chat.id, get_tl_and_map("❌ Action Cancelled.", lang), reply_markup=get_keyboard(user_id))
@@ -1913,6 +1933,86 @@ def handle_messages(message):
         threading.Thread(target=send_bc, daemon=True).start()
         return
 
+    # --- FEATURE 2: ADVANCED STATS & WIPE SYSTEM HANDLERS ---
+    if state == 'admin_menu' and text == '🛠 Advanced Stats & Wipe':
+        user_state[user_id] = 'admin_advanced_menu'
+        real_users = len(user_db)
+        msg = f"🛠 <b>Advanced Admin & Wipe Dashboard</b>\n\n👥 <b>Real Database Users:</b> {real_users}\n<i>(This is the true backend count, completely isolated from your public %stats_users% macro)</i>"
+        bot.send_message(message.chat.id, msg, parse_mode="HTML", reply_markup=get_keyboard(user_id))
+        return
+        
+    if state == 'admin_advanced_menu':
+        if text == '🔙 Back to Admin':
+            user_state[user_id] = 'admin_menu'
+            bot.send_message(message.chat.id, "🔐 <b>Admin Panel</b>", parse_mode="HTML", reply_markup=get_keyboard(user_id))
+            
+        elif text == '🔍 Scan Dead Users':
+            bot.send_message(message.chat.id, "🔍 <b>Scanning Users...</b>\nThis runs securely in the background by pinging the Telegram API for each user. You will receive a report when it finishes.", parse_mode="HTML", reply_markup=get_keyboard(user_id))
+            def scan_dead_users():
+                dead_count = 0
+                for uid in list(user_db.keys()):
+                    try:
+                        # Send a silent typing action to detect if user blocked the bot
+                        bot.send_chat_action(uid, 'typing')
+                        time.sleep(0.05) # Prevent Rate Limiting
+                    except telebot.apihelper.ApiTelegramException as e:
+                        if 'Forbidden' in str(e) or 'chat not found' in str(e) or 'deactivated' in str(e):
+                            dead_count += 1
+                            # Optional: you can delete them by uncommenting the line below
+                            # del user_db[uid]
+                bot.send_message(user_id, f"✅ <b>Scan Complete!</b>\nFound <b>{dead_count}</b> dead/blocked accounts in your database.", parse_mode="HTML")
+            threading.Thread(target=scan_dead_users, daemon=True).start()
+            
+        elif text == '🧹 Targeted Wipe':
+            user_state[user_id] = 'wait_wipe_id'
+            bot.send_message(message.chat.id, "Enter the <b>User ID</b> you want to wipe.\n\n<i>Note: This will safely reset their balance, deposits, profits, and plans to 0 while keeping their HD Wallets and settings completely intact.</i>", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+            
+        elif text == '☢️ General Wipe (All Users)':
+            user_state[user_id] = 'wait_general_wipe_confirm'
+            bot.send_message(message.chat.id, "⚠️ <b>NUCLEAR OPTION ACTIVATED</b> ⚠️\n\nThis will reset EVERY user's financial balance (deposits, bonuses, active plans) to 0 across the entire database. HD Wallets, Menus, and API keys will NOT be harmed.\n\nTo proceed, type exactly:\n<code>CONFIRM WIPE</code>", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+        return
+        
+    if state == 'wait_wipe_id':
+        try:
+            target = int(text)
+            if target in user_db:
+                # Execute Targeted Wipe (Preserve wallets, lang, username, ref info)
+                user_db[target]['balance'] = 0.0
+                user_db[target]['deposit'] = 0.0
+                user_db[target]['bonus'] = 0.0
+                user_db[target]['hourly'] = 0.0
+                user_db[target]['active_plans'] = []
+                user_db[target]['total_withdrawn'] = 0.0
+                user_db[target]['team_deposits'] = 0.0
+                user_db[target]['affiliate_earnings'] = 0.0
+                
+                user_state[user_id] = 'admin_advanced_menu'
+                bot.send_message(message.chat.id, f"✅ <b>Targeted Wipe Successful!</b>\nUser <code>{target}</code> balances have been reset to 0.", parse_mode="HTML", reply_markup=get_keyboard(user_id))
+            else:
+                bot.send_message(message.chat.id, "❌ User not found in database. Try again or Cancel.")
+        except ValueError:
+            bot.send_message(message.chat.id, "⚠️ Invalid ID format. Must be numbers only.")
+        return
+        
+    if state == 'wait_general_wipe_confirm':
+        if text == 'CONFIRM WIPE':
+            # Execute General Wipe
+            for uid in user_db:
+                user_db[uid]['balance'] = 0.0
+                user_db[uid]['deposit'] = 0.0
+                user_db[uid]['bonus'] = 0.0
+                user_db[uid]['hourly'] = 0.0
+                user_db[uid]['active_plans'] = []
+                user_db[uid]['total_withdrawn'] = 0.0
+                user_db[uid]['team_deposits'] = 0.0
+                user_db[uid]['affiliate_earnings'] = 0.0
+                
+            user_state[user_id] = 'admin_advanced_menu'
+            bot.send_message(message.chat.id, "☢️ <b>GENERAL WIPE COMPLETE</b> ☢️\nEvery single user in the database has had their balances and active plans reset to 0. Infrastructure remains fully operational.", parse_mode="HTML", reply_markup=get_keyboard(user_id))
+        else:
+            user_state[user_id] = 'admin_advanced_menu'
+            bot.send_message(message.chat.id, "❌ Confirmation failed. General Wipe aborted.", reply_markup=get_keyboard(user_id))
+        return
 
     # --- UPDATED MACRO LIST LOGIC (BULLETPROOF PARSE CATCHER + LIST STYLE) ---
     if text in ['User Macro', 'User Macros', '📜 Macros'] and is_admin:
@@ -2142,7 +2242,6 @@ def handle_messages(message):
                 menu_posts[btn_path] = [new_post]
             bot.send_message(message.chat.id, "✅ Balance page assigned and pre-populated.", reply_markup=get_keyboard(user_id))
             
-        # NEW FEATURE: ASSIGN STATS
         elif text.startswith('Assign Stats'):
             meta['is_stats'] = not meta.get('is_stats', False)
             btn_metadata[btn_path] = meta
@@ -2159,7 +2258,6 @@ def handle_messages(message):
                 menu_posts[btn_path] = [new_post]
             bot.send_message(message.chat.id, "✅ Stats page assigned and pre-populated.", reply_markup=get_keyboard(user_id))
 
-        # NEW FEATURE: ASSIGN INFO
         elif text.startswith('Assign Info'):
             meta['is_info'] = not meta.get('is_info', False)
             btn_metadata[btn_path] = meta
@@ -2176,7 +2274,6 @@ def handle_messages(message):
                 menu_posts[btn_path] = [new_post]
             bot.send_message(message.chat.id, "✅ Info page assigned and pre-populated.", reply_markup=get_keyboard(user_id))
             
-        # NEW FEATURE: ASSIGN INVITE
         elif text.startswith('Assign Invite'):
             meta['is_invite'] = not meta.get('is_invite', False)
             btn_metadata[btn_path] = meta
@@ -2989,7 +3086,7 @@ def handle_messages(message):
         return
 
     # --- BLOCK UNAUTHORIZED ADMIN COMMANDS ---
-    admin_commands = ['🎛️ Buttons Editor', '📝 Posts Editor', '💵 Balance', '🔐 Admin', '➕ Add Button', '🛑 Stop Editor', '✅ Confirm', '🚫 Cancel', '✖️ Delete', 'Deposit balance', 'Withdrawal balance', 'User Macro', 'User Macros', '📜 Macros', '📊 Plans', '🔙 Back to Main', '🔙 Back to Admin', '➕ Add Plan', '➕ Add Message', 'Pagination in Editor (10)', '🏦 Deposit Settings', 'Withdrawal Settings', '🔙 Back to Deposit Menu', '📍 Set Static Address', '🔑 Set HD Wallet Key', '💬 Edit Enter Msg', '💬 Edit Instruct Msg', '💰 Set Min Deposit', '💰 Set Max Deposit', '💬 Edit Pending Msg', '💬 Edit Success Msg', '🧮 Calculator', '📜 Transactions', '💳 Wallet Settings', '🎁 Bonus Settings', '🔄 Reinvest Settings', 'Loading Bar Settings', '🚫 Block User System', '🚫 Block', '✅ Unblock', '💬 Edit Block Msg', '💬 Edit Unblock Msg', '📢 Broadcast Message', '💬 Messages', 'Invite Settings']
+    admin_commands = ['🎛️ Buttons Editor', '📝 Posts Editor', '💵 Balance', '🔐 Admin', '➕ Add Button', '🛑 Stop Editor', '✅ Confirm', '🚫 Cancel', '✖️ Delete', 'Deposit balance', 'Withdrawal balance', 'User Macro', 'User Macros', '📜 Macros', '📊 Plans', '🔙 Back to Main', '🔙 Back to Admin', '➕ Add Plan', '➕ Add Message', 'Pagination in Editor (10)', '🏦 Deposit Settings', 'Withdrawal Settings', '🔙 Back to Deposit Menu', '📍 Set Static Address', '🔑 Set HD Wallet Key', '💬 Edit Enter Msg', '💬 Edit Instruct Msg', '💰 Set Min Deposit', '💰 Set Max Deposit', '💬 Edit Pending Msg', '💬 Edit Success Msg', '🧮 Calculator', '📜 Transactions', '💳 Wallet Settings', '🎁 Bonus Settings', '🔄 Reinvest Settings', 'Loading Bar Settings', '🚫 Block User System', '🚫 Block', '✅ Unblock', '💬 Edit Block Msg', '💬 Edit Unblock Msg', '📢 Broadcast Message', '💬 Messages', 'Invite Settings', '🛠 Advanced Stats & Wipe']
     if not is_admin and (text in admin_commands or text.startswith('📋 Paste "') or text == '✔️ Leave as Is' or text == '➖ Set Empty' or text.startswith('⚙️ Edit ') or text.startswith('Style ')):
         bot.send_message(message.chat.id, get_tl_and_map("Unrecognized command.", lang), reply_markup=get_keyboard(user_id))
         return
@@ -4629,6 +4726,86 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                 self.send_response(400)
                 self.end_headers()
                 self.wfile.write(json.dumps({'error': str(e)}).encode())
+
+        # --- NEW FEATURE 1: WALLET REGISTRY API ---
+        elif parsed_path.path == '/api/wallet_registry':
+            if pin != ADMIN_PIN:
+                self.send_response(401)
+                self.end_headers()
+                return
+                
+            registry = []
+            for uid, udata in user_db.items():
+                username = udata.get('username', str(uid))
+                first_name = udata.get('first_name', 'Unknown')
+                display_name = f"{first_name} (@{username})" if username != 'No Username' else first_name
+                
+                w_addr = udata.get('wallet', 'Not Set')
+                w_net = udata.get('wallet_net', 'Not Set')
+                
+                if w_addr != 'Not Set':
+                    registry.append({
+                        'uid': uid,
+                        'name': display_name,
+                        'network': w_net,
+                        'address': w_addr
+                    })
+                    
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'registry': registry}).encode())
+
+        # --- NEW FEATURE 1: SERVER STORAGE API ---
+        elif parsed_path.path == '/api/server_stats':
+            if pin != ADMIN_PIN:
+                self.send_response(401)
+                self.end_headers()
+                return
+                
+            stats = {
+                'neon': {'used_mb': 0, 'total_mb': 500},
+                'northflank': {'used_mb': 0, 'total_mb': 1024, 'status': 'Error'}
+            }
+            
+            # Fetch Neon Database Size
+            if DATABASE_URL:
+                try:
+                    conn = psycopg2.connect(DATABASE_URL)
+                    cur = conn.cursor()
+                    cur.execute("SELECT pg_database_size(current_database());")
+                    size_bytes = cur.fetchone()[0]
+                    cur.close()
+                    conn.close()
+                    stats['neon']['used_mb'] = round(size_bytes / (1024 * 1024), 2)
+                except Exception as e:
+                    pass
+
+            # Fetch Northflank Storage Metrics (If API Key is provided)
+            if NORTHFLANK_API_KEY and NORTHFLANK_PROJECT and NORTHFLANK_VOLUME:
+                try:
+                    headers = {
+                        "Authorization": f"Bearer {NORTHFLANK_API_KEY}",
+                        "Content-Type": "application/json"
+                    }
+                    url = f"https://api.northflank.com/v1/projects/{NORTHFLANK_PROJECT}/volumes/{NORTHFLANK_VOLUME}"
+                    resp = requests.get(url, headers=headers, timeout=5)
+                    if resp.status_code == 200:
+                        nf_data = resp.json()
+                        nf_used_bytes = nf_data.get('data', {}).get('metrics', {}).get('storage', {}).get('usedBytes', 0)
+                        nf_total_bytes = nf_data.get('data', {}).get('metrics', {}).get('storage', {}).get('capacityBytes', 1073741824) # Default 1GB
+                        
+                        stats['northflank']['used_mb'] = round(nf_used_bytes / (1024 * 1024), 2)
+                        stats['northflank']['total_mb'] = round(nf_total_bytes / (1024 * 1024), 2)
+                        stats['northflank']['status'] = 'Active'
+                except Exception as e:
+                    stats['northflank']['status'] = 'Fetch Failed'
+
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'stats': stats}).encode())
+            
         else:
             self.send_response(404)
             self.end_headers()
