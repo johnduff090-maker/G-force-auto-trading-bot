@@ -161,7 +161,8 @@ def save_database():
         'processed_txids': list(processed_txids), # Convert set to list for database
         'blocked_users': list(blocked_users),     # NEW: Blocked users saving
         'block_settings': block_settings,         # NEW: Block messages saving
-        'dynamic_stats': dynamic_stats            # NEW: Dynamic Stats saving
+        'dynamic_stats': dynamic_stats,           # NEW: Dynamic Stats saving
+        'invite_settings': invite_settings        # NEW: Invite settings saving
     }
     try:
         conn = psycopg2.connect(DATABASE_URL)
@@ -236,7 +237,11 @@ global_ui_settings = db_data.get('global_ui_settings', {'loading_bar_style': '1'
 # NEW: Global Messages Manager Data
 global_messages_setup = db_data.get('global_messages_setup', {
     'hourly_dm': '💰You have received +{hourly_amount} USDT hourly profits.\nTime left: {time_left}',
-    'expiry_dm': '💰You have received a total profit of +{total_profit} USDT.\n⏰Trading Completed'
+    'expiry_dm': '💰You have received a total profit of +{total_profit} USDT.\n⏰Trading Completed',
+    'ref_join_msg': '🎉 1 user joined via your link!',
+    'ref_commission_msg': '💵 You received +{amount} USDT from your referral activity!',
+    'level_up_msg': '🎉 Congratulations! You reached Referral Level {level} and earned {reward} USDT!',
+    'admin_change_msg': '🔔 Admin Notice\n\nYour {btype} balance is now: <b>{new_bal}</b>'
 })
 
 # NEW: Reinvest Settings Persistent Data
@@ -244,6 +249,14 @@ reinvest_settings = db_data.get('reinvest_settings', {
     'msg_success': '✅ <b>Reinvest Successful!</b>\nYou have successfully reinvested <b>$%amount%</b> into <b>%plan_name%</b>.',
     'msg_fail': '❌ You can not invest right now: You need at least %min_amount% USDT to invest!',
     'inline_deposit_text': '🏦 Deposit Now'
+})
+
+# NEW: Invite Settings Persistent Data
+invite_settings = db_data.get('invite_settings', {
+    'levels': [{'users': 10, 'reward': 5.0}, {'users': 25, 'reward': 15.0}, {'users': 100, 'reward': 50.0}],
+    'msg_template': "👥 <b>Referral Statistics</b>\n\n%levels_display%\n\n👥 My team Deposits: %team_deposits% USDT\n♾ Earnings: %affiliate_earnings% USDT",
+    'use_loading_bar': True,
+    'ref_commission_pct': 0.0
 })
 
 deposit_settings = db_data.get('deposit_settings', {
@@ -337,7 +350,8 @@ def get_default_metadata():
         'is_language': False,
         'is_reinvest': False,
         'is_stats': False,   # NEW
-        'is_info': False     # NEW
+        'is_info': False,    # NEW
+        'is_invite': False   # NEW
     }
 
 def init_user_db(message):
@@ -359,7 +373,11 @@ def init_user_db(message):
             'transactions': [],
             'ref_count': 0,
             'total_withdrawn': 0.0,
-            'lang': 'en'
+            'lang': 'en',
+            'referred_by': None,           # NEW
+            'team_deposits': 0.0,          # NEW
+            'affiliate_earnings': 0.0,     # NEW
+            'claimed_levels': []           # NEW
         }
     else:
         user_db[user_id]['first_name'] = message.from_user.first_name or 'Unknown'
@@ -375,6 +393,10 @@ def init_user_db(message):
         if 'ref_count' not in user_db[user_id]: user_db[user_id]['ref_count'] = 0
         if 'total_withdrawn' not in user_db[user_id]: user_db[user_id]['total_withdrawn'] = 0.0
         if 'lang' not in user_db[user_id]: user_db[user_id]['lang'] = 'en'
+        if 'referred_by' not in user_db[user_id]: user_db[user_id]['referred_by'] = None
+        if 'team_deposits' not in user_db[user_id]: user_db[user_id]['team_deposits'] = 0.0
+        if 'affiliate_earnings' not in user_db[user_id]: user_db[user_id]['affiliate_earnings'] = 0.0
+        if 'claimed_levels' not in user_db[user_id]: user_db[user_id]['claimed_levels'] = []
     
     return is_new_user
 
@@ -433,6 +455,24 @@ def generate_user_wallet(user_id, currency):
         print(f"Wallet Gen Error: {e}")
         return "GEN_ERROR", "GEN_ERROR"
 
+# --- HELPER: REFERRAL COMMISSION ENGINE ---
+def process_referral_commission(user_id, amount, is_deposit=True):
+    inviter = user_db.get(user_id, {}).get('referred_by')
+    if inviter and inviter in user_db:
+        pct = invite_settings.get('ref_commission_pct', 0.0)
+        if pct > 0:
+            comm = amount * (pct / 100.0)
+            user_db[inviter]['balance'] += comm
+            user_db[inviter]['affiliate_earnings'] += comm
+            log_tx(inviter, "Referral Commission", comm)
+            try:
+                lang = user_db[inviter].get('lang', 'en')
+                msg = global_messages_setup.get('ref_commission_msg', '💵 You received +{amount} USDT from your referral activity!')
+                msg = msg.replace('{amount}', f"{comm:.2f}")
+                bot.send_message(inviter, get_tl_and_map(msg, lang))
+            except: pass
+        if is_deposit:
+            user_db[inviter]['team_deposits'] += amount
 
 # --- MASTER API SCANNER HELPER (100% AUTOMATED NETWORK SCAN) ---
 def check_address_for_new_deposit(addr, curr):
@@ -541,6 +581,8 @@ def blockchain_watcher_loop():
                             user_db[uid]['deposit'] += usd_value
                             user_db[uid]['wallets'][curr]['total_deposited'] = user_db[uid]['wallets'][curr].get('total_deposited', 0.0) + usd_value
                             log_tx(uid, f"Auto-Deposit ({curr})", usd_value)
+                            
+                            process_referral_commission(uid, usd_value, is_deposit=True) # NEW: Commission
                             
                             try:
                                 conf = deposit_settings[curr]
@@ -710,6 +752,22 @@ def replace_macros(text, user_id, full_path, action_data=None):
     t = t.replace('%plan_names%', plan_names)
     t = t.replace('%ref_count%', str(ref_count))
     t = t.replace('%withdrawn%', f"{total_withdrawn:.2f}")
+    t = t.replace('%team_deposits%', f"{bals.get('team_deposits', 0):.2f}")
+    t = t.replace('%affiliate_earnings%', f"{bals.get('affiliate_earnings', 0):.2f}")
+    
+    bot_info = bot.get_me()
+    t = t.replace('%ref_link%', f"https://t.me/{bot_info.username}?start={user_id}")
+    
+    # DYNAMIC LEVELS MACRO
+    if '%levels_display%' in t:
+        levels_str = ""
+        for i, level in enumerate(invite_settings['levels']):
+            req = level['users']
+            current = min(bals.get('ref_count', 0), req)
+            pct = int((current / req) * 10) if req > 0 else 10
+            bar = "■" * pct + "▯" * (10 - pct)
+            levels_str += f"{i+1}° Level: [{bar}] {req} users\n"
+        t = t.replace('%levels_display%', levels_str)
     
     # NEW DYNAMIC STATS MACROS
     t = t.replace('%stats_invest%', f"{dynamic_stats['investments']:,.2f}")
@@ -939,6 +997,11 @@ def send_path_content(chat_id, user_id, path, is_editing=False, reply_keyboard=N
         markup = InlineKeyboardMarkup()
         custom_inlines = p.get('custom_inlines', [])
         
+        # APPEND NEW GEN LINK BUTTON DYNAMICALLY IF ASSIGN INVITE IS TRUE
+        if meta.get('is_invite') and i == len(posts) - 1 and not is_editing:
+            btn_text = get_tl_and_map("🔗 Generate Referral Link", lang)
+            markup.row(InlineKeyboardButton(btn_text, callback_data='cb_gen_ref_link'))
+
         if custom_inlines:
             rows_dict = {}
             for b in custom_inlines:
@@ -1074,6 +1137,7 @@ def get_settings_keyboard(full_path):
     reinv_text = "☑️ On" if meta.get('is_reinvest') else "⬜️ Off"
     stat_text = "☑️ On" if meta.get('is_stats') else "⬜️ Off"
     info_text = "☑️ On" if meta.get('is_info') else "⬜️ Off"
+    invt_text = "☑️ On" if meta.get('is_invite') else "⬜️ Off"
     
     markup.row(KeyboardButton(f'Random Message ({rm_text})'), KeyboardButton(f'Admin Only ({ao_text})'))
     markup.row(KeyboardButton(f'Invisible ({inv_text})'), KeyboardButton('Subscription (Join)'))
@@ -1082,7 +1146,7 @@ def get_settings_keyboard(full_path):
     markup.row(KeyboardButton(f'Assign Withdrawal ({w_text})'), KeyboardButton(f'Assign Wallet ({wal_text})'))
     markup.row(KeyboardButton(f'Assign Bonus ({bon_text})'), KeyboardButton(f'Assign Balance ({bal_text})'))
     markup.row(KeyboardButton(f'Assign Reinvest ({reinv_text})'), KeyboardButton(f'Assign Stats ({stat_text})'))
-    markup.row(KeyboardButton(f'Assign Info ({info_text})'))
+    markup.row(KeyboardButton(f'Assign Info ({info_text})'), KeyboardButton(f'Assign Invite ({invt_text})'))
     markup.row(KeyboardButton('Assign Editor'), KeyboardButton('Form Settings'), KeyboardButton('Shop Editor'))
     markup.row(KeyboardButton('🔙 Exit Button Settings'))
     return markup
@@ -1143,6 +1207,14 @@ def get_admin_block_keyboard():
     markup.row(KeyboardButton('🔙 Back to Admin'))
     return markup
 
+def get_admin_invite_keyboard():
+    markup = ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.row(KeyboardButton('💬 Edit Post Message'), KeyboardButton('📊 Set Levels'))
+    lb_text = "☑️ On" if invite_settings.get('use_loading_bar', True) else "⬜️ Off"
+    markup.row(KeyboardButton(f'⏳ Toggle Loading Bar ({lb_text})'))
+    markup.row(KeyboardButton('🔙 Back to Admin'))
+    return markup
+
 def get_assign_command_keyboard(full_path):
     markup = ReplyKeyboardMarkup(resize_keyboard=True)
     meta = btn_metadata.get(full_path, get_default_metadata())
@@ -1182,12 +1254,14 @@ def get_keyboard_raw(user_id):
             markup.row(KeyboardButton('🧮 Calculator'), KeyboardButton('📜 Transactions'))
             markup.row(KeyboardButton('📢 Broadcast Message'), KeyboardButton('🔄 Reinvest Settings'))
             markup.row(KeyboardButton('Loading Bar Settings'), KeyboardButton('🚫 Block User System'))
-            markup.row(KeyboardButton('💬 Messages'))
+            markup.row(KeyboardButton('💬 Messages'), KeyboardButton('Invite Settings'))
             markup.row(KeyboardButton('🔙 Back to Main'))
             return markup
             
         if state == 'admin_messages_menu':
             markup.row(KeyboardButton('Edit Hourly DM'), KeyboardButton('Edit Expiry DM'))
+            markup.row(KeyboardButton('Edit Ref Join Msg'), KeyboardButton('Edit Ref Comm Msg'))
+            markup.row(KeyboardButton('Edit Level Up Msg'), KeyboardButton('Edit Admin Change Msg'))
             markup.row(KeyboardButton('🔙 Back to Admin'))
             return markup
 
@@ -1212,6 +1286,7 @@ def get_keyboard_raw(user_id):
         if state == 'admin_reinvest_menu': return get_admin_reinvest_keyboard()
         if state == 'admin_loading_bar': return get_loading_bar_keyboard()
         if state == 'admin_block_menu': return get_admin_block_keyboard()
+        if state == 'admin_invite_menu': return get_admin_invite_keyboard()
 
         if state == 'admin_dep_menu':
             for c in deposit_settings.keys():
@@ -1234,7 +1309,7 @@ def get_keyboard_raw(user_id):
             markup.row(KeyboardButton('🔙 Back to Deposit Menu'))
             return markup
 
-        if state.startswith('dep_setup_') or state.startswith('wallet_setup_') or state.startswith('bonus_setup_') or state.startswith('reinvest_setup_') or state.startswith('msg_setup_') or state == 'admin_loading_time' or state.startswith('wait_block_') or state.startswith('wait_edit_block') or state.startswith('wait_edit_unblock') or state in ['admin_broadcast_input', 'bc_wait_text']:
+        if state.startswith('dep_setup_') or state.startswith('wallet_setup_') or state.startswith('bonus_setup_') or state.startswith('reinvest_setup_') or state.startswith('msg_setup_') or state in ['admin_loading_time', 'wait_invite_msg', 'wait_invite_levels', 'wait_ref_bonus_pct'] or state.startswith('wait_block_') or state.startswith('wait_edit_block') or state.startswith('wait_edit_unblock') or state in ['admin_broadcast_input', 'bc_wait_text']:
             return get_cancel_action_keyboard()
 
         if state == 'admin_plans':
@@ -1404,6 +1479,10 @@ def send_welcome(message):
         bot.send_message(message.chat.id, get_tl_and_map(block_settings['msg_block'], lang), parse_mode="HTML")
         return
 
+    # Payload Extraction for Deep Linking
+    parts = message.text.split()
+    payload = parts[1] if len(parts) > 1 else None
+
     # --- NEW: HOMEPAGE HARDCODED LOADING BAR (Independent) ---
     frames = ["[▯▯▯▯▯▯▯▯▯▯] 0%", "[■■▯▯▯▯▯▯▯▯] 20%", "[■■■■▯▯▯▯▯▯] 40%", "[■■■■■■▯▯▯▯] 60%", "[■■■■■■■■▯▯] 80%", "[■■■■■■■■■■] 100%"]
     try:
@@ -1419,6 +1498,30 @@ def send_welcome(message):
     # --- NEW: NEW USER ADMIN ALERT & PRELOAD ---
     is_new = init_user_db(message)
     if is_new:
+        # Check Referral Payload
+        if payload and payload.isdigit():
+            inviter_id = int(payload)
+            if inviter_id in user_db and inviter_id != user_id:
+                user_db[user_id]['referred_by'] = inviter_id
+                user_db[inviter_id]['ref_count'] += 1
+                try:
+                    lang = user_db[inviter_id].get('lang', 'en')
+                    bot.send_message(inviter_id, get_tl_and_map(global_messages_setup['ref_join_msg'], lang))
+                except: pass
+                
+                # Check level thresholds
+                for i, level in enumerate(invite_settings['levels']):
+                    if user_db[inviter_id]['ref_count'] >= level['users']:
+                        if i not in user_db[inviter_id].get('claimed_levels', []):
+                            user_db[inviter_id]['balance'] += level['reward']
+                            if 'claimed_levels' not in user_db[inviter_id]: user_db[inviter_id]['claimed_levels'] = []
+                            user_db[inviter_id]['claimed_levels'].append(i)
+                            log_tx(inviter_id, f"Referral Level {i+1} Reward", level['reward'])
+                            try:
+                                msg = global_messages_setup['level_up_msg'].replace('{level}', str(i+1)).replace('{reward}', str(level['reward']))
+                                bot.send_message(inviter_id, get_tl_and_map(msg, lang))
+                            except: pass
+
         total_bot_users = len(user_db)
         alert_msg = (
             f"🆕 New User!\n"
@@ -1426,6 +1529,9 @@ def send_welcome(message):
             f"Total: [{total_bot_users}]\n"
             f"Name: {message.from_user.first_name}"
         )
+        if user_db[user_id]['referred_by']:
+            alert_msg += f"\nReferred by: <code>{user_db[user_id]['referred_by']}</code>"
+            
         for admin in ADMIN_IDS:
             try: bot.send_message(admin, alert_msg, parse_mode="HTML")
             except: pass
@@ -1514,6 +1620,72 @@ def handle_messages(message):
     selected_btn = user_selected_button.get(user_id)
     full_path = f"{current_path}/{selected_btn}" if selected_btn else None
 
+    # --- HANDLE USER ABORTING OR NAVIGATING FIRST (BEFORE STATE LOGIC CATCHES IT) ---
+    if text in ['❌ Cancel Action', '❌ Cancel', '🚫 Cancel Action']:
+        if state in ['posts_adding', 'posts_insert_after', 'posts_rep_text', 'posts_rep_all']:
+            user_state[user_id] = 'posts_editing'
+            bot.send_message(message.chat.id, get_tl_and_map("Action cancelled.", lang), reply_markup=get_keyboard(user_id))
+            send_path_content(message.chat.id, user_id, current_path, True)
+            return
+        elif state in ['pi_wait_mode', 'pi_wait_text', 'pi_wait_data', 'pi_wait_buy_plan', 'pi_wait_deposit']:
+            user_state[user_id] = 'posts_editing'
+            bot.send_message(message.chat.id, get_tl_and_map("Inline editor action cancelled.", lang), reply_markup=get_keyboard(user_id))
+            send_path_content(message.chat.id, user_id, current_path, True)
+            return
+        elif state.startswith('bal_') or state in ['adding_button', 'renaming_button', 'assign_plan', 'admin_wait_tx_id', 'assign_command', 'wait_ref_bonus_pct']:
+            fallback = 'bal_menu' if state.startswith('bal_') or state == 'wait_ref_bonus_pct' else 'editing'
+            user_state[user_id] = fallback
+            bot.send_message(message.chat.id, get_tl_and_map("Action cancelled.", lang), reply_markup=get_keyboard(user_id))
+            return
+        elif state.startswith('dep_setup_'):
+            user_state[user_id] = 'admin_dep_settings'
+            bot.send_message(message.chat.id, get_tl_and_map("Deposit setting cancelled.", lang), reply_markup=get_keyboard(user_id))
+            return
+        elif state.startswith('plan_setup_'):
+            user_state[user_id] = 'admin_plan_settings'
+            bot.send_message(message.chat.id, get_tl_and_map("Plan setting cancelled.", lang), reply_markup=get_keyboard(user_id))
+            return
+        elif state.startswith('w_setup_'):
+            user_state[user_id] = 'admin_w_menu'
+            bot.send_message(message.chat.id, get_tl_and_map("Withdrawal setup cancelled.", lang), reply_markup=get_keyboard(user_id))
+            return
+        elif state.startswith('wallet_setup_'):
+            user_state[user_id] = 'admin_wallet_menu'
+            bot.send_message(message.chat.id, get_tl_and_map("Wallet setup cancelled.", lang), reply_markup=get_keyboard(user_id))
+            return
+        elif state.startswith('bonus_setup_'):
+            user_state[user_id] = 'admin_bonus_menu'
+            bot.send_message(message.chat.id, get_tl_and_map("Bonus setup cancelled.", lang), reply_markup=get_keyboard(user_id))
+            return
+        elif state.startswith('reinvest_setup_'):
+            user_state[user_id] = 'admin_reinvest_menu'
+            bot.send_message(message.chat.id, get_tl_and_map("Reinvest setting cancelled.", lang), reply_markup=get_keyboard(user_id))
+            return
+        elif state.startswith('msg_setup_'):
+            user_state[user_id] = 'admin_messages_menu'
+            bot.send_message(message.chat.id, get_tl_and_map("Action cancelled.", lang), reply_markup=get_keyboard(user_id))
+            return
+        elif state in ['wait_invite_msg', 'wait_invite_levels']:
+            user_state[user_id] = 'admin_invite_menu'
+            bot.send_message(message.chat.id, get_tl_and_map("Action cancelled.", lang), reply_markup=get_keyboard(user_id))
+            return
+        elif state == 'admin_loading_time':
+            user_state[user_id] = 'admin_loading_bar'
+            bot.send_message(message.chat.id, get_tl_and_map("Action cancelled.", lang), reply_markup=get_keyboard(user_id))
+            return
+        elif state.startswith('wait_block') or state.startswith('wait_edit_block') or state.startswith('wait_edit_unblock'):
+            user_state[user_id] = 'admin_block_menu'
+            bot.send_message(message.chat.id, get_tl_and_map("Action cancelled.", lang), reply_markup=get_keyboard(user_id))
+            return
+        elif state in ['admin_broadcast_input', 'admin_broadcast_action', 'admin_broadcast_preview', 'bc_wait_mode', 'bc_wait_text', 'bc_wait_data']:
+            user_state[user_id] = 'admin_menu'
+            bot.send_message(message.chat.id, get_tl_and_map("Broadcast cancelled.", lang), reply_markup=get_keyboard(user_id))
+            return
+        else:
+            user_state[user_id] = 'normal'
+            bot.send_message(message.chat.id, get_tl_and_map("❌ Action Cancelled.", lang), reply_markup=get_keyboard(user_id))
+            return
+
     # --- ADMIN MESSAGES MANAGER ---
     if state == 'admin_menu' and text == '💬 Messages':
         user_state[user_id] = 'admin_messages_menu'
@@ -1530,14 +1702,72 @@ def handle_messages(message):
         elif text == 'Edit Expiry DM':
             user_state[user_id] = 'msg_setup_expiry'
             bot.send_message(message.chat.id, f"Enter the Plan Expiry DM (Macro: {{total_profit}}):\n\nCurrent:\n{global_messages_setup['expiry_dm']}", reply_markup=get_cancel_action_keyboard())
+        elif text == 'Edit Ref Join Msg':
+            user_state[user_id] = 'msg_setup_ref_join'
+            bot.send_message(message.chat.id, f"Enter the msg sent when someone uses their referral link:\n\nCurrent:\n{global_messages_setup['ref_join_msg']}", reply_markup=get_cancel_action_keyboard())
+        elif text == 'Edit Ref Comm Msg':
+            user_state[user_id] = 'msg_setup_ref_comm'
+            bot.send_message(message.chat.id, f"Enter the msg sent when earning a referral commission (Macro: {{amount}}):\n\nCurrent:\n{global_messages_setup['ref_commission_msg']}", reply_markup=get_cancel_action_keyboard())
+        elif text == 'Edit Level Up Msg':
+            user_state[user_id] = 'msg_setup_lvl_up'
+            bot.send_message(message.chat.id, f"Enter the msg sent when hitting a new invite level (Macros: {{level}}, {{reward}}):\n\nCurrent:\n{global_messages_setup['level_up_msg']}", reply_markup=get_cancel_action_keyboard())
+        elif text == 'Edit Admin Change Msg':
+            user_state[user_id] = 'msg_setup_adm_change'
+            bot.send_message(message.chat.id, f"Enter the msg sent when Admin updates balance directly (Macros: {{btype}}, {{new_bal}}):\n\nCurrent:\n{global_messages_setup['admin_change_msg']}", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
         return
 
     if state.startswith('msg_setup_'):
         if state == 'msg_setup_hourly': global_messages_setup['hourly_dm'] = formatted_text
         elif state == 'msg_setup_expiry': global_messages_setup['expiry_dm'] = formatted_text
+        elif state == 'msg_setup_ref_join': global_messages_setup['ref_join_msg'] = formatted_text
+        elif state == 'msg_setup_ref_comm': global_messages_setup['ref_commission_msg'] = formatted_text
+        elif state == 'msg_setup_lvl_up': global_messages_setup['level_up_msg'] = formatted_text
+        elif state == 'msg_setup_adm_change': global_messages_setup['admin_change_msg'] = formatted_text
         
         user_state[user_id] = 'admin_messages_menu'
         bot.send_message(message.chat.id, "✅ Message updated successfully!", reply_markup=get_keyboard(user_id))
+        return
+
+    # --- ADMIN INVITE MENU SETTINGS ---
+    if state == 'admin_menu' and text == 'Invite Settings':
+        user_state[user_id] = 'admin_invite_menu'
+        bot.send_message(message.chat.id, "👥 <b>Invite Settings Manager</b>", parse_mode="HTML", reply_markup=get_keyboard(user_id))
+        return
+        
+    if state == 'admin_invite_menu':
+        if text == '🔙 Back to Admin':
+            user_state[user_id] = 'admin_menu'
+            bot.send_message(message.chat.id, "🔐 <b>Admin Panel</b>", parse_mode="HTML", reply_markup=get_keyboard(user_id))
+        elif text == '💬 Edit Post Message':
+            user_state[user_id] = 'wait_invite_msg'
+            bot.send_message(message.chat.id, f"Enter new template (Macros: %levels_display%, %team_deposits%, %affiliate_earnings%):\n\nCurrent:\n{invite_settings['msg_template']}", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+        elif text == '📊 Set Levels':
+            user_state[user_id] = 'wait_invite_levels'
+            curr_lvl = ", ".join([f"{l['users']}-{l['reward']}" for l in invite_settings['levels']])
+            bot.send_message(message.chat.id, f"Enter comma-separated levels as Users-Reward (e.g. 10-5, 25-15, 100-50):\n\nCurrent: {curr_lvl}", reply_markup=get_cancel_action_keyboard())
+        elif text.startswith('⏳ Toggle Loading Bar'):
+            invite_settings['use_loading_bar'] = not invite_settings.get('use_loading_bar', True)
+            bot.send_message(message.chat.id, "✅ Loading bar toggled.", reply_markup=get_keyboard(user_id))
+        return
+        
+    if state == 'wait_invite_msg':
+        invite_settings['msg_template'] = formatted_text
+        user_state[user_id] = 'admin_invite_menu'
+        bot.send_message(message.chat.id, "✅ Message updated.", reply_markup=get_keyboard(user_id))
+        return
+        
+    if state == 'wait_invite_levels':
+        try:
+            parts = text.split(',')
+            new_lvls = []
+            for p in parts:
+                u, r = p.split('-')
+                new_lvls.append({'users': int(u.strip()), 'reward': float(r.strip())})
+            invite_settings['levels'] = new_lvls
+            user_state[user_id] = 'admin_invite_menu'
+            bot.send_message(message.chat.id, "✅ Levels updated.", reply_markup=get_keyboard(user_id))
+        except:
+            bot.send_message(message.chat.id, "⚠️ Invalid format. Use Users-Reward, separated by commas (e.g. 10-5, 25-15).")
         return
 
     # --- NEW: BROADCAST SYSTEM ENTRY ---
@@ -1712,75 +1942,18 @@ def handle_messages(message):
             "<b>NEW DYNAMIC STATS MACROS:</b>\n"
             "• <code>%stats_invest%</code> - Dynamic total investments\n"
             "• <code>%stats_withdrawn%</code> - Dynamic total withdrawn\n"
-            "• <code>%stats_users%</code> - Dynamic total users\n"
+            "• <code>%stats_users%</code> - Dynamic total users\n\n"
+            "<b>NEW REFERRAL MACROS:</b>\n"
+            "• <code>%levels_display%</code> - Visual loading bars for levels\n"
+            "• <code>%team_deposits%</code> - Total team deposited amount\n"
+            "• <code>%affiliate_earnings%</code> - Total affiliate earned amount\n"
+            "• <code>%ref_link%</code> - Generates pure text referral link"
         )
         try:
             bot.send_message(message.chat.id, macros_msg, parse_mode="HTML", reply_markup=get_keyboard(user_id))
         except Exception as e:
             bot.send_message(message.chat.id, "Error rendering Macros.", reply_markup=get_keyboard(user_id))
         return
-
-    # --- HANDLE USER ABORTING OR NAVIGATING ---
-    if text in ['❌ Cancel Action', '❌ Cancel', '🚫 Cancel Action']:
-        if state in ['posts_adding', 'posts_insert_after', 'posts_rep_text', 'posts_rep_all']:
-            user_state[user_id] = 'posts_editing'
-            bot.send_message(message.chat.id, get_tl_and_map("Action cancelled.", lang), reply_markup=get_keyboard(user_id))
-            send_path_content(message.chat.id, user_id, current_path, True)
-            return
-        elif state in ['pi_wait_mode', 'pi_wait_text', 'pi_wait_data', 'pi_wait_buy_plan', 'pi_wait_deposit']:
-            user_state[user_id] = 'posts_editing'
-            bot.send_message(message.chat.id, get_tl_and_map("Inline editor action cancelled.", lang), reply_markup=get_keyboard(user_id))
-            send_path_content(message.chat.id, user_id, current_path, True)
-            return
-        elif state.startswith('bal_') or state in ['adding_button', 'renaming_button', 'assign_plan', 'admin_wait_tx_id', 'assign_command']:
-            fallback = 'bal_menu' if state.startswith('bal_') else 'editing'
-            user_state[user_id] = fallback
-            bot.send_message(message.chat.id, get_tl_and_map("Action cancelled.", lang), reply_markup=get_keyboard(user_id))
-            return
-        elif state.startswith('dep_setup_'):
-            user_state[user_id] = 'admin_dep_settings'
-            bot.send_message(message.chat.id, get_tl_and_map("Deposit setting cancelled.", lang), reply_markup=get_keyboard(user_id))
-            return
-        elif state.startswith('plan_setup_'):
-            user_state[user_id] = 'admin_plan_settings'
-            bot.send_message(message.chat.id, get_tl_and_map("Plan setting cancelled.", lang), reply_markup=get_keyboard(user_id))
-            return
-        elif state.startswith('w_setup_'):
-            user_state[user_id] = 'admin_w_menu'
-            bot.send_message(message.chat.id, get_tl_and_map("Withdrawal setup cancelled.", lang), reply_markup=get_keyboard(user_id))
-            return
-        elif state.startswith('wallet_setup_'):
-            user_state[user_id] = 'admin_wallet_menu'
-            bot.send_message(message.chat.id, get_tl_and_map("Wallet setup cancelled.", lang), reply_markup=get_keyboard(user_id))
-            return
-        elif state.startswith('bonus_setup_'):
-            user_state[user_id] = 'admin_bonus_menu'
-            bot.send_message(message.chat.id, get_tl_and_map("Bonus setup cancelled.", lang), reply_markup=get_keyboard(user_id))
-            return
-        elif state.startswith('reinvest_setup_'):
-            user_state[user_id] = 'admin_reinvest_menu'
-            bot.send_message(message.chat.id, get_tl_and_map("Reinvest setting cancelled.", lang), reply_markup=get_keyboard(user_id))
-            return
-        elif state.startswith('msg_setup_'):
-            user_state[user_id] = 'admin_messages_menu'
-            bot.send_message(message.chat.id, get_tl_and_map("Action cancelled.", lang), reply_markup=get_keyboard(user_id))
-            return
-        elif state == 'admin_loading_time':
-            user_state[user_id] = 'admin_loading_bar'
-            bot.send_message(message.chat.id, get_tl_and_map("Action cancelled.", lang), reply_markup=get_keyboard(user_id))
-            return
-        elif state.startswith('wait_block') or state.startswith('wait_edit_block') or state.startswith('wait_edit_unblock'):
-            user_state[user_id] = 'admin_block_menu'
-            bot.send_message(message.chat.id, get_tl_and_map("Action cancelled.", lang), reply_markup=get_keyboard(user_id))
-            return
-        elif state in ['admin_broadcast_input', 'admin_broadcast_action', 'admin_broadcast_preview', 'bc_wait_mode', 'bc_wait_text', 'bc_wait_data']:
-            user_state[user_id] = 'admin_menu'
-            bot.send_message(message.chat.id, get_tl_and_map("Broadcast cancelled.", lang), reply_markup=get_keyboard(user_id))
-            return
-        else:
-            user_state[user_id] = 'normal'
-            bot.send_message(message.chat.id, get_tl_and_map("❌ Action Cancelled.", lang), reply_markup=get_keyboard(user_id))
-            return
 
     # --- FIX 1: NAVIGATION BUTTONS (HOME, BACK, EXITS) ---
     if text == '🏠 Home':
@@ -1993,6 +2166,23 @@ def handle_messages(message):
                 }
                 menu_posts[btn_path] = [new_post]
             bot.send_message(message.chat.id, "✅ Info page assigned and pre-populated.", reply_markup=get_keyboard(user_id))
+            
+        # NEW FEATURE: ASSIGN INVITE
+        elif text.startswith('Assign Invite'):
+            meta['is_invite'] = not meta.get('is_invite', False)
+            btn_metadata[btn_path] = meta
+            
+            if meta['is_invite'] and not menu_posts.get(btn_path):
+                post_id = str(uuid.uuid4())[:8]
+                new_post = {
+                    'id': post_id,
+                    'type': 'text',
+                    'text': invite_settings['msg_template'],
+                    'photo': None,
+                    'custom_inlines': []
+                }
+                menu_posts[btn_path] = [new_post]
+            bot.send_message(message.chat.id, "✅ Invite page assigned and pre-populated.", reply_markup=get_keyboard(user_id))
 
         elif text.startswith('Random Message'):
             meta['random_message'] = not meta.get('random_message', False)
@@ -2790,7 +2980,7 @@ def handle_messages(message):
         return
 
     # --- BLOCK UNAUTHORIZED ADMIN COMMANDS ---
-    admin_commands = ['🎛️ Buttons Editor', '📝 Posts Editor', '💵 Balance', '🔐 Admin', '➕ Add Button', '🛑 Stop Editor', '✅ Confirm', '🚫 Cancel', '✖️ Delete', 'Deposit balance', 'Withdrawal balance', 'User Macro', 'User Macros', '📜 Macros', '📊 Plans', '🔙 Back to Main', '🔙 Back to Admin', '➕ Add Plan', '➕ Add Message', 'Pagination in Editor (10)', '🏦 Deposit Settings', 'Withdrawal Settings', '🔙 Back to Deposit Menu', '📍 Set Static Address', '🔑 Set HD Wallet Key', '💬 Edit Enter Msg', '💬 Edit Instruct Msg', '💰 Set Min Deposit', '💰 Set Max Deposit', '💬 Edit Pending Msg', '💬 Edit Success Msg', '🧮 Calculator', '📜 Transactions', '💳 Wallet Settings', '🎁 Bonus Settings', '🔄 Reinvest Settings', 'Loading Bar Settings', '🚫 Block User System', '🚫 Block', '✅ Unblock', '💬 Edit Block Msg', '💬 Edit Unblock Msg', '📢 Broadcast Message', '💬 Messages']
+    admin_commands = ['🎛️ Buttons Editor', '📝 Posts Editor', '💵 Balance', '🔐 Admin', '➕ Add Button', '🛑 Stop Editor', '✅ Confirm', '🚫 Cancel', '✖️ Delete', 'Deposit balance', 'Withdrawal balance', 'User Macro', 'User Macros', '📜 Macros', '📊 Plans', '🔙 Back to Main', '🔙 Back to Admin', '➕ Add Plan', '➕ Add Message', 'Pagination in Editor (10)', '🏦 Deposit Settings', 'Withdrawal Settings', '🔙 Back to Deposit Menu', '📍 Set Static Address', '🔑 Set HD Wallet Key', '💬 Edit Enter Msg', '💬 Edit Instruct Msg', '💰 Set Min Deposit', '💰 Set Max Deposit', '💬 Edit Pending Msg', '💬 Edit Success Msg', '🧮 Calculator', '📜 Transactions', '💳 Wallet Settings', '🎁 Bonus Settings', '🔄 Reinvest Settings', 'Loading Bar Settings', '🚫 Block User System', '🚫 Block', '✅ Unblock', '💬 Edit Block Msg', '💬 Edit Unblock Msg', '📢 Broadcast Message', '💬 Messages', 'Invite Settings']
     if not is_admin and (text in admin_commands or text.startswith('📋 Paste "') or text == '✔️ Leave as Is' or text == '➖ Set Empty' or text.startswith('⚙️ Edit ') or text.startswith('Style ')):
         bot.send_message(message.chat.id, get_tl_and_map("Unrecognized command.", lang), reply_markup=get_keyboard(user_id))
         return
@@ -2978,7 +3168,18 @@ def handle_messages(message):
             user_state[user_id] = 'bal_set_id'
             bot.send_message(message.chat.id, "Enter the User ID to SET balance:", reply_markup=get_keyboard(user_id))
         elif text == 'Referral Bonus':
-            bot.send_message(message.chat.id, "Referral Bonus settings... (Ready for logic)", reply_markup=get_keyboard(user_id))
+            user_state[user_id] = 'wait_ref_bonus_pct'
+            bot.send_message(message.chat.id, f"Enter the Referral Bonus Commission Percentage (e.g. 5 for 5%):\n\nCurrent: {invite_settings.get('ref_commission_pct', 0.0)}%", reply_markup=get_cancel_action_keyboard())
+        return
+
+    if state == 'wait_ref_bonus_pct':
+        try:
+            pct = float(text)
+            invite_settings['ref_commission_pct'] = pct
+            user_state[user_id] = 'bal_menu'
+            bot.send_message(message.chat.id, f"✅ Referral Bonus Commission set to {pct}%.", reply_markup=get_keyboard(user_id))
+        except ValueError:
+            bot.send_message(message.chat.id, "⚠️ Invalid percentage. Numbers only.")
         return
 
     if state == 'bal_get_id':
@@ -3051,10 +3252,13 @@ def handle_messages(message):
             
             bot.send_message(message.chat.id, f"✅ <b>Success!</b>\nNew {btype.title()} balance for <code>{target}</code> is <b>{new_bal:.2f}</b>.", parse_mode="HTML")
             
-            if admin_bal_notify.get(user_id, True) and comment:
+            if admin_bal_notify.get(user_id, True):
                 try:
                     target_lang = user_db.get(target, {}).get('lang', 'en')
-                    msg = f"🔔 <b>Admin Notice</b>\n{comment}\n\nYour {btype.title()} is now: <b>{new_bal:.2f}</b>"
+                    if comment:
+                        msg = f"🔔 <b>Admin Notice</b>\n{comment}\n\nYour {btype.title()} is now: <b>{new_bal:.2f}</b>"
+                    else:
+                        msg = global_messages_setup['admin_change_msg'].replace('{btype}', btype.title()).replace('{new_bal}', f"{new_bal:.2f}")
                     bot.send_message(target, get_tl_and_map(msg, target_lang), parse_mode="HTML")
                     bot.send_message(message.chat.id, f"✅ Notification securely sent to user {target}.")
                 except Exception:
@@ -3469,6 +3673,33 @@ def handle_inline(call):
         bot.answer_callback_query(call.id, get_tl_and_map("🚫 You are currently blocked.", lang), show_alert=True)
         return
 
+    # --- NEW: REFERRAL LINK GENERATION INLINE ---
+    if call.data == 'cb_gen_ref_link':
+        bot.answer_callback_query(call.id)
+        bot_info = bot.get_me()
+        ref_link = f"https://t.me/{bot_info.username}?start={user_id}"
+        
+        if invite_settings.get('use_loading_bar', True):
+            style_opt = global_ui_settings.get('loading_bar_style', '1')
+            frames = {
+                '1': ["[▯▯▯▯▯▯▯▯▯▯] 0%", "[■■▯▯▯▯▯▯▯▯] 20%", "[■■■■▯▯▯▯▯▯] 40%", "[■■■■■■▯▯▯▯] 60%", "[■■■■■■■■▯▯] 80%", "[■■■■■■■■■■] 100%"],
+                '2': ["░░░░░░░░░░ 0%", "▓▓░░░░░░░░ 20%", "▓▓▓▓░░░░░░ 40%", "▓▓▓▓▓▓░░░░ 60%", "▓▓▓▓▓▓▓▓░░ 80%", "▓▓▓▓▓▓▓▓▓▓ 100%"],
+                '3': ["▒▒▒▒▒▒▒▒▒▒ 0%", "██▒▒▒▒▒▒▒▒ 20%", "████▒▒▒▒▒▒ 40%", "██████▒▒▒▒ 60%", "████████▒▒ 80%", "██████████ 100%"]
+            }
+            bars = frames.get(str(style_opt), frames['1'])
+            
+            loading_msg = bot.send_message(call.message.chat.id, get_tl_and_map(f"⏳ <b>Generating Unique Link...</b>\n{bars[0]}", lang), parse_mode="HTML")
+            for bar in bars[1:]:
+                time.sleep(0.4)
+                try: bot.edit_message_text(get_tl_and_map(f"⏳ <b>Generating Unique Link...</b>\n{bar}", lang), call.message.chat.id, loading_msg.message_id, parse_mode="HTML")
+                except: pass
+                
+            try: bot.delete_message(call.message.chat.id, loading_msg.message_id)
+            except: pass
+            
+        bot.send_message(call.message.chat.id, get_tl_and_map(f"✅ <b>Your Unique Referral Link:</b>\n\n{ref_link}", lang), parse_mode="HTML")
+        return
+
     # --- NEW: TRANSACTION PAGINATION INLINE ---
     if call.data.startswith('cb_txpage_'):
         page = int(call.data.replace('cb_txpage_', ''))
@@ -3668,6 +3899,8 @@ def handle_inline(call):
             user_db[user_id]['wallets'][curr]['total_deposited'] = user_db[user_id]['wallets'][curr].get('total_deposited', 0.0) + usd_value
             log_tx(user_id, f"Deposit ({curr})", usd_value)
             
+            process_referral_commission(user_id, usd_value, is_deposit=True) # NEW: Referral Commission
+            
             admin_msg = f"🟢 <b>DEPOSIT CONFIRMED (MANUAL)</b>\nUser: <code>{user_id}</code>\nCurrency: {curr.replace('_', ' ')}\nCrypto Amount: {crypto_amount}\nUSD Credited: ${usd_value:.2f}\nHash (TXID): <code>{txid_found}</code>"
             for admin in ADMIN_IDS:
                 try: bot.send_message(admin, admin_msg, parse_mode="HTML")
@@ -3804,6 +4037,8 @@ def handle_inline(call):
         if target in user_db:
             user_db[target]['deposit'] += amt
             log_tx(target, f"Deposit ({curr.replace('_', ' ')})", amt)
+            
+            process_referral_commission(target, amt, is_deposit=True) # NEW: Referral Commission
             
             msg_success = conf.get('msg_success', "✅ <b>Deposit Approved!</b>\n<b>$%usd_amount%</b> has been successfully added to your deposit balance.")
             msg_success = msg_success.replace('%usd_amount%', f"{amt:.2f}").replace('%crypto_amount%', '')
