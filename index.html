@@ -130,6 +130,47 @@
             background: rgba(255, 255, 255, 0.1);
         }
 
+        /* NEW: Server Resources Progress Bars */
+        .resource-block {
+            padding: 20px;
+            margin-top: auto; /* Pushes it to the bottom of the sidebar */
+            border-top: 1px solid var(--glass-border);
+        }
+
+        .resource-title {
+            font-size: 0.9em;
+            color: #aaa;
+            margin-bottom: 15px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            font-weight: bold;
+        }
+
+        .progress-bar {
+            width: 100%;
+            background: rgba(0, 0, 0, 0.4);
+            border-radius: 4px;
+            height: 8px;
+            margin: 5px 0;
+            overflow: hidden;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: var(--primary-color);
+            border-radius: 4px;
+            transition: width 1s ease-in-out;
+        }
+
+        .resource-text {
+            font-size: 0.8em;
+            text-align: right;
+            margin-top: 2px;
+            margin-bottom: 15px;
+            color: #ddd;
+            font-family: monospace;
+        }
+
         /* Content Area */
         main {
             flex: 1;
@@ -282,6 +323,22 @@
                 <a onclick="switchSection('wallets')">💼 Active Wallets</a>
                 <a onclick="switchSection('admins')">👑 Admin Manager</a>
                 <a onclick="logout()">🚪 Lock & Logout</a>
+
+                <div class="resource-block">
+                    <div class="resource-title">Server Resources</div>
+                    
+                    <div style="font-size: 0.85em; font-weight: bold; color: #4caf50;">PostgreSQL (Neon)</div>
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="neon-fill" style="width: 0%; background: #4caf50;"></div>
+                    </div>
+                    <div class="resource-text" id="neon-text">Loading...</div>
+
+                    <div style="font-size: 0.85em; font-weight: bold; color: #00aaff; margin-top: 10px;">Hosting (Northflank)</div>
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="nf-fill" style="width: 0%; background: #00aaff;"></div>
+                    </div>
+                    <div class="resource-text" id="nf-text">Loading...</div>
+                </div>
             </aside>
 
             <main>
@@ -381,11 +438,40 @@
                     document.getElementById('login-screen').style.display = 'none';
                     document.getElementById('dashboard-screen').style.display = 'flex';
                     fetchWallets();
+                    fetchStorageStats(); // NEW: Fetch storage data on successful login
                 } else {
                     errDiv.innerText = '❌ Incorrect PIN';
                 }
             } catch (e) {
                 errDiv.innerText = 'Backend connection error.';
+            }
+        }
+
+        // NEW: Fetch Storage Stats Logic
+        async function fetchStorageStats() {
+            try {
+                const response = await fetch('/api/get_storage', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ pin: sessionPin })
+                });
+                if(response.ok) {
+                    const data = await response.json();
+                    
+                    // Update Neon
+                    document.getElementById('neon-fill').style.width = data.neon.percent + '%';
+                    document.getElementById('neon-text').innerText = `${data.neon.used} / ${data.neon.total}`;
+                    
+                    // Update Northflank
+                    document.getElementById('nf-fill').style.width = data.northflank.percent + '%';
+                    document.getElementById('nf-text').innerText = `${data.northflank.used} / ${data.northflank.total}`;
+                } else {
+                    throw new Error("Unauthorized or Error");
+                }
+            } catch (e) {
+                console.error("Storage fetch error", e);
+                document.getElementById('neon-text').innerText = "Data unavailable";
+                document.getElementById('nf-text').innerText = "Data unavailable";
             }
         }
 
