@@ -4756,7 +4756,7 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps({'registry': registry}).encode())
 
-        # --- NEW FEATURE 1: SERVER STORAGE API (STATELESS VERSION) ---
+        # --- NEW FEATURE 1: SERVER RESOURCE METRICS ---
         elif parsed_path.path == '/api/server_stats':
             if pin != ADMIN_PIN:
                 self.send_response(401)
@@ -4765,10 +4765,10 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                 
             stats = {
                 'neon': {'used_mb': 0, 'total_mb': 500},
-                'northflank': {'used_mb': 0, 'total_mb': 1, 'status': 'Checking...'}
+                'northflank': {'used_mb': 0, 'total_mb': 512, 'status': 'Error'}
             }
             
-            # 1. Fetch Neon Database Size
+            # 1. Fetch Neon Database Size (Working)
             if DATABASE_URL:
                 try:
                     conn = psycopg2.connect(DATABASE_URL)
@@ -4779,34 +4779,42 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                     conn.close()
                     stats['neon']['used_mb'] = round(size_bytes / (1024 * 1024), 2)
                 except Exception as e:
-                    print(f"⚠️ Neon Storage Error: {e}")
+                    print(f"⚠️ Neon Error: {e}")
 
-            # 2. Fetch Northflank Status (No Volume Required)
+            # 2. NEW NORTHFLANK RAM METRICS LOGIC
             if NORTHFLANK_API_KEY and NORTHFLANK_PROJECT:
                 try:
                     headers = {"Authorization": f"Bearer {NORTHFLANK_API_KEY}"}
-                    # We ping the Project URL instead of a Volume URL
-                    url = f"https://api.northflank.com/v1/projects/{NORTHFLANK_PROJECT}"
+                    # This pulls all services in your project
+                    url = f"https://api.northflank.com/v1/projects/{NORTHFLANK_PROJECT}/services"
                     resp = requests.get(url, headers=headers, timeout=5)
                     
                     if resp.status_code == 200:
-                        stats['northflank']['status'] = 'Online'
-                        stats['northflank']['used_mb'] = 1  # Fills the bar to 100%
+                        data = resp.json()
+                        # Selects the first service found in your project
+                        service_list = data.get('data', [])
+                        if service_list:
+                            service = service_list[0]
+                            metrics = service.get('metrics', {})
+                            
+                            # Convert Bytes to Megabytes
+                            ram_bytes = metrics.get('memory', {}).get('usageBytes', 0)
+                            ram_limit = metrics.get('memory', {}).get('limitBytes', 536870912) # Default 512MB
+                            
+                            stats['northflank']['used_mb'] = round(ram_bytes / (1024 * 1024), 2)
+                            stats['northflank']['total_mb'] = round(ram_limit / (1024 * 1024), 2)
+                            stats['northflank']['status'] = 'Active'
                     else:
-                        print(f"⚠️ Northflank API Error: {resp.status_code}")
                         stats['northflank']['status'] = f'API Error {resp.status_code}'
                 except Exception as e:
-                    print(f"⚠️ Northflank Connection Failed: {e}")
-                    stats['northflank']['status'] = 'Offline'
-            else:
-                stats['northflank']['status'] = 'Missing API Config'
+                    stats['northflank']['status'] = 'Metrics Failed'
 
             self.send_response(200)
             self.send_header('Content-type', 'application/json')
             self.end_headers()
             self.wfile.write(json.dumps({'stats': stats}).encode())
-            
-        # --- Catch-all 404 (KEEP THIS AT THE BOTTOM OF THE LIST) ---
+
+        # --- Catch-all 404 (KEEP AT THE VERY BOTTOM OF do_POST) ---
         else:
             self.send_response(404)
             self.end_headers()
