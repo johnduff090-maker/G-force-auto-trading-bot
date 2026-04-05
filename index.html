@@ -456,39 +456,43 @@
             }
         }
 
-        // NEW: Fixed Server Storage Stats Logic
+        // NEW: Updated RAM and Database Resource Metrics
         async function fetchStorageStats() {
             try {
-                // Fixed: Pointing to the correct Python endpoint
+                // Calls the Python API
                 const response = await fetch('/api/server_stats', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ pin: sessionPin })
                 });
+
                 if(response.ok) {
                     const data = await response.json();
-                    const stats = data.stats;
+                    const s = data.stats; // This matches 'stats' from Python
                     
-                    // Update Neon Progress Bar & Text
-                    const neonPct = Math.min((stats.neon.used_mb / stats.neon.total_mb) * 100, 100).toFixed(1);
+                    // 1. Neon (Database Storage)
+                    const neonPct = Math.min((s.neon.used_mb / s.neon.total_mb) * 100, 100).toFixed(1);
                     document.getElementById('neon-fill').style.width = neonPct + '%';
-                    document.getElementById('neon-text').innerText = `${stats.neon.used_mb} MB / ${stats.neon.total_mb} MB`;
+                    document.getElementById('neon-text').innerText = `${s.neon.used_mb} MB / ${s.neon.total_mb} MB`;
                     
-                    // Update Northflank Progress Bar & Text
-                    const nfPct = Math.min((stats.northflank.used_mb / stats.northflank.total_mb) * 100, 100).toFixed(1);
+                    // 2. Northflank (RAM Usage)
+                    const nfPct = Math.min((s.northflank.used_mb / s.northflank.total_mb) * 100, 100).toFixed(1);
                     document.getElementById('nf-fill').style.width = nfPct + '%';
                     
-                    let nfStatusText = `${stats.northflank.used_mb} MB / ${stats.northflank.total_mb} MB`;
-                    if (stats.northflank.status !== 'Active') nfStatusText = stats.northflank.status;
-                    document.getElementById('nf-text').innerText = nfStatusText;
+                    // If the API status is Active, show the RAM numbers
+                    if (s.northflank.status === 'Active' || s.northflank.status === 'Online') {
+                        document.getElementById('nf-text').innerText = `${s.northflank.used_mb} MB / ${s.northflank.total_mb} MB RAM`;
+                    } else {
+                        document.getElementById('nf-text').innerText = s.northflank.status;
+                    }
                     
                 } else {
-                    throw new Error("Unauthorized or Error");
+                    throw new Error("Unauthorized or API Error");
                 }
             } catch (e) {
                 console.error("Storage fetch error", e);
-                document.getElementById('neon-text').innerText = "Data unavailable";
-                document.getElementById('nf-text').innerText = "Data unavailable";
+                document.getElementById('neon-text').innerText = "Database offline";
+                document.getElementById('nf-text').innerText = "Hosting offline";
             }
         }
 
