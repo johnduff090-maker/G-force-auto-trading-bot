@@ -456,10 +456,9 @@
             }
         }
 
-        // NEW: Updated RAM and Database Resource Metrics
+        // --- FINAL WORKING VERSION: FETCH SERVER STATS ---
         async function fetchStorageStats() {
             try {
-                // Calls the Python API
                 const response = await fetch('/api/server_stats', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -468,34 +467,34 @@
 
                 if(response.ok) {
                     const data = await response.json();
-                    const s = data.stats; // This matches 'stats' from Python
+                    const s = data.stats;
                     
-                    // 1. Neon (Database Storage)
+                    // 1. Update Neon (Database Storage)
                     const neonPct = Math.min((s.neon.used_mb / s.neon.total_mb) * 100, 100).toFixed(1);
                     document.getElementById('neon-fill').style.width = neonPct + '%';
                     document.getElementById('neon-text').innerText = `${s.neon.used_mb} MB / ${s.neon.total_mb} MB`;
                     
-                    // 2. Northflank (RAM Usage)
+                    // 2. Update Northflank (RAM Usage)
                     const nfPct = Math.min((s.northflank.used_mb / s.northflank.total_mb) * 100, 100).toFixed(1);
-                    document.getElementById('nf-fill').style.width = nfPct + '%';
                     
-                    // If the API status is Active, show the RAM numbers
-                    if (s.northflank.status === 'Active' || s.northflank.status === 'Online') {
+                    if (s.northflank.status === 'Active') {
+                        document.getElementById('nf-fill').style.width = nfPct + '%';
                         document.getElementById('nf-text').innerText = `${s.northflank.used_mb} MB / ${s.northflank.total_mb} MB RAM`;
                     } else {
+                        // If there is an error, show the error text and empty the bar
+                        document.getElementById('nf-fill').style.width = '0%';
                         document.getElementById('nf-text').innerText = s.northflank.status;
                     }
                     
                 } else {
-                    throw new Error("Unauthorized or API Error");
+                    throw new Error("API Error");
                 }
             } catch (e) {
                 console.error("Storage fetch error", e);
-                document.getElementById('neon-text').innerText = "Database offline";
-                document.getElementById('nf-text').innerText = "Hosting offline";
+                document.getElementById('neon-text').innerText = "Database Offline";
+                document.getElementById('nf-text').innerText = "Hosting Offline";
             }
         }
-
         // NEW: Wallet Registry Logic
         async function fetchRegistry() {
             try {
