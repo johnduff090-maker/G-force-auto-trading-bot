@@ -3596,9 +3596,6 @@ def handle_messages(message):
     if state == 'renaming_button':
         old_name = user_selected_button.get(user_id)
         
-        if state == 'renaming_button':
-        old_name = user_selected_button.get(user_id)
-        
         forbidden_names = ['🏠 Home', '🔙 Back'] + admin_commands
         if text in forbidden_names:
             bot.send_message(message.chat.id, "⚠️ You cannot use a system command as a button name. Please type a unique name, or click '❌ Cancel Action'.", reply_markup=get_cancel_action_keyboard())
