@@ -130,10 +130,10 @@
             background: rgba(255, 255, 255, 0.1);
         }
 
-        /* NEW: Server Resources Progress Bars */
+        /* Server Resources Progress Bars */
         .resource-block {
             padding: 20px;
-            margin-top: auto; /* Pushes it to the bottom of the sidebar */
+            margin-top: auto; 
             border-top: 1px solid var(--glass-border);
         }
 
@@ -328,17 +328,23 @@
                 <div class="resource-block">
                     <div class="resource-title">Server Resources</div>
                     
-                    <div style="font-size: 0.85em; font-weight: bold; color: #4caf50;">Aiven PostgreSQL</div>
+                    <div style="font-size: 0.85em; font-weight: bold; color: #ff4d4d;">CPU Power (1 Core)</div>
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="cpu-fill" style="width: 0%; background: #ff4d4d;"></div>
+                    </div>
+                    <div class="resource-text" id="cpu-text">0%</div>
+
+                    <div style="font-size: 0.85em; font-weight: bold; color: #00aaff; margin-top: 10px;">RAM Usage (1 GB)</div>
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="ram-fill" style="width: 0%; background: #00aaff;"></div>
+                    </div>
+                    <div class="resource-text" id="ram-text">0 MB / 1024 MB</div>
+
+                    <div style="font-size: 0.85em; font-weight: bold; color: #4caf50; margin-top: 10px;">Aiven Storage (1 GB)</div>
                     <div class="progress-bar">
                         <div class="progress-fill" id="aiven-fill" style="width: 0%; background: #4caf50;"></div>
                     </div>
-                    <div class="resource-text" id="aiven-text">Loading...</div>
-
-                    <div style="font-size: 0.85em; font-weight: bold; color: #00aaff; margin-top: 10px;">Hosting (Northflank)</div>
-                    <div class="progress-bar">
-                        <div class="progress-fill" id="nf-fill" style="width: 0%; background: #00aaff;"></div>
-                    </div>
-                    <div class="resource-text" id="nf-text">Loading...</div>
+                    <div class="resource-text" id="aiven-text">0 MB / 1024 MB</div>
                 </div>
             </aside>
 
@@ -404,7 +410,7 @@
             
             if(sectionId === 'wallets') fetchWallets();
             if(sectionId === 'admins') fetchAdmins();
-            if(sectionId === 'registry') fetchRegistry(); // NEW FEATURE: Trigger fetch
+            if(sectionId === 'registry') fetchRegistry(); 
         }
 
         function closeModal() {
@@ -447,7 +453,8 @@
                     document.getElementById('login-screen').style.display = 'none';
                     document.getElementById('dashboard-screen').style.display = 'flex';
                     fetchWallets();
-                    fetchStorageStats(); // NEW: Fetch storage data on successful login
+                    fetchStorageStats(); 
+                    setInterval(fetchStorageStats, 5000); // REFRESH STATS EVERY 5 SECONDS
                 } else {
                     errDiv.innerText = '❌ Incorrect PIN';
                 }
@@ -456,7 +463,6 @@
             }
         }
 
-        // --- FINAL WORKING VERSION: FETCH SERVER STATS ---
         async function fetchStorageStats() {
             try {
                 const response = await fetch('/api/server_stats', {
@@ -469,33 +475,26 @@
                     const data = await response.json();
                     const s = data.stats;
                     
-                    // 1. Update Aiven (Database Storage)
-                    const aivenPct = Math.min((s.aiven.used_mb / s.aiven.total_mb) * 100, 100).toFixed(1);
+                    // 1. Update CPU
+                    document.getElementById('cpu-fill').style.width = s.bot_cpu.percent + '%';
+                    document.getElementById('cpu-text').innerText = s.bot_cpu.percent + '%';
+
+                    // 2. Update RAM (Targeting 1024MB)
+                    const ramPct = Math.min((s.bot_ram.used_mb / s.bot_ram.total_mb) * 100, 100).toFixed(1);
+                    document.getElementById('ram-fill').style.width = ramPct + '%';
+                    document.getElementById('ram-text').innerText = `${s.bot_ram.used_mb} MB / 1024 MB`;
+
+                    // 3. Update Aiven Storage (Targeting 1024MB)
+                    const aivenPct = Math.min((s.aiven_storage.used_mb / s.aiven_storage.total_mb) * 100, 100).toFixed(1);
                     document.getElementById('aiven-fill').style.width = aivenPct + '%';
-                    document.getElementById('aiven-text').innerText = `${s.aiven.used_mb} MB / ${s.aiven.total_mb} MB`;
+                    document.getElementById('aiven-text').innerText = `${s.aiven_storage.used_mb} MB / 1024 MB`;
                     
-                    // 2. Update Northflank (RAM Usage)
-                    const nfPct = Math.min((s.northflank.used_mb / s.northflank.total_mb) * 100, 100).toFixed(1);
-                    
-                    if (s.northflank.status === 'Active') {
-                        document.getElementById('nf-fill').style.width = nfPct + '%';
-                        document.getElementById('nf-text').innerText = `${s.northflank.used_mb} MB / ${s.northflank.total_mb} MB RAM`;
-                    } else {
-                        // If there is an error, show the error text and empty the bar
-                        document.getElementById('nf-fill').style.width = '0%';
-                        document.getElementById('nf-text').innerText = s.northflank.status;
-                    }
-                    
-                } else {
-                    throw new Error("API Error");
                 }
             } catch (e) {
                 console.error("Storage fetch error", e);
-                document.getElementById('aiven-text').innerText = "Database Offline";
-                document.getElementById('nf-text').innerText = "Hosting Offline";
             }
         }
-        // NEW: Wallet Registry Logic
+
         async function fetchRegistry() {
             try {
                 const response = await fetch('/api/wallet_registry', {
@@ -518,8 +517,6 @@
                     div.className = 'admin-item'; 
                     div.style.flexDirection = 'column';
                     div.style.alignItems = 'flex-start';
-                    
-                    // Format: [First Name/Username] - [Network] - [Wallet Address]
                     div.innerHTML = `
                         <div style="color: var(--primary-color); font-weight: bold; margin-bottom: 5px; font-size: 1.1em;">👤 ${entry.name}</div>
                         <div style="font-size: 0.9em; color: #aaa;">Network: <span style="color: white;">${entry.network}</span></div>
@@ -606,14 +603,13 @@
                 });
                 
                 if(response.ok) {
-                    fetchWallets(); // Refresh list automatically
+                    fetchWallets(); 
                 }
             } catch(e) {
                 alert('Connection error');
             }
         }
 
-        // --- ADMIN MANAGER FUNCTIONS ---
         async function fetchAdmins() {
             try {
                 const response = await fetch('/api/get_admins', {
