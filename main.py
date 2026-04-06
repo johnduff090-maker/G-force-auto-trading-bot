@@ -152,7 +152,7 @@ def load_database():
     except Exception as e:
         print(f"⚠️ CRITICAL: Error loading from Aiven DB: {e}")
         # By NOT unlocking the safety lock here, we prevent the bot from wiping Aiven!
-    return {}
+        return {}
 
 def save_database():
     # 🛑 PREVENTS THE DEADLY OVERWRITE BUG
@@ -284,12 +284,13 @@ reinvest_settings = db_data.get('reinvest_settings', {
     'inline_deposit_text': '🏦 Deposit Now'
 })
 
-# NEW: Invite Settings Persistent Data
+# NEW: Invite Settings Persistent Data (UPDATED WITH DYNAMIC LINK TOGGLE)
 invite_settings = db_data.get('invite_settings', {
     'levels': [{'users': 10, 'reward': 5.0}, {'users': 25, 'reward': 15.0}, {'users': 100, 'reward': 50.0}],
     'msg_template': "👥 <b>Referral Statistics</b>\n\n%levels_display%\n\n👥 My team Deposits: %team_deposits% USDT\n♾ Earnings: %affiliate_earnings% USDT",
     'use_loading_bar': True,
-    'ref_commission_pct': 0.0
+    'ref_commission_pct': 0.0,
+    'use_dynamic_link': False
 })
 
 deposit_settings = db_data.get('deposit_settings', {
@@ -1253,7 +1254,8 @@ def get_admin_invite_keyboard():
     markup = ReplyKeyboardMarkup(resize_keyboard=True)
     markup.row(KeyboardButton('💬 Edit Post Message'), KeyboardButton('📊 Set Levels'))
     lb_text = "☑️ On" if invite_settings.get('use_loading_bar', True) else "⬜️ Off"
-    markup.row(KeyboardButton(f'⏳ Toggle Loading Bar ({lb_text})'))
+    dyn_text = "☑️ On" if invite_settings.get('use_dynamic_link', False) else "⬜️ Off"
+    markup.row(KeyboardButton(f'⏳ Toggle Loading Bar ({lb_text})'), KeyboardButton(f'🔗 Toggle Dynamic Link ({dyn_text})'))
     markup.row(KeyboardButton('🔙 Back to Admin'))
     return markup
 
@@ -1297,14 +1299,13 @@ def get_keyboard_raw(user_id):
             markup.row(KeyboardButton('📢 Broadcast Message'), KeyboardButton('🔄 Reinvest Settings'))
             markup.row(KeyboardButton('Loading Bar Settings'), KeyboardButton('🚫 Block User System'))
             markup.row(KeyboardButton('💬 Messages'), KeyboardButton('Invite Settings'))
-            # --- NEW FEATURE 2: ADVANCED STATS MENU ENTRY ---
-            markup.row(KeyboardButton('🛠 Advanced Stats & Wipe'))
+            # --- NEW FEATURES 7 & 8: DEDICATED ADMIN BUTTONS ---
+            markup.row(KeyboardButton('📊 Bot Stats'), KeyboardButton('🧹 Data Wipe Dashboard'))
             markup.row(KeyboardButton('🔙 Back to Main'))
             return markup
             
-        # --- NEW FEATURE 2: ADVANCED STATS MENU KEYBOARD ---
-        if state == 'admin_advanced_menu':
-            markup.row(KeyboardButton('🔍 Scan Dead Users'))
+        # --- NEW FEATURE 8: ADVANCED WIPE DASHBOARD KEYBOARD ---
+        if state == 'admin_wipe_menu':
             markup.row(KeyboardButton('🧹 Targeted Wipe'), KeyboardButton('☢️ General Wipe (All Users)'))
             markup.row(KeyboardButton('🔙 Back to Admin'))
             return markup
@@ -1752,7 +1753,7 @@ def handle_messages(message):
             return
         # --- NEW FEATURE 2: WIPE CANCELLATION ---
         elif state in ['wait_wipe_id', 'wait_general_wipe_confirm']:
-            user_state[user_id] = 'admin_advanced_menu'
+            user_state[user_id] = 'admin_wipe_menu'
             bot.send_message(message.chat.id, "Wipe action cancelled.", reply_markup=get_keyboard(user_id))
             return
         elif state == 'wait_support_msg' or state.startswith('admin_suprep_'):
@@ -1861,6 +1862,9 @@ def handle_messages(message):
         elif text.startswith('⏳ Toggle Loading Bar'):
             invite_settings['use_loading_bar'] = not invite_settings.get('use_loading_bar', True)
             bot.send_message(message.chat.id, "✅ Loading bar toggled.", reply_markup=get_keyboard(user_id))
+        elif text.startswith('🔗 Toggle Dynamic Link'):
+            invite_settings['use_dynamic_link'] = not invite_settings.get('use_dynamic_link', False)
+            bot.send_message(message.chat.id, "✅ Dynamic links toggled.", reply_markup=get_keyboard(user_id))
         return
         
     if state == 'wait_invite_msg':
@@ -2033,31 +2037,42 @@ def handle_messages(message):
         return
 
     # --- FEATURE 2: ADVANCED STATS & WIPE SYSTEM HANDLERS ---
-    if state == 'admin_menu' and text == '🛠 Advanced Stats & Wipe':
-        user_state[user_id] = 'admin_advanced_menu'
-        real_users = len(user_db)
-        msg = f"🛠 <b>Advanced Admin & Wipe Dashboard</b>\n\n👥 <b>Real Database Users:</b> {real_users}\n<i>(This is the true backend count, completely isolated from your public %stats_users% macro)</i>"
-        bot.send_message(message.chat.id, msg, parse_mode="HTML", reply_markup=get_keyboard(user_id))
+    if state == 'admin_menu' and text == '📊 Bot Stats':
+        bot_info = bot.get_me()
+        total_users = len(user_db)
+        btn_count = len(btn_metadata)
+        msg_count = sum(len(v) for v in menu_posts.values())
+        
+        stats_msg = f"""📊 <b>BOT STATISTICS</b>
+#statistics
+
+@{bot_info.username}
+▪️Created: [Auto]
+
+▪️Users: {total_users}
+▫️Active: {total_users}
+▫️Deleted: 0
+▪️Admins: {len(ADMIN_IDS)}
+
+▪️Bot structure:
+▫️Buttons: {btn_count} / 200
+▫️Messages: {msg_count} / 400"""
+        
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton('🔍 Scan', callback_data='cb_scan_users'))
+        
+        bot.send_message(message.chat.id, stats_msg, parse_mode="HTML", reply_markup=markup)
+        return
+
+    if state == 'admin_menu' and text == '🧹 Data Wipe Dashboard':
+        user_state[user_id] = 'admin_wipe_menu'
+        bot.send_message(message.chat.id, "🧹 <b>Data Wipe Dashboard</b>\n\nChoose an option below:", parse_mode="HTML", reply_markup=get_keyboard(user_id))
         return
         
-    if state == 'admin_advanced_menu':
+    if state == 'admin_wipe_menu':
         if text == '🔙 Back to Admin':
             user_state[user_id] = 'admin_menu'
             bot.send_message(message.chat.id, "🔐 <b>Admin Panel</b>", parse_mode="HTML", reply_markup=get_keyboard(user_id))
-            
-        elif text == '🔍 Scan Dead Users':
-            bot.send_message(message.chat.id, "🔍 <b>Scanning Users...</b>\nThis runs securely in the background by pinging the Telegram API for each user. You will receive a report when it finishes.", parse_mode="HTML", reply_markup=get_keyboard(user_id))
-            def scan_dead_users():
-                dead_count = 0
-                for uid in list(user_db.keys()):
-                    try:
-                        bot.send_chat_action(uid, 'typing')
-                        time.sleep(0.05) 
-                    except telebot.apihelper.ApiTelegramException as e:
-                        if 'Forbidden' in str(e) or 'chat not found' in str(e) or 'deactivated' in str(e):
-                            dead_count += 1
-                bot.send_message(user_id, f"✅ <b>Scan Complete!</b>\nFound <b>{dead_count}</b> dead/blocked accounts in your database.", parse_mode="HTML")
-            threading.Thread(target=scan_dead_users, daemon=True).start()
             
         elif text == '🧹 Targeted Wipe':
             user_state[user_id] = 'wait_wipe_id'
@@ -2081,7 +2096,7 @@ def handle_messages(message):
                 user_db[target]['team_deposits'] = 0.0
                 user_db[target]['affiliate_earnings'] = 0.0
                 
-                user_state[user_id] = 'admin_advanced_menu'
+                user_state[user_id] = 'admin_wipe_menu'
                 bot.send_message(message.chat.id, f"✅ <b>Targeted Wipe Successful!</b>\nUser <code>{target}</code> balances have been reset to 0.", parse_mode="HTML", reply_markup=get_keyboard(user_id))
             else:
                 bot.send_message(message.chat.id, "❌ User not found in database. Try again or Cancel.")
@@ -2101,10 +2116,10 @@ def handle_messages(message):
                 user_db[uid]['team_deposits'] = 0.0
                 user_db[uid]['affiliate_earnings'] = 0.0
                 
-            user_state[user_id] = 'admin_advanced_menu'
+            user_state[user_id] = 'admin_wipe_menu'
             bot.send_message(message.chat.id, "☢️ <b>GENERAL WIPE COMPLETE</b> ☢️\nEvery single user in the database has had their balances and active plans reset to 0. Infrastructure remains fully operational.", parse_mode="HTML", reply_markup=get_keyboard(user_id))
         else:
-            user_state[user_id] = 'admin_advanced_menu'
+            user_state[user_id] = 'admin_wipe_menu'
             bot.send_message(message.chat.id, "❌ Confirmation failed. General Wipe aborted.", reply_markup=get_keyboard(user_id))
         return
 
@@ -3900,22 +3915,71 @@ def handle_inline(call):
         bot.answer_callback_query(call.id, get_tl_and_map("🚫 You are currently blocked.", lang), show_alert=True)
         return
 
+    # --- FEATURE 7: INLINE STATS SCANNER ---
+    if call.data == 'cb_scan_users':
+        if not is_admin: return bot.answer_callback_query(call.id, "Action not permitted.", show_alert=True)
+        bot.answer_callback_query(call.id, "Scanning users in background... This may take a moment.")
+        
+        def background_scan():
+            dead_count = 0
+            total_users = len(user_db)
+            for uid in list(user_db.keys()):
+                try:
+                    bot.send_chat_action(uid, 'typing')
+                    time.sleep(0.05) 
+                except telebot.apihelper.ApiTelegramException as e:
+                    if 'Forbidden' in str(e) or 'chat not found' in str(e) or 'deactivated' in str(e):
+                        dead_count += 1
+            
+            active_users = total_users - dead_count
+            bot_info = bot.get_me()
+            btn_count = len(btn_metadata)
+            msg_count = sum(len(v) for v in menu_posts.values())
+            
+            stats_msg = f"""📊 <b>BOT STATISTICS</b>
+#statistics
+
+@{bot_info.username}
+▪️Created: [Auto]
+
+▪️Users: {total_users}
+▫️Active: {active_users}
+▫️Deleted: {dead_count}
+▪️Admins: {len(ADMIN_IDS)}
+
+▪️Bot structure:
+▫️Buttons: {btn_count} / 200
+▫️Messages: {msg_count} / 400"""
+            
+            markup = InlineKeyboardMarkup()
+            markup.add(InlineKeyboardButton('🔍 Scan', callback_data='cb_scan_users'))
+            
+            try:
+                bot.edit_message_text(stats_msg, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=markup)
+            except: pass
+            
+        threading.Thread(target=background_scan, daemon=True).start()
+        return
+
     # --- NEW: REFERRAL LINK GENERATION INLINE ---
     if call.data == 'cb_gen_ref_link':
         bot.answer_callback_query(call.id)
         bot_info = bot.get_me()
         
-        # FEATURE 4: DYNAMIC INVITE LINKS
-        username_clean = call.from_user.username
-        if username_clean:
-            ref_id = f"gf_{username_clean}"
+        # FEATURE 3: DYNAMIC INVITE LINKS TOGGLE
+        if invite_settings.get('use_dynamic_link', False):
+            username_clean = call.from_user.username
+            if username_clean:
+                ref_id = f"gf_{username_clean}"
+            else:
+                ref_id = f"gf_{user_id}_{str(uuid.uuid4())[:4]}"
+                
+            # Save to memory bank so old links stay active forever
+            if ref_id not in user_db[user_id].get('invite_links_map', []):
+                if 'invite_links_map' not in user_db[user_id]: user_db[user_id]['invite_links_map'] = []
+                user_db[user_id]['invite_links_map'].append(ref_id)
         else:
-            ref_id = f"gf_{user_id}_{str(uuid.uuid4())[:4]}"
-            
-        # Save to memory bank so old links stay active forever
-        if ref_id not in user_db[user_id].get('invite_links_map', []):
-            if 'invite_links_map' not in user_db[user_id]: user_db[user_id]['invite_links_map'] = []
-            user_db[user_id]['invite_links_map'].append(ref_id)
+            ref_id = str(user_id)
             
         ref_link = f"https://t.me/{bot_info.username}?start={ref_id}"
         
