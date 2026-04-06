@@ -8,6 +8,7 @@ import requests
 import json
 import html
 import re
+import psutil
 import random
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse
@@ -4767,7 +4768,7 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps({'registry': registry}).encode())
 
-        # --- FINAL WORKING VERSION: SERVER RESOURCE METRICS ---
+        # --- UPDATED: 3-POINT RESOURCE METRICS (CPU, RAM, DISK) ---
         elif parsed_path.path == '/api/server_stats':
             if pin != ADMIN_PIN:
                 self.send_response(401)
@@ -4775,11 +4776,12 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                 return
                 
             stats = {
-                'aiven': {'used_mb': 0, 'total_mb': 1024},  # <--- CHANGED HERE
-                'northflank': {'used_mb': 0, 'total_mb': 512, 'status': 'Loading...'}
+                'aiven_storage': {'used_mb': 0, 'total_mb': 1024}, # Your 1GB Aiven Disk
+                'bot_ram': {'used_mb': 0, 'total_mb': 1024},       # Your 1GB Northflank RAM
+                'bot_cpu': {'percent': 0}                         # Your 1 CPU Core
             }
             
-            # 1. Fetch Aiven Database Size
+            # 1. Measure Aiven Storage (Disk)
             if DATABASE_URL:
                 try:
                     conn = psycopg2.connect(DATABASE_URL)
@@ -4788,9 +4790,26 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                     size_bytes = cur.fetchone()[0]
                     cur.close()
                     conn.close()
-                    stats['aiven']['used_mb'] = round(size_bytes / (1024 * 1024), 2)  # <--- CHANGED HERE
-                except Exception as e:
-                    print(f"⚠️ Aiven Error: {e}")  # <--- CHANGED HERE
+                    stats['aiven_storage']['used_mb'] = round(size_bytes / (1024 * 1024), 2)
+                except: pass
+
+            # 2. Measure Bot RAM (Memory)
+            try:
+                # Direct read from Northflank/Linux container memory
+                with open('/sys/fs/cgroup/memory.current', 'r') as f:
+                    ram_bytes = int(f.read().strip())
+                stats['bot_ram']['used_mb'] = round(ram_bytes / (1024 * 1024), 2)
+            except:
+                # Fallback for local testing
+                stats['bot_ram']['used_mb'] = round(psutil.virtual_memory().used / (1024 * 1024), 2)
+
+            # 3. Measure Bot CPU (Brain Power)
+            stats['bot_cpu']['percent'] = psutil.cpu_percent(interval=None)
+
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'stats': stats}).encode())
 
             # 2. Fetch Northflank RAM Usage
             if NORTHFLANK_API_KEY and NORTHFLANK_PROJECT:
