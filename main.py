@@ -4764,11 +4764,11 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                 return
                 
             stats = {
-                'neon': {'used_mb': 0, 'total_mb': 500},
+                'aiven': {'used_mb': 0, 'total_mb': 1024},  # <--- CHANGED HERE
                 'northflank': {'used_mb': 0, 'total_mb': 512, 'status': 'Loading...'}
             }
             
-            # 1. Fetch Neon Database Size
+            # 1. Fetch Aiven Database Size
             if DATABASE_URL:
                 try:
                     conn = psycopg2.connect(DATABASE_URL)
@@ -4777,9 +4777,9 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                     size_bytes = cur.fetchone()[0]
                     cur.close()
                     conn.close()
-                    stats['neon']['used_mb'] = round(size_bytes / (1024 * 1024), 2)
+                    stats['aiven']['used_mb'] = round(size_bytes / (1024 * 1024), 2)  # <--- CHANGED HERE
                 except Exception as e:
-                    print(f"⚠️ Neon Error: {e}")
+                    print(f"⚠️ Aiven Error: {e}")  # <--- CHANGED HERE
 
             # 2. Fetch Northflank RAM Usage
             if NORTHFLANK_API_KEY and NORTHFLANK_PROJECT:
