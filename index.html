@@ -328,11 +328,11 @@
                 <div class="resource-block">
                     <div class="resource-title">Server Resources</div>
                     
-                    <div style="font-size: 0.85em; font-weight: bold; color: #4caf50;">PostgreSQL (Neon)</div>
+                    <div style="font-size: 0.85em; font-weight: bold; color: #4caf50;">Aiven PostgreSQL</div>
                     <div class="progress-bar">
-                        <div class="progress-fill" id="neon-fill" style="width: 0%; background: #4caf50;"></div>
+                        <div class="progress-fill" id="aiven-fill" style="width: 0%; background: #4caf50;"></div>
                     </div>
-                    <div class="resource-text" id="neon-text">Loading...</div>
+                    <div class="resource-text" id="aiven-text">Loading...</div>
 
                     <div style="font-size: 0.85em; font-weight: bold; color: #00aaff; margin-top: 10px;">Hosting (Northflank)</div>
                     <div class="progress-bar">
@@ -469,10 +469,10 @@
                     const data = await response.json();
                     const s = data.stats;
                     
-                    // 1. Update Neon (Database Storage)
-                    const neonPct = Math.min((s.neon.used_mb / s.neon.total_mb) * 100, 100).toFixed(1);
-                    document.getElementById('neon-fill').style.width = neonPct + '%';
-                    document.getElementById('neon-text').innerText = `${s.neon.used_mb} MB / ${s.neon.total_mb} MB`;
+                    // 1. Update Aiven (Database Storage)
+                    const aivenPct = Math.min((s.aiven.used_mb / s.aiven.total_mb) * 100, 100).toFixed(1);
+                    document.getElementById('aiven-fill').style.width = aivenPct + '%';
+                    document.getElementById('aiven-text').innerText = `${s.aiven.used_mb} MB / ${s.aiven.total_mb} MB`;
                     
                     // 2. Update Northflank (RAM Usage)
                     const nfPct = Math.min((s.northflank.used_mb / s.northflank.total_mb) * 100, 100).toFixed(1);
@@ -491,7 +491,7 @@
                 }
             } catch (e) {
                 console.error("Storage fetch error", e);
-                document.getElementById('neon-text').innerText = "Database Offline";
+                document.getElementById('aiven-text').innerText = "Database Offline";
                 document.getElementById('nf-text').innerText = "Hosting Offline";
             }
         }
