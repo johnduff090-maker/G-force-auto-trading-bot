@@ -99,8 +99,9 @@ TRONGRID_API_KEY = os.getenv('TRONGRID_API_KEY', '')
 ETHERSCAN_API_KEY = os.getenv('ETHERSCAN_API_KEY', '')
 BSCSCAN_API_KEY = os.getenv('BSCSCAN_API_KEY', '')
 
-# --- NEON POSTGRESQL DATABASE SYSTEM ---
+# --- AIVEN POSTGRESQL DATABASE SYSTEM ---
 DATABASE_URL = os.getenv('DATABASE_URL', '')
+DB_LOADED_SUCCESSFULLY = False  # 🔒 THE NEW SAFETY LOCK
 
 def init_db():
     if not DATABASE_URL:
@@ -119,11 +120,12 @@ def init_db():
         conn.commit()
         cur.close()
         conn.close()
-        print("✅ Neon Database connected and table verified!")
+        print("✅ Aiven Database connected and table verified!")
     except Exception as e:
-        print(f"❌ Neon DB Init Error: {e}")
+        print(f"❌ Aiven DB Init Error: {e}")
 
 def load_database():
+    global DB_LOADED_SUCCESSFULLY
     if not DATABASE_URL: return {}
     try:
         conn = psycopg2.connect(DATABASE_URL)
@@ -132,6 +134,9 @@ def load_database():
         result = cur.fetchone()
         cur.close()
         conn.close()
+        
+        DB_LOADED_SUCCESSFULLY = True # 🔓 UNLOCKS SAVING
+        print("✅ Aiven Memory successfully loaded into Bot!")
         
         if result and result[0]:
             data = result[0]
@@ -144,11 +149,15 @@ def load_database():
                 data['user_db'] = parsed_user_db
             return data
     except Exception as e:
-        print(f"⚠️ Error loading from Neon DB: {e}")
+        print(f"⚠️ CRITICAL: Error loading from Aiven DB: {e}")
+        # By NOT unlocking the safety lock here, we prevent the bot from wiping Aiven!
     return {}
 
 def save_database():
-    if not DATABASE_URL: return
+    # 🛑 PREVENTS THE DEADLY OVERWRITE BUG
+    if not DATABASE_URL or not DB_LOADED_SUCCESSFULLY: 
+        return 
+        
     # Bundle everything we want to save into one master dictionary
     data_to_save = {
         'user_db': user_db,
@@ -182,8 +191,10 @@ def save_database():
         conn.commit()
         cur.close()
         conn.close()
+        # 💓 THE HEARTBEAT MONITOR:
+        print(f"💾 AIVEN AUTO-SAVE: {len(user_db)} users backed up successfully!")
     except Exception as e:
-        print(f"⚠️ Neon DB Save Error: {e}")
+        print(f"⚠️ AIVEN DB SAVE ERROR: {e}")
 
 def auto_save_loop():
     """Runs forever in the background, saving data every 10 seconds."""
