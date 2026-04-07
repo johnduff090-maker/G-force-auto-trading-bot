@@ -307,7 +307,7 @@ global_w_setup = db_data.get('global_w_setup', {
     'w_msg_addr': 'Please enter your withdrawal address:',
     'w_msg_conf': 'Are you sure you want to withdraw %withdraw% USDT via %network% to:\n<code>%address%</code>',
     'w_msg_processing': '♻️ Your Withdrawal of %withdraw% is processing on the blockchain...',
-    'w_msg_approve': '✅ Withdrawal Completed\n━━━━━━━━━━━━━━━━━━\n👤 %firstname% %lastname%\n💰 Amount: -%withdraw% USDT\n🔗 Address: <code>%address%</code>\n🌐 Network: %network%\n⚡ Type: Instant\n━━━━━━━━━━━━━━━━━━\n                           📌 Status: Successful ✔️ \n\nYour funds have been sent successfully to your wallet.',
+    'w_msg_approve': '%ascii_receipt%\n\nYour funds have been sent successfully to your wallet.',
     'w_msg_decline': '❌ Withdrawal Declined\n━━━━━━━━━━━━━━━━━━\n👤 %firstname% %lastname%\n💰 Amount: %withdraw% USDT\n━━━━━━━━━━━━━━━━━━\n                           📌 Status: Failed ❌ \n\nYour withdrawal request was declined. The funds have been refunded to your balance.',
     'w_msg_ignore': '🚫 Withdrawal Ignored\n━━━━━━━━━━━━━━━━━━\n👤 %firstname% %lastname%\n💰 Amount: %withdraw% USDT\n━━━━━━━━━━━━━━━━━━\n                           📌 Status: Cancelled 🚫 \n\nYour withdrawal request has been ignored.',
     'do_not_ask_address': False,
@@ -315,8 +315,12 @@ global_w_setup = db_data.get('global_w_setup', {
     'w_rate_toggle': False,
     'public_report': None,
     'private_report': None,
-    'addr_var': 'wallet'
+    'addr_var': 'wallet',
+    'use_ascii_receipt': False,           # 🆕 Toggle Bar setting
+    'payout_btn_text': '📜 View Receipt', # 🆕 Popup Button Text
+    'payout_popup_msg': 'Payment has been processed successfully to your wallet!' # 🆕 Popup Alert Message
 })
+
 
 global_wallet_setup = db_data.get('global_wallet_setup', {
     'msg_main': '💡 Your currently set USDT Wallet Address is: <code>%wallet%</code>\n\nEmail: <code>%email%</code>\n\n💹 It will be used for all future withdrawals.\n\nNOTE🔴: Supported, USDT Network Address are: TRC20 and BEP20 Set Only one..',
