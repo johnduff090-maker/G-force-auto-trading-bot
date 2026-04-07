@@ -4179,16 +4179,23 @@ def handle_inline(call):
         w_var = w_data['currency_var']
         target_lang = user_db.get(target, {}).get('lang', 'en')
         
-        if action == 'app':
-            log_tx(target, "Withdrawal Approved", 0) 
-            bot.edit_message_text(f"{call.message.text}\n\n✅ <b>APPROVED ({'Silent' if mode=='s' else 'Msg sent'})</b>", call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=None)
-            
-            if mode == 'm':
+                    if mode == 'm':
                 msg_template = global_w_setup.get('w_msg_approve')
                 if msg_template:
                     msg = replace_macros(msg_template, target, w_data['path'], w_data)
-                    try: bot.send_message(target, get_tl_and_map(msg, target_lang), parse_mode="HTML")
-                    except: pass
+                    
+                    # --- NEW: ATTACH THE POPUP BUTTON ---
+                    markup = InlineKeyboardMarkup()
+                    btn_label = global_w_setup.get('payout_btn_text', '📜 View Receipt')
+                    # This callback_data must match your popup handler
+                    markup.row(InlineKeyboardButton(get_tl_and_map(btn_label, target_lang), callback_data='cb_payout_popup_alert'))
+                    
+                    try: 
+                        # We added reply_markup=markup here to send the button
+                        bot.send_message(target, get_tl_and_map(msg, target_lang), parse_mode="HTML", reply_markup=markup)
+                    except: 
+                        pass
+
             
             pub_chat = global_w_setup.get('public_report')
             if pub_chat:
