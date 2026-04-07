@@ -307,7 +307,7 @@ global_w_setup = db_data.get('global_w_setup', {
     'w_msg_addr': 'Please enter your withdrawal address:',
     'w_msg_conf': 'Are you sure you want to withdraw %withdraw% USDT via %network% to:\n<code>%address%</code>',
     'w_msg_processing': '♻️ Your Withdrawal of %withdraw% is processing on the blockchain...',
-    'w_msg_approve': '%ascii_receipt%\n\nYour funds have been sent successfully to your wallet.',
+    'w_msg_approve': '✅ Withdrawal Completed\n━━━━━━━━━━━━━━━━━━\n👤 %firstname% %lastname%\n💰 Amount: -%withdraw% USDT\n🔗 Address: <code>%address%</code>\n🌐 Network: %network%\n⚡ Type: Instant\n━━━━━━━━━━━━━━━━━━\n                           📌 Status: Successful ✔️ \n\nYour funds have been sent successfully to your wallet.',
     'w_msg_decline': '❌ Withdrawal Declined\n━━━━━━━━━━━━━━━━━━\n👤 %firstname% %lastname%\n💰 Amount: %withdraw% USDT\n━━━━━━━━━━━━━━━━━━\n                           📌 Status: Failed ❌ \n\nYour withdrawal request was declined. The funds have been refunded to your balance.',
     'w_msg_ignore': '🚫 Withdrawal Ignored\n━━━━━━━━━━━━━━━━━━\n👤 %firstname% %lastname%\n💰 Amount: %withdraw% USDT\n━━━━━━━━━━━━━━━━━━\n                           📌 Status: Cancelled 🚫 \n\nYour withdrawal request has been ignored.',
     'do_not_ask_address': False,
@@ -315,12 +315,8 @@ global_w_setup = db_data.get('global_w_setup', {
     'w_rate_toggle': False,
     'public_report': None,
     'private_report': None,
-    'addr_var': 'wallet',
-    'use_ascii_receipt': False,           # 🆕 Toggle Bar setting
-    'payout_btn_text': '📜 View Receipt', # 🆕 Popup Button Text
-    'payout_popup_msg': 'Payment has been processed successfully to your wallet!' # 🆕 Popup Alert Message
+    'addr_var': 'wallet'
 })
-
 
 global_wallet_setup = db_data.get('global_wallet_setup', {
     'msg_main': '💡 Your currently set USDT Wallet Address is: <code>%wallet%</code>\n\nEmail: <code>%email%</code>\n\n💹 It will be used for all future withdrawals.\n\nNOTE🔴: Supported, USDT Network Address are: TRC20 and BEP20 Set Only one..',
@@ -1200,19 +1196,10 @@ def get_settings_keyboard(full_path):
 
 def get_global_withdrawal_keyboard():
     markup = ReplyKeyboardMarkup(resize_keyboard=True)
-    
-    # --- EXISTING LOGIC ---
     addr_text = "☑️ On" if global_w_setup.get('do_not_ask_address') else "⬜️ Off"
     rate_text = "☑️ On" if global_w_setup.get('w_rate_toggle') else "⬜️ Off"
     comm_val = global_w_setup.get('w_commission', 0.0)
     
-    # --- NEW: ASCII STATUS LOGIC ---
-    ascii_status = "☑️ On" if global_w_setup.get('use_ascii_receipt') else "⬜️ Off"
-    
-    # --- NEW: ADD THE TOGGLE AND POPUP BUTTON ROW ---
-    markup.row(KeyboardButton(f'ASCII Receipt ({ascii_status})'), KeyboardButton('Edit Payout Popup'))
-    
-    # --- REST OF THE ORIGINAL BUTTONS ---
     markup.row(KeyboardButton('Set Withdrawal Var'), KeyboardButton('Set Min/Max'))
     markup.row(KeyboardButton('Edit Enter Msg'), KeyboardButton('Edit Address Msg'))
     markup.row(KeyboardButton('Edit Confirm Msg'), KeyboardButton('Processing Message'))
@@ -1222,9 +1209,7 @@ def get_global_withdrawal_keyboard():
     markup.row(KeyboardButton(f'Do not ask for Address ({addr_text})'))
     markup.row(KeyboardButton(f'Commission ({comm_val}%)'), KeyboardButton(f'Rate ({rate_text})'))
     markup.row(KeyboardButton('🔙 Back to Admin'))
-    
     return markup
-
 
 def get_admin_wallet_keyboard():
     markup = ReplyKeyboardMarkup(resize_keyboard=True)
@@ -3092,7 +3077,7 @@ def handle_messages(message):
             user_state[user_id] = 'w_setup_pub'
             curr = global_w_setup.get('public_report')
             bot.send_message(message.chat.id, f"Send the Channel/Group ID (e.g. -100123456789) for public reports:\n\nℹ️ Current: {curr}", reply_markup=get_cancel_action_keyboard())
-                elif text.startswith('Do not ask for Address'):
+        elif text.startswith('Do not ask for Address'):
             global_w_setup['do_not_ask_address'] = not global_w_setup.get('do_not_ask_address', False)
             bot.send_message(message.chat.id, "Address setting toggled.", reply_markup=get_keyboard(user_id))
         elif text.startswith('Commission'):
@@ -3101,18 +3086,6 @@ def handle_messages(message):
         elif text.startswith('Rate'):
             global_w_setup['w_rate_toggle'] = not global_w_setup.get('w_rate_toggle', False)
             bot.send_message(message.chat.id, "Rate/Multi-currency withdrawal toggled.", reply_markup=get_keyboard(user_id))
-        
-        # --- NEW: ASCII RECEIPT & POPUP BUTTONS ---
-        elif text.startswith('ASCII Receipt'):
-            global_w_setup['use_ascii_receipt'] = not global_w_setup.get('use_ascii_receipt', False)
-            bot.send_message(message.chat.id, "✅ ASCII Receipt mode updated.", reply_markup=get_global_withdrawal_keyboard())
-            return
-        elif text == 'Edit Payout Popup':
-            user_state[user_id] = 'w_setup_popup_text'
-            bot.send_message(message.chat.id, "📝 Send the <b>Button Title | Popup Message</b>\n\nExample: <code>Receipt | Payment Successful!</code>", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
-            return
-        # ------------------------------------------
-
         else:
             bot.send_message(message.chat.id, f"🛠 <b>{text}</b> is acknowledged. Setup feature coming soon!", parse_mode="HTML", reply_markup=get_keyboard(user_id))
         return
@@ -3135,16 +3108,6 @@ def handle_messages(message):
             elif state == 'w_setup_comm': 
                 try: global_w_setup['w_commission'] = float(text)
                 except ValueError: bot.send_message(message.chat.id, "⚠️ Invalid percentage.")
-            
-            # --- NEW: SAVE POPUP TEXT ---
-            elif state == 'w_setup_popup_text':
-                if '|' in text:
-                    parts = text.split('|')
-                    global_w_setup['payout_btn_text'] = parts[0].strip()
-                    global_w_setup['payout_popup_msg'] = parts[1].strip()
-                else:
-                    return bot.send_message(message.chat.id, "⚠️ Invalid format. Use: Title | Message")
-            # ----------------------------
 
         if state == 'w_setup_var':
             user_state[user_id] = 'admin_w_menu'
@@ -3156,13 +3119,10 @@ def handle_messages(message):
         elif state == 'w_setup_max':
             user_state[user_id] = 'admin_w_menu'
             bot.send_message(message.chat.id, "✅ Limits saved!", reply_markup=get_keyboard(user_id))
-        
-        # Added 'w_setup_popup_text' to the success list below
-        elif state in ['w_setup_enter', 'w_setup_addr', 'w_setup_conf', 'w_setup_proc', 'w_setup_appr', 'w_setup_dec', 'w_setup_ign', 'w_setup_pub', 'w_setup_comm', 'w_setup_popup_text']:
+        elif state in ['w_setup_enter', 'w_setup_addr', 'w_setup_conf', 'w_setup_proc', 'w_setup_appr', 'w_setup_dec', 'w_setup_ign', 'w_setup_pub', 'w_setup_comm']:
             user_state[user_id] = 'admin_w_menu'
-            bot.send_message(message.chat.id, "✅ Settings updated successfully!", reply_markup=get_global_withdrawal_keyboard())
+            bot.send_message(message.chat.id, "✅ Settings updated successfully!", reply_markup=get_keyboard(user_id))
         return
-
 
     # --- ADMIN PLANS MANAGER ---
     if state == 'admin_plans':
@@ -3946,18 +3906,9 @@ def handle_inline(call):
     target_btn = user_selected_button.get(user_id)
     is_admin = user_id in ADMIN_IDS
     lang = user_db.get(user_id, {}).get('lang', 'en')
-
-    # --- NEW: NATIVE POPUP ALERT HANDLER ---
-    if call.data == 'cb_payout_popup_alert':
-        # Grab the message you saved in the Admin Panel
-        popup_msg = global_w_setup.get('payout_popup_msg', 'Payment Processed!')
-        # show_alert=True makes it a native popup box with an 'OK' button
-        bot.answer_callback_query(call.id, text=get_tl_and_map(popup_msg, lang), show_alert=True)
-        return
     
     # Declare it globally ONCE at the very top of the function
     global pending_withdrawals
-
 
     # --- NEW: INTERCEPT BLOCKED USERS INLINE CALLS ---
     if user_id in blocked_users:
@@ -4188,23 +4139,16 @@ def handle_inline(call):
         w_var = w_data['currency_var']
         target_lang = user_db.get(target, {}).get('lang', 'en')
         
-                    if mode == 'm':
+        if action == 'app':
+            log_tx(target, "Withdrawal Approved", 0) 
+            bot.edit_message_text(f"{call.message.text}\n\n✅ <b>APPROVED ({'Silent' if mode=='s' else 'Msg sent'})</b>", call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=None)
+            
+            if mode == 'm':
                 msg_template = global_w_setup.get('w_msg_approve')
                 if msg_template:
                     msg = replace_macros(msg_template, target, w_data['path'], w_data)
-                    
-                    # --- NEW: ATTACH THE POPUP BUTTON ---
-                    markup = InlineKeyboardMarkup()
-                    btn_label = global_w_setup.get('payout_btn_text', '📜 View Receipt')
-                    # This callback_data must match your popup handler
-                    markup.row(InlineKeyboardButton(get_tl_and_map(btn_label, target_lang), callback_data='cb_payout_popup_alert'))
-                    
-                    try: 
-                        # We added reply_markup=markup here to send the button
-                        bot.send_message(target, get_tl_and_map(msg, target_lang), parse_mode="HTML", reply_markup=markup)
-                    except: 
-                        pass
-
+                    try: bot.send_message(target, get_tl_and_map(msg, target_lang), parse_mode="HTML")
+                    except: pass
             
             pub_chat = global_w_setup.get('public_report')
             if pub_chat:
