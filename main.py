@@ -315,7 +315,10 @@ global_w_setup = db_data.get('global_w_setup', {
     'w_rate_toggle': False,
     'public_report': None,
     'private_report': None,
-    'addr_var': 'wallet'
+    'addr_var': 'wallet',
+    'use_ascii_receipt': False,
+    'payout_btn_text': '📜 View Receipt',
+    'payout_popup_msg': 'Payment Success!'
 })
 
 global_wallet_setup = db_data.get('global_wallet_setup', {
@@ -856,6 +859,40 @@ def replace_macros(text, user_id, full_path, action_data=None):
         t = t.replace('%address%', bals.get('address', 'Not Set'))
         t = t.replace('%network%', bals.get('wallet_net', 'Unknown'))
         
+    # --- NEW FEATURE 1: ASCII RECEIPT MACRO ENGINE ---
+    if '%ascii_receipt%' in t:
+        if global_w_setup.get('use_ascii_receipt', False):
+            tx_full = action_data.get('txid', 'N/A') if action_data else 'N/A'
+            tx_short = tx_full[:11] + "..." if len(tx_full) > 11 else tx_full
+            u_name = bals.get('username', 'Unknown')
+            if len(u_name) > 13: u_name = u_name[:10] + "..."
+            
+            w_amt = fmt_amt(action_data.get('amount', 0)) if action_data else "0.00"
+            n_str = action_data.get('network', bals.get('wallet_net', 'Unknown')) if action_data else bals.get('wallet_net', 'Unknown')
+            if len(n_str) > 14: n_str = n_str[:11] + "..."
+            
+            # Using precise '<18' string padding to guarantee alignment across all screen sizes
+            ascii_box = (
+                "<pre>\n"
+                "╔════════════════════════════╗\n"
+                "║     G-FORCE PAYOUT LOG     ║\n"
+                "╠════════════════════════════╣\n"
+                f"║ TXID:   {tx_short:<18} ║\n"
+                f"║ USER:   @{u_name:<17} ║\n"
+                "║                            ║\n"
+                f"║ WITHDRAWAL: ${w_amt:<13} ║\n"
+                f"║ NETWORK:  {n_str:<16} ║\n"
+                "║ FEE:    $0.00              ║\n"
+                "╠════════════════════════════╣\n"
+                "║      [ STATUS: PAID ]      ║\n"
+                "╚════════════════════════════╝\n"
+                "</pre>"
+            )
+            t = t.replace('%ascii_receipt%', ascii_box)
+        else:
+            # Silent clear if toggled off
+            t = t.replace('%ascii_receipt%', '')
+            
     return t
 
 # --- POSTS ENGINE ---
@@ -1199,6 +1236,7 @@ def get_global_withdrawal_keyboard():
     addr_text = "☑️ On" if global_w_setup.get('do_not_ask_address') else "⬜️ Off"
     rate_text = "☑️ On" if global_w_setup.get('w_rate_toggle') else "⬜️ Off"
     comm_val = global_w_setup.get('w_commission', 0.0)
+    ascii_text = "☑️ On" if global_w_setup.get('use_ascii_receipt', False) else "⬜️ Off"
     
     markup.row(KeyboardButton('Set Withdrawal Var'), KeyboardButton('Set Min/Max'))
     markup.row(KeyboardButton('Edit Enter Msg'), KeyboardButton('Edit Address Msg'))
@@ -1208,6 +1246,7 @@ def get_global_withdrawal_keyboard():
     markup.row(KeyboardButton('Address Variable'))
     markup.row(KeyboardButton(f'Do not ask for Address ({addr_text})'))
     markup.row(KeyboardButton(f'Commission ({comm_val}%)'), KeyboardButton(f'Rate ({rate_text})'))
+    markup.row(KeyboardButton(f'ASCII Receipt ({ascii_text})'), KeyboardButton('Edit Payout Popup'))
     markup.row(KeyboardButton('🔙 Back to Admin'))
     return markup
 
@@ -1362,8 +1401,8 @@ def get_keyboard_raw(user_id):
             markup.row(KeyboardButton('🔙 Back to Deposit Menu'))
             return markup
 
-        # --- NEW FEATURE 2: CANCELLATION FOR WIPE WAIT STATES ---
-        if state.startswith('dep_setup_') or state.startswith('wallet_setup_') or state.startswith('bonus_setup_') or state.startswith('reinvest_setup_') or state.startswith('msg_setup_') or state in ['admin_loading_time', 'wait_invite_msg', 'wait_invite_levels', 'wait_ref_bonus_pct', 'wait_support_msg'] or state.startswith('wait_block_') or state.startswith('wait_edit_block') or state.startswith('wait_edit_unblock') or state in ['admin_broadcast_input', 'bc_wait_text', 'wait_wipe_id', 'wait_general_wipe_confirm']:
+        # --- NEW FEATURE 2: CANCELLATION FOR WIPE WAIT STATES & POPUP STATES ---
+        if state.startswith('dep_setup_') or state.startswith('wallet_setup_') or state.startswith('bonus_setup_') or state.startswith('reinvest_setup_') or state.startswith('msg_setup_') or state in ['admin_loading_time', 'wait_invite_msg', 'wait_invite_levels', 'wait_ref_bonus_pct', 'wait_support_msg', 'wait_payout_popup'] or state.startswith('wait_block_') or state.startswith('wait_edit_block') or state.startswith('wait_edit_unblock') or state in ['admin_broadcast_input', 'bc_wait_text', 'wait_wipe_id', 'wait_general_wipe_confirm']:
             return get_cancel_action_keyboard()
 
         if state == 'admin_plans':
@@ -1751,10 +1790,14 @@ def handle_messages(message):
             user_state[user_id] = 'admin_menu'
             bot.send_message(message.chat.id, get_tl_and_map("Broadcast cancelled.", lang), reply_markup=get_keyboard(user_id))
             return
-        # --- NEW FEATURE 2: WIPE CANCELLATION ---
+        # --- NEW FEATURE 2: WIPE CANCELLATION & POPUP MENU ---
         elif state in ['wait_wipe_id', 'wait_general_wipe_confirm']:
             user_state[user_id] = 'admin_wipe_menu'
             bot.send_message(message.chat.id, "Wipe action cancelled.", reply_markup=get_keyboard(user_id))
+            return
+        elif state == 'wait_payout_popup':
+            user_state[user_id] = 'admin_w_menu'
+            bot.send_message(message.chat.id, get_tl_and_map("Action cancelled.", lang), reply_markup=get_keyboard(user_id))
             return
         elif state == 'wait_support_msg' or state.startswith('admin_suprep_'):
             user_state[user_id] = 'normal'
@@ -1997,7 +2040,7 @@ def handle_messages(message):
             sent_count = 0
             fail_count = 0
             dead_users = []
-            
+
             for uid in list(user_db.keys()):
                 try:
                     lang = user_db.get(uid, {}).get('lang', 'en')
@@ -3086,8 +3129,25 @@ def handle_messages(message):
         elif text.startswith('Rate'):
             global_w_setup['w_rate_toggle'] = not global_w_setup.get('w_rate_toggle', False)
             bot.send_message(message.chat.id, "Rate/Multi-currency withdrawal toggled.", reply_markup=get_keyboard(user_id))
+        elif text.startswith('ASCII Receipt'):
+            global_w_setup['use_ascii_receipt'] = not global_w_setup.get('use_ascii_receipt', False)
+            bot.send_message(message.chat.id, "✅ ASCII Receipt toggled.", reply_markup=get_keyboard(user_id))
+        elif text == 'Edit Payout Popup':
+            user_state[user_id] = 'wait_payout_popup'
+            bot.send_message(message.chat.id, f"Enter the popup button text and message separated by | (e.g. Button Title | Popup Message):\n\nℹ️ Current:\n{global_w_setup.get('payout_btn_text', '📜 View Receipt')} | {global_w_setup.get('payout_popup_msg', 'Payment Success!')}", reply_markup=get_cancel_action_keyboard())
         else:
             bot.send_message(message.chat.id, f"🛠 <b>{text}</b> is acknowledged. Setup feature coming soon!", parse_mode="HTML", reply_markup=get_keyboard(user_id))
+        return
+
+    if state == 'wait_payout_popup':
+        if '|' in text:
+            btn_title, popup_msg = text.split('|', 1)
+            global_w_setup['payout_btn_text'] = btn_title.strip()
+            global_w_setup['payout_popup_msg'] = popup_msg.strip()
+            user_state[user_id] = 'admin_w_menu'
+            bot.send_message(message.chat.id, "✅ Payout Popup settings saved successfully!", reply_markup=get_keyboard(user_id))
+        else:
+            bot.send_message(message.chat.id, "⚠️ Invalid format. You must separate the Title and Message with a | character. Try again:", reply_markup=get_cancel_action_keyboard())
         return
 
     if state.startswith('w_setup_'):
@@ -3453,21 +3513,21 @@ def handle_messages(message):
                 process_accruals(target)
                 u = user_db[target]
                 btype = admin_bal_type[user_id]
-                
+
                 info_msg = f"👤 <b>User Found</b>\nID: <code>{target}</code>\nName: {u['first_name']}\nUsername: @{u['username']}\n💰 Current {btype.title()}: <b>{fmt_amt(u[btype])}</b>\n\n"
-                
-                if admin_bal_comment_on.get(user_id, False):
-                    user_state[user_id] = state.replace('_id', '_comment')
-                    bot.send_message(message.chat.id, info_msg + "Enter the <b>comment</b> for the balance change:", parse_mode="HTML", reply_markup=get_keyboard(user_id))
-                else:
-                    admin_bal_comment_text[user_id] = ""
-                    user_state[user_id] = state.replace('_id', '_amount')
-                    bot.send_message(message.chat.id, info_msg + "Enter the <b>numeric value</b> (+/- allowed for change):", parse_mode="HTML", reply_markup=get_keyboard(user_id))
-            else:
-                bot.send_message(message.chat.id, "❌ User not found. Try again or Cancel.")
-        except ValueError:
-            bot.send_message(message.chat.id, "⚠️ Invalid ID. Must be a number.")
-        return
+                        
+                        if admin_bal_comment_on.get(user_id, False):
+                            user_state[user_id] = state.replace('_id', '_comment')
+                            bot.send_message(message.chat.id, info_msg + "Enter the <b>comment</b> for the balance change:", parse_mode="HTML", reply_markup=get_keyboard(user_id))
+                        else:
+                            admin_bal_comment_text[user_id] = ""
+                            user_state[user_id] = state.replace('_id', '_amount')
+                            bot.send_message(message.chat.id, info_msg + "Enter the <b>numeric value</b> (+/- allowed for change):", parse_mode="HTML", reply_markup=get_keyboard(user_id))
+                    else:
+                        bot.send_message(message.chat.id, "❌ User not found. Try again or Cancel.")
+                except ValueError:
+                    bot.send_message(message.chat.id, "⚠️ Invalid ID. Must be a number.")
+                return
 
     if state in ['bal_change_comment', 'bal_set_comment']:
         if text == '➖ Set Empty': admin_bal_comment_text[user_id] = ""
@@ -3915,6 +3975,12 @@ def handle_inline(call):
         bot.answer_callback_query(call.id, get_tl_and_map("🚫 You are currently blocked.", lang), show_alert=True)
         return
 
+    # --- FEATURE 2: NATIVE TELEGRAM POPUP ALERT LISTENER ---
+    if call.data == 'cb_payout_popup_alert':
+        popup_msg = global_w_setup.get('payout_popup_msg', 'Payment Success!')
+        bot.answer_callback_query(call.id, get_tl_and_map(popup_msg, lang), show_alert=True)
+        return
+
     # --- FEATURE 7: INLINE STATS SCANNER ---
     if call.data == 'cb_scan_users':
         if not is_admin: return bot.answer_callback_query(call.id, "Action not permitted.", show_alert=True)
@@ -4147,7 +4213,13 @@ def handle_inline(call):
                 msg_template = global_w_setup.get('w_msg_approve')
                 if msg_template:
                     msg = replace_macros(msg_template, target, w_data['path'], w_data)
-                    try: bot.send_message(target, get_tl_and_map(msg, target_lang), parse_mode="HTML")
+                    
+                    # FEATURE 2: Attach Native Telegram Popup Button
+                    payout_markup = InlineKeyboardMarkup()
+                    btn_text = global_w_setup.get('payout_btn_text', '📜 View Receipt')
+                    payout_markup.row(InlineKeyboardButton(get_tl_and_map(btn_text, target_lang), callback_data='cb_payout_popup_alert'))
+                    
+                    try: bot.send_message(target, get_tl_and_map(msg, target_lang), parse_mode="HTML", reply_markup=payout_markup)
                     except: pass
             
             pub_chat = global_w_setup.get('public_report')
