@@ -3946,9 +3946,18 @@ def handle_inline(call):
     target_btn = user_selected_button.get(user_id)
     is_admin = user_id in ADMIN_IDS
     lang = user_db.get(user_id, {}).get('lang', 'en')
+
+    # --- NEW: NATIVE POPUP ALERT HANDLER ---
+    if call.data == 'cb_payout_popup_alert':
+        # Grab the message you saved in the Admin Panel
+        popup_msg = global_w_setup.get('payout_popup_msg', 'Payment Processed!')
+        # show_alert=True makes it a native popup box with an 'OK' button
+        bot.answer_callback_query(call.id, text=get_tl_and_map(popup_msg, lang), show_alert=True)
+        return
     
     # Declare it globally ONCE at the very top of the function
     global pending_withdrawals
+
 
     # --- NEW: INTERCEPT BLOCKED USERS INLINE CALLS ---
     if user_id in blocked_users:
