@@ -1200,10 +1200,19 @@ def get_settings_keyboard(full_path):
 
 def get_global_withdrawal_keyboard():
     markup = ReplyKeyboardMarkup(resize_keyboard=True)
+    
+    # --- EXISTING LOGIC ---
     addr_text = "☑️ On" if global_w_setup.get('do_not_ask_address') else "⬜️ Off"
     rate_text = "☑️ On" if global_w_setup.get('w_rate_toggle') else "⬜️ Off"
     comm_val = global_w_setup.get('w_commission', 0.0)
     
+    # --- NEW: ASCII STATUS LOGIC ---
+    ascii_status = "☑️ On" if global_w_setup.get('use_ascii_receipt') else "⬜️ Off"
+    
+    # --- NEW: ADD THE TOGGLE AND POPUP BUTTON ROW ---
+    markup.row(KeyboardButton(f'ASCII Receipt ({ascii_status})'), KeyboardButton('Edit Payout Popup'))
+    
+    # --- REST OF THE ORIGINAL BUTTONS ---
     markup.row(KeyboardButton('Set Withdrawal Var'), KeyboardButton('Set Min/Max'))
     markup.row(KeyboardButton('Edit Enter Msg'), KeyboardButton('Edit Address Msg'))
     markup.row(KeyboardButton('Edit Confirm Msg'), KeyboardButton('Processing Message'))
@@ -1213,7 +1222,9 @@ def get_global_withdrawal_keyboard():
     markup.row(KeyboardButton(f'Do not ask for Address ({addr_text})'))
     markup.row(KeyboardButton(f'Commission ({comm_val}%)'), KeyboardButton(f'Rate ({rate_text})'))
     markup.row(KeyboardButton('🔙 Back to Admin'))
+    
     return markup
+
 
 def get_admin_wallet_keyboard():
     markup = ReplyKeyboardMarkup(resize_keyboard=True)
