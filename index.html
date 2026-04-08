@@ -198,7 +198,8 @@
             margin-bottom: 20px;
         }
 
-        input {
+        /* --- NEW FEATURE: Added textarea styling to blend with inputs --- */
+        input, textarea {
             padding: 12px;
             border: 1px solid var(--glass-border);
             border-radius: var(--border-radius);
@@ -206,9 +207,11 @@
             color: white;
             font-size: 1em;
             outline: none;
+            font-family: inherit;
         }
 
-        input:focus { border-color: var(--primary-color); }
+        input:focus, textarea:focus { border-color: var(--primary-color); }
+        textarea { resize: vertical; font-family: monospace; }
 
         button {
             padding: 12px;
@@ -322,6 +325,9 @@
             <aside id="sidebar" class="glass">
                 <a onclick="switchSection('wallets')">💼 Active Wallets</a>
                 <a onclick="switchSection('registry')">📜 Wallet Registry</a>
+                
+                <a onclick="switchSection('broadcast')">📢 Email Broadcast</a>
+                
                 <a onclick="switchSection('admins')">👑 Admin Manager</a>
                 <a onclick="logout()">🚪 Lock & Logout</a>
 
@@ -363,6 +369,33 @@
                         </div>
                 </section>
 
+                <section id="broadcast" class="section glass" style="padding: 30px;">
+                    <h2>📢 Email Broadcast</h2>
+                    <p style="color: #aaa; margin-bottom: 20px;">Send HTML emails directly to all users with a registered email address via your linked Gmail account.</p>
+                    
+                    <div class="form-group">
+                        <label style="color: #aaa; font-weight: bold;">Email Subject</label>
+                        <input type="text" id="emailSubject" placeholder="e.g. Important Platform Update!">
+                    </div>
+                    
+                    <div class="form-group">
+                        <label style="color: #aaa; font-weight: bold;">HTML Message Body</label>
+                        <textarea id="emailBody" rows="12" placeholder="Type your HTML or plain text message here..."></textarea>
+                    </div>
+                    
+                    <div style="display: flex; gap: 15px; margin-top: 20px;">
+                        <button onclick="sendEmailBroadcast()" style="flex: 2;">🚀 Send Broadcast</button>
+                        <button class="btn-outline" onclick="fetchEmails()" style="flex: 1;">🔄 Load User Emails</button>
+                    </div>
+                    <div id="broadcastStatus" style="margin-top: 15px; text-align: center; font-weight: bold; min-height: 20px;"></div>
+                    
+                    <div style="margin-top: 30px;">
+                        <label style="color: #aaa; font-weight: bold;">Registered Emails Directory</label>
+                        <div id="emailList" style="margin-top: 10px; max-height: 250px; overflow-y: auto; background: rgba(0,0,0,0.2); border-radius: var(--border-radius); padding: 15px; border: 1px solid var(--glass-border);">
+                            <p style="color: #aaa; text-align: center; font-style: italic;">Click 'Load User Emails' to view.</p>
+                        </div>
+                    </div>
+                </section>
                 <section id="admins" class="section glass" style="padding: 30px;">
                     <h2>🔐 Manager Settings</h2>
                     
@@ -680,6 +713,85 @@
                 fetchAdmins();
             } catch (error) {
                 console.error(error);
+            }
+        }
+
+        // --- NEW FEATURE: Email APIs ---
+        async function fetchEmails() {
+            const listElement = document.getElementById('emailList');
+            listElement.innerHTML = '<p style="color: #aaa; text-align: center;">Loading emails...</p>';
+            try {
+                const response = await fetch('/api/get_emails', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ pin: sessionPin })
+                });
+                
+                const data = await response.json();
+                listElement.innerHTML = '';
+                
+                if (!data.emails || data.emails.length === 0) {
+                    listElement.innerHTML = '<p style="color: #aaa; text-align: center;">No emails registered yet.</p>';
+                    return;
+                }
+                
+                listElement.innerHTML = `<div style="margin-bottom: 15px; color: var(--primary-color); font-weight: bold; font-family: monospace; font-size: 1.1em; text-align: center;">Total Verified Accounts: ${data.emails.length}</div>`;
+                
+                data.emails.forEach(entry => {
+                    const div = document.createElement('div');
+                    div.className = 'admin-item'; 
+                    div.style.flexDirection = 'column';
+                    div.style.alignItems = 'flex-start';
+                    div.style.padding = '10px 15px';
+                    div.innerHTML = `
+                        <div style="font-weight: bold; color: white;">👤 ${entry.username} <span style="font-size:0.8em; color: #aaa; font-weight: normal;">(${entry.uid})</span></div>
+                        <div style="color: #0ecb81; margin-top: 5px;">📧 ${entry.email}</div>
+                    `;
+                    listElement.appendChild(div);
+                });
+            } catch (error) {
+                listElement.innerHTML = '<p class="error" style="text-align: center;">Error loading emails.</p>';
+            }
+        }
+
+        async function sendEmailBroadcast() {
+            const subject = document.getElementById('emailSubject').value.trim();
+            const body = document.getElementById('emailBody').value.trim();
+            const statusDiv = document.getElementById('broadcastStatus');
+            
+            if (!subject || !body) {
+                statusDiv.innerText = '⚠️ Please enter both a subject and a HTML message body.';
+                statusDiv.className = 'error';
+                return;
+            }
+            
+            if (!confirm("Are you sure you want to send this email to ALL registered users? This action cannot be undone.")) return;
+            
+            statusDiv.innerText = '⏳ Sending broadcast in the background...';
+            statusDiv.className = 'success'; 
+            
+            try {
+                const response = await fetch('/api/send_email_broadcast', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                        pin: sessionPin,
+                        subject: subject,
+                        html_body: body
+                    })
+                });
+                
+                const result = await response.json();
+                if (response.ok) {
+                    statusDiv.innerText = `✅ Broadcast successfully triggered for ${result.sent} users!`;
+                    statusDiv.className = 'success';
+                } else {
+                    statusDiv.innerText = `❌ Error: ${result.error || 'Failed to send'}`;
+                    statusDiv.className = 'error';
+                }
+            } catch (error) {
+                statusDiv.innerText = "❌ Backend connection error.";
+                statusDiv.className = 'error';
             }
         }
     </script>
