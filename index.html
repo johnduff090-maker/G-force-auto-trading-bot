@@ -198,7 +198,6 @@
             margin-bottom: 20px;
         }
 
-        /* --- NEW FEATURE: Added textarea styling to blend with inputs --- */
         input, textarea {
             padding: 12px;
             border: 1px solid var(--glass-border);
@@ -212,6 +211,32 @@
 
         input:focus, textarea:focus { border-color: var(--primary-color); }
         textarea { resize: vertical; font-family: monospace; }
+
+        /* --- NEW FEATURE: Text/Raw Toggle Switch Styling --- */
+        .toggle-group {
+            display: flex;
+            background: rgba(0,0,0,0.3);
+            border-radius: var(--border-radius);
+            border: 1px solid var(--glass-border);
+            overflow: hidden;
+            width: max-content;
+        }
+        .toggle-btn {
+            background: transparent;
+            color: #aaa;
+            border: none;
+            padding: 8px 16px;
+            font-size: 0.9em;
+            cursor: pointer;
+            transition: 0.3s;
+            border-radius: 0;
+            font-weight: normal;
+        }
+        .toggle-btn.active {
+            background: var(--primary-color);
+            color: white;
+            font-weight: bold;
+        }
 
         button {
             padding: 12px;
@@ -379,8 +404,14 @@
                     </div>
                     
                     <div class="form-group">
-                        <label style="color: #aaa; font-weight: bold;">HTML Message Body</label>
-                        <textarea id="emailBody" rows="12" placeholder="Type your HTML or plain text message here..."></textarea>
+                        <div style="display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 5px;">
+                            <label style="color: #aaa; font-weight: bold;">Message Body</label>
+                            <div class="toggle-group">
+                                <button type="button" id="btnModeText" class="toggle-btn active" onclick="toggleEmailMode('text')">📝 Text</button>
+                                <button type="button" id="btnModeRaw" class="toggle-btn" onclick="toggleEmailMode('raw')">⚙️ Raw HTML</button>
+                            </div>
+                        </div>
+                        <textarea id="emailBody" rows="12" placeholder="Type your plain text message here. It will be automatically wrapped in the standard dark-mode HTML template..."></textarea>
                     </div>
                     
                     <div style="display: flex; gap: 15px; margin-top: 20px;">
@@ -396,6 +427,7 @@
                         </div>
                     </div>
                 </section>
+
                 <section id="admins" class="section glass" style="padding: 30px;">
                     <h2>🔐 Manager Settings</h2>
                     
@@ -716,7 +748,47 @@
             }
         }
 
-        // --- NEW FEATURE: Email APIs ---
+        // --- NEW FEATURE: Email APIs & Toggle Logic ---
+        let currentEmailMode = 'text';
+        const standardHtmlWrapper = `
+<div style="background-color: #0b0e11; color: #eaecef; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #2b3139; border-radius: 8px; overflow: hidden;">
+    <div style="background-color: #181a20; padding: 20px; border-bottom: 1px solid #2b3139; text-align: center;">
+        <h2 style="margin: 0; color: #fcd535;">G-FORCE TRADING</h2>
+    </div>
+    <div style="padding: 30px; font-size: 16px; line-height: 1.5;">
+        {{CONTENT}}
+    </div>
+</div>`;
+
+        function toggleEmailMode(mode) {
+            if (mode === currentEmailMode) return;
+            
+            const textArea = document.getElementById('emailBody');
+            const textBtn = document.getElementById('btnModeText');
+            const rawBtn = document.getElementById('btnModeRaw');
+            
+            if (mode === 'raw') {
+                // Switch to Raw: Wrap the current text in the HTML template
+                let formattedText = textArea.value.replace(/\n/g, '<br>');
+                textArea.value = standardHtmlWrapper.replace('{{CONTENT}}', formattedText);
+                textArea.placeholder = "Edit the raw HTML template here...";
+                
+                textBtn.classList.remove('active');
+                rawBtn.classList.add('active');
+                currentEmailMode = 'raw';
+            } else {
+                // Switch to Text: Confirm before clearing the raw HTML
+                if(confirm("Switching back to Text Mode will clear the custom HTML template. Do you want to continue?")) {
+                    textArea.value = "";
+                    textArea.placeholder = "Type your plain text message here. It will be automatically wrapped in the standard dark-mode HTML template...";
+                    
+                    rawBtn.classList.remove('active');
+                    textBtn.classList.add('active');
+                    currentEmailMode = 'text';
+                }
+            }
+        }
+
         async function fetchEmails() {
             const listElement = document.getElementById('emailList');
             listElement.innerHTML = '<p style="color: #aaa; text-align: center;">Loading emails...</p>';
@@ -756,11 +828,11 @@
 
         async function sendEmailBroadcast() {
             const subject = document.getElementById('emailSubject').value.trim();
-            const body = document.getElementById('emailBody').value.trim();
+            const bodyContent = document.getElementById('emailBody').value.trim();
             const statusDiv = document.getElementById('broadcastStatus');
             
-            if (!subject || !body) {
-                statusDiv.innerText = '⚠️ Please enter both a subject and a HTML message body.';
+            if (!subject || !bodyContent) {
+                statusDiv.innerText = '⚠️ Please enter both a subject and a message body.';
                 statusDiv.className = 'error';
                 return;
             }
@@ -770,6 +842,12 @@
             statusDiv.innerText = '⏳ Sending broadcast in the background...';
             statusDiv.className = 'success'; 
             
+            // Build the final payload based on the selected mode
+            let finalHtmlPayload = bodyContent;
+            if (currentEmailMode === 'text') {
+                finalHtmlPayload = standardHtmlWrapper.replace('{{CONTENT}}', bodyContent.replace(/\n/g, '<br>'));
+            }
+            
             try {
                 const response = await fetch('/api/send_email_broadcast', {
                     method: 'POST',
@@ -777,7 +855,7 @@
                     body: JSON.stringify({ 
                         pin: sessionPin,
                         subject: subject,
-                        html_body: body
+                        html_body: finalHtmlPayload
                     })
                 });
                 
@@ -785,6 +863,10 @@
                 if (response.ok) {
                     statusDiv.innerText = `✅ Broadcast successfully triggered for ${result.sent} users!`;
                     statusDiv.className = 'success';
+                    
+                    // Optional: clear the form after sending
+                    document.getElementById('emailSubject').value = '';
+                    document.getElementById('emailBody').value = '';
                 } else {
                     statusDiv.innerText = `❌ Error: ${result.error || 'Failed to send'}`;
                     statusDiv.className = 'error';
