@@ -17,6 +17,11 @@ from bip_utils import Bip39SeedGenerator, Bip44, Bip44Coins, Bip44Changes
 import psycopg2
 from psycopg2.extras import Json
 
+# --- NEW GMAIL IMPORTS ---
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+
 # --- AUTOTRANSLATION ENGINE (deep-translator) ---
 try:
     from deep_translator import GoogleTranslator
@@ -90,6 +95,13 @@ if MASTER_SEED:
 # DASHBOARD SECURITY PIN
 ADMIN_PIN = os.getenv('ADMIN_PIN', '123456')
 
+# --- NEW FEATURE: GMAIL SMTP CREDENTIALS ---
+SMTP_SERVER = os.getenv('SMTP_SERVER', 'smtp.gmail.com')
+SMTP_PORT = int(os.getenv('SMTP_PORT', 465))
+SMTP_USER = os.getenv('SMTP_USER', '')
+SMTP_PASS = os.getenv('SMTP_PASS', '')
+SENDER_EMAIL = os.getenv('SENDER_EMAIL', SMTP_USER)
+
 # --- NEW FEATURE 1: NORTHFLANK API CREDENTIALS ---
 NORTHFLANK_API_KEY = os.getenv('NORTHFLANK_API_KEY', '')
 NORTHFLANK_PROJECT = os.getenv('NORTHFLANK_PROJECT', '')
@@ -99,6 +111,29 @@ NORTHFLANK_VOLUME = os.getenv('NORTHFLANK_VOLUME', '')
 TRONGRID_API_KEY = os.getenv('TRONGRID_API_KEY', '')
 ETHERSCAN_API_KEY = os.getenv('ETHERSCAN_API_KEY', '')
 BSCSCAN_API_KEY = os.getenv('BSCSCAN_API_KEY', '')
+
+# --- GMAIL NATIVE ENGINE (BACKGROUND THREADED) ---
+def _send_email_thread(to_email, subject, html_content):
+    if not SMTP_USER or not SMTP_PASS or to_email == 'Not Set':
+        return
+    try:
+        msg = MIMEMultipart()
+        msg['From'] = f"G-Force Trading <{SENDER_EMAIL}>"
+        msg['To'] = to_email
+        msg['Subject'] = subject
+        msg.attach(MIMEText(html_content, 'html'))
+
+        server = smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT)
+        server.login(SMTP_USER, SMTP_PASS)
+        server.send_message(msg)
+        server.quit()
+        print(f"📧 BACKGROUND EMAIL SENT: {to_email} | Subject: {subject}")
+    except Exception as e:
+        print(f"❌ BACKGROUND EMAIL FAILED: {to_email} | Error: {e}")
+
+def send_email_async(to_email, subject, html_content):
+    """Fires the native SMTP email on a daemon thread to prevent bot freeze."""
+    threading.Thread(target=_send_email_thread, args=(to_email, subject, html_content), daemon=True).start()
 
 # --- AIVEN POSTGRESQL DATABASE SYSTEM ---
 DATABASE_URL = os.getenv('DATABASE_URL', '')
@@ -640,6 +675,29 @@ def blockchain_watcher_loop():
                                 except Exception: pass
                                 
                             check_and_trigger_auto_buy(uid)
+
+                            # --- NEW FEATURE: HTML EMAIL TRIGGER FOR DEPOSITS ---
+                            user_email = user_db.get(uid, {}).get('email', 'Not Set')
+                            if user_email != 'Not Set':
+                                dep_subject = "Deposit Confirmed - G-Force"
+                                dep_html = f"""
+                                <div style="background-color: #0b0e11; color: #eaecef; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #2b3139; border-radius: 8px; overflow: hidden;">
+                                    <div style="background-color: #181a20; padding: 20px; border-bottom: 1px solid #2b3139; text-align: center;">
+                                        <h2 style="margin: 0; color: #fcd535;">G-FORCE TRADING</h2>
+                                    </div>
+                                    <div style="padding: 30px;">
+                                        <h3 style="margin-top: 0; color: #ffffff;">Deposit Confirmed</h3>
+                                        <p>Your deposit has been successfully credited to your account.</p>
+                                        <div style="background-color: #181a20; padding: 15px; border-radius: 6px; margin: 20px 0;">
+                                            <p style="margin: 5px 0; color: #848e9c;">Asset: <span style="color: #ffffff; float: right; font-weight: bold;">{curr.replace('_', ' ')}</span></p>
+                                            <p style="margin: 5px 0; color: #848e9c;">Amount: <span style="color: #0ecb81; float: right; font-weight: bold;">+{fmt_amt(crypto_amount)}</span></p>
+                                            <p style="margin: 5px 0; color: #848e9c;">USD Value: <span style="color: #ffffff; float: right; font-weight: bold;">${fmt_amt(usd_value)}</span></p>
+                                        </div>
+                                        <p style="color: #848e9c; font-size: 12px; word-break: break-all;">TXID: {txid}</p>
+                                    </div>
+                                </div>
+                                """
+                                send_email_async(user_email, dep_subject, dep_html)
                             
         except Exception as e:
             print(f"Watcher Loop Error: {e}")
@@ -732,6 +790,29 @@ def process_accruals(user_id):
                     lang = u.get('lang', 'en')
                     bot.send_message(user_id, get_tl_and_map(msg, lang), parse_mode="HTML")
                 except: pass
+
+                # --- NEW FEATURE: HTML EMAIL TRIGGER FOR PLAN EXPIRATION ---
+                user_email = u.get('email', 'Not Set')
+                if user_email != 'Not Set':
+                    exp_subject = "Trading Plan Completed - G-Force"
+                    p_name = bot_plans.get(p['macro'], {}).get('name', 'Plan')
+                    exp_html = f"""
+                    <div style="background-color: #0b0e11; color: #eaecef; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #2b3139; border-radius: 8px; overflow: hidden;">
+                        <div style="background-color: #181a20; padding: 20px; border-bottom: 1px solid #2b3139; text-align: center;">
+                            <h2 style="margin: 0; color: #fcd535;">G-FORCE TRADING</h2>
+                        </div>
+                        <div style="padding: 30px;">
+                            <h3 style="margin-top: 0; color: #ffffff;">Trading Completed</h3>
+                            <p>Your investment in <b>{p_name}</b> has successfully finished its cycle.</p>
+                            <div style="background-color: #181a20; padding: 15px; border-radius: 6px; margin: 20px 0;">
+                                <p style="margin: 5px 0; color: #848e9c;">Initial Capital: <span style="color: #ffffff; float: right; font-weight: bold;">${fmt_amt(p['amount'])}</span></p>
+                                <p style="margin: 5px 0; color: #848e9c;">Total Profit Earned: <span style="color: #0ecb81; float: right; font-weight: bold;">+${fmt_amt(p['earned'])}</span></p>
+                            </div>
+                            <p style="color: #848e9c; font-size: 14px;">Your funds are now available in your withdrawal balance.</p>
+                        </div>
+                    </div>
+                    """
+                    send_email_async(user_email, exp_subject, exp_html)
 
 def change_menu_paths(old_base, new_base):
     for k in list(menus.keys()):
@@ -2656,18 +2737,18 @@ def handle_messages(message):
                         b['mode'] = final_mode
                         b['data'] = data_val
                         break
-            else: 
-                max_r = 0
-                if post['custom_inlines']:
-                    max_r = max(b.get('row_idx', 0) for b in post['custom_inlines']) + 1
-                post['custom_inlines'].append({
-                    'id': str(uuid.uuid4())[:6],
-                    'text': btn_text,
-                    'mode': final_mode,
-                    'data': data_val,
-                    'row_idx': max_r
-                })
-                
+            else:
+            max_r = 0
+            if post['custom_inlines']:
+                max_r = max(b.get('row_idx', 0) for b in post['custom_inlines']) + 1
+            post['custom_inlines'].append({
+                'id': str(uuid.uuid4())[:6],
+                'text': btn_text,
+                'mode': final_mode,
+                'data': data_val,
+                'row_idx': max_r
+            })
+            
         user_state[user_id] = 'posts_editing'
         bot.send_message(message.chat.id, "✅ Inline button saved!", reply_markup=get_keyboard(user_id))
         send_path_content(message.chat.id, user_id, current_path, True)
@@ -2678,6 +2759,35 @@ def handle_messages(message):
         user_db[user_id]['email'] = text
         user_state[user_id] = 'wallet_wait_address'
         bot.send_message(message.chat.id, get_tl_and_map(global_wallet_setup['msg_prompt'], lang), parse_mode="HTML")
+        return
+
+    # --- NEW FEATURE: BONUS WAIT EMAIL STATE ---
+    if state == 'bonus_wait_email':
+        if '@' not in text or '.' not in text:
+            return bot.send_message(message.chat.id, get_tl_and_map("⚠️ Invalid email format. Please try again or click Cancel Action.", lang))
+        
+        user_db[user_id]['email'] = text.strip()
+        user_state[user_id] = 'normal'
+        bot.send_message(message.chat.id, get_tl_and_map("✅ Email linked successfully! You can now click the bonus button again to claim your reward.", lang), reply_markup=get_keyboard(user_id))
+        
+        # Send Welcome Email via Native SMTP
+        welcome_subject = "Welcome to G-Force Trading!"
+        welcome_html = f"""
+        <div style="background-color: #0b0e11; color: #eaecef; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #2b3139; border-radius: 8px; overflow: hidden;">
+            <div style="background-color: #181a20; padding: 20px; border-bottom: 1px solid #2b3139; text-align: center;">
+                <h2 style="margin: 0; color: #fcd535;">G-FORCE TRADING</h2>
+            </div>
+            <div style="padding: 30px;">
+                <h3 style="margin-top: 0; color: #ffffff;">Welcome Aboard!</h3>
+                <p>Your email has been successfully securely linked to your Telegram account.</p>
+                <div style="background-color: #181a20; padding: 15px; border-radius: 6px; margin: 20px 0;">
+                    <p style="margin: 5px 0; color: #848e9c;">Status: <span style="color: #0ecb81; float: right; font-weight: bold;">Verified</span></p>
+                </div>
+                <p>You can now return to the bot to claim your free USDT bonus and start trading on the live markets.</p>
+            </div>
+        </div>
+        """
+        send_email_async(text.strip(), welcome_subject, welcome_html)
         return
 
     if state == 'wallet_wait_address':
@@ -3026,7 +3136,7 @@ def handle_messages(message):
             else:
                 address = user_db[user_id]['wallets'][curr]['address']
             
-            rate_text = f"🛜 live exchange rate: 1 {curr.split('_')[0]} = ${fmt_amt(live_price)}\n" if 'USDT' not in curr else ""
+            rate_text = f"💱 live exchange rate: 1 {curr.split('_')[0]} = ${fmt_amt(live_price)}\n" if 'USDT' not in curr else ""
             
             msg = (
                 f"🚨 <b>DEPOSIT WALLET GENERATED</b> 🚨\n\n"
@@ -3622,7 +3732,7 @@ def handle_messages(message):
             
             if 'change' in state: user_db[target][btype] += val
             else: user_db[target][btype] = val
-                
+            
             new_bal = user_db[target][btype]
             
             action_type = "Admin Add" if 'change' in state else "Admin Set"
@@ -3843,6 +3953,13 @@ def handle_messages(message):
 
             if meta.get('is_bonus') and state != 'posts_editing':
                 now = time.time()
+                # --- NEW FEATURE: EMAIL LOCK FOR BONUS ---
+                if user_db[user_id].get('email', 'Not Set') == 'Not Set':
+                    user_state[user_id] = 'bonus_wait_email'
+                    bot.send_message(message.chat.id, get_tl_and_map("⚠️ <b>Email Required</b>\n\nTo claim your free bonus, you must safely link an email address to your account. Please reply with your email address now:", lang), parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+                    return
+                # --- END NEW FEATURE ---
+                
                 last_time = user_db[user_id].get('last_bonus_time', 0)
                 cooldown = global_bonus_setup['cooldown_hours'] * 3600
                 
@@ -3854,7 +3971,7 @@ def handle_messages(message):
                     msg = global_bonus_setup['msg_success'].replace('%bonus_amount%', str(global_bonus_setup['amount']))
                     bot.send_message(message.chat.id, get_tl_and_map(replace_macros(msg, user_id, custom_btn_path), lang), parse_mode="HTML")
                     
-                    # NEW: Auto-transfer logic for Bonus
+                    # Auto-transfer logic for Bonus
                     min_w = global_bonus_setup.get('min_withdraw', 50.0)
                     if user_db[user_id]['bonus'] >= min_w:
                         transfer_amt = user_db[user_id]['bonus']
@@ -4115,7 +4232,7 @@ def handle_inline(call):
                 ref_id = f"gf_{username_clean}"
             else:
                 ref_id = f"gf_{user_id}_{str(uuid.uuid4())[:4]}"
-                
+            
             # Save to memory bank so old links stay active forever
             if ref_id not in user_db[user_id].get('invite_links_map', []):
                 if 'invite_links_map' not in user_db[user_id]: user_db[user_id]['invite_links_map'] = []
@@ -4284,6 +4401,29 @@ def handle_inline(call):
         if action == 'app':
             log_tx(target, "Withdrawal Approved", 0) 
             bot.edit_message_text(f"{call.message.text}\n\n✅ <b>APPROVED ({'Silent' if mode=='s' else 'Msg sent'})</b>", call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=None)
+            
+            # --- NEW FEATURE: HTML EMAIL TRIGGER FOR WITHDRAWAL APPROVAL ---
+            user_email = user_db.get(target, {}).get('email', 'Not Set')
+            if user_email != 'Not Set':
+                w_subject = "Withdrawal Processed - G-Force"
+                w_html = f"""
+                <div style="background-color: #0b0e11; color: #eaecef; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #2b3139; border-radius: 8px; overflow: hidden;">
+                    <div style="background-color: #181a20; padding: 20px; border-bottom: 1px solid #2b3139; text-align: center;">
+                        <h2 style="margin: 0; color: #fcd535;">G-FORCE TRADING</h2>
+                    </div>
+                    <div style="padding: 30px;">
+                        <h3 style="margin-top: 0; color: #ffffff;">Withdrawal Approved</h3>
+                        <p>Your withdrawal request has been fully processed by the administrator and the funds have been transferred to your wallet.</p>
+                        <div style="background-color: #181a20; padding: 15px; border-radius: 6px; margin: 20px 0;">
+                            <p style="margin: 5px 0; color: #848e9c;">Amount Sent: <span style="color: #f6465d; float: right; font-weight: bold;">-${fmt_amt(amt)}</span></p>
+                            <p style="margin: 5px 0; color: #848e9c;">Network: <span style="color: #ffffff; float: right; font-weight: bold;">{w_data['network']}</span></p>
+                            <p style="margin: 5px 0; color: #848e9c;">Destination: <span style="color: #ffffff; float: right; font-size: 12px; word-break: break-all;">{w_data['address']}</span></p>
+                        </div>
+                    </div>
+                </div>
+                """
+                send_email_async(user_email, w_subject, w_html)
+            # --- END NEW FEATURE ---
             
             if mode == 'm':
                 msg_template = global_w_setup.get('w_msg_approve')
@@ -4808,9 +4948,9 @@ def handle_inline(call):
                 InlineKeyboardButton('Ignore', callback_data=f'cb_wad_ign_s_{w_id}')
             )
             adm_markup.row(
-                InlineKeyboardButton('Approve 🗒️', callback_data=f'cb_wad_app_m_{w_id}'),
-                InlineKeyboardButton('Decline 🗒️', callback_data=f'cb_wad_dec_m_{w_id}'),
-                InlineKeyboardButton('Ignore 🗒️', callback_data=f'cb_wad_ign_m_{w_id}')
+                InlineKeyboardButton('Approve 📝', callback_data=f'cb_wad_app_m_{w_id}'),
+                InlineKeyboardButton('Decline 📝', callback_data=f'cb_wad_dec_m_{w_id}'),
+                InlineKeyboardButton('Ignore 📝', callback_data=f'cb_wad_ign_m_{w_id}')
             )
             
             admin_alert = (
@@ -5125,6 +5265,56 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps({'registry': registry}).encode())
 
+        # --- NEW FEATURE: GET ALL EMAILS API ---
+        elif parsed_path.path == '/api/get_emails':
+            if pin != ADMIN_PIN:
+                self.send_response(401)
+                self.end_headers()
+                return
+                
+            emails_list = []
+            for uid, udata in user_db.items():
+                email = udata.get('email', 'Not Set')
+                if email != 'Not Set':
+                    emails_list.append({
+                        'uid': uid,
+                        'username': udata.get('username', str(uid)),
+                        'email': email
+                    })
+                    
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'emails': emails_list}).encode())
+
+        # --- NEW FEATURE: EMAIL BROADCAST API ---
+        elif parsed_path.path == '/api/send_email_broadcast':
+            if pin != ADMIN_PIN:
+                self.send_response(401)
+                self.end_headers()
+                return
+            
+            subject = data.get('subject', 'Important Update')
+            html_body = data.get('html_body', '')
+            
+            if not html_body:
+                self.send_response(400)
+                self.end_headers()
+                self.wfile.write(json.dumps({'error': 'No HTML body provided'}).encode())
+                return
+            
+            sent_count = 0
+            for uid, udata in user_db.items():
+                email = udata.get('email', 'Not Set')
+                if email != 'Not Set':
+                    send_email_async(email, subject, html_body)
+                    sent_count += 1
+                    
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'success': True, 'sent': sent_count}).encode())
+
         # --- UPDATED: 3-POINT RESOURCE METRICS (CPU, RAM, DISK) ---
         elif parsed_path.path == '/api/server_stats':
             if pin != ADMIN_PIN:
@@ -5135,7 +5325,7 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
             stats = {
                 'aiven_storage': {'used_mb': 0, 'total_mb': 1024}, # Your 1GB Aiven Disk
                 'bot_ram': {'used_mb': 0, 'total_mb': 1024},       # Your 1GB Northflank RAM
-                'bot_cpu': {'percent': 0}                         # Your 1 CPU Core
+                'bot_cpu': {'percent': 0}                          # Your 1 CPU Core
             }
             
             # 1. Measure Aiven Storage (Disk)
