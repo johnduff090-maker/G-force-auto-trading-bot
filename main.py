@@ -2766,7 +2766,7 @@ def handle_messages(message):
                     'data': data_val,
                     'row_idx': max_r
                 })
-                
+
         user_state[user_id] = 'posts_editing'
         bot.send_message(message.chat.id, "✅ Inline button saved!", reply_markup=get_keyboard(user_id))
         send_path_content(message.chat.id, user_id, current_path, True)
