@@ -2766,7 +2766,7 @@ def handle_messages(message):
                     'data': data_val,
                     'row_idx': max_r
                 })
-
+                
         user_state[user_id] = 'posts_editing'
         bot.send_message(message.chat.id, "✅ Inline button saved!", reply_markup=get_keyboard(user_id))
         send_path_content(message.chat.id, user_id, current_path, True)
@@ -2808,7 +2808,7 @@ def handle_messages(message):
         send_email_async(text.strip(), welcome_subject, welcome_html)
         return
 
-    else:
+else:
             max_r = 0
             if post['custom_inlines']:
                 max_r = max(b.get('row_idx', 0) for b in post['custom_inlines']) + 1
