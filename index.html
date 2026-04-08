@@ -198,7 +198,7 @@
             margin-bottom: 20px;
         }
 
-        input, textarea {
+        input, textarea, select {
             padding: 12px;
             border: 1px solid var(--glass-border);
             border-radius: var(--border-radius);
@@ -209,10 +209,16 @@
             font-family: inherit;
         }
 
-        input:focus, textarea:focus { border-color: var(--primary-color); }
+        input:focus, textarea:focus, select:focus { border-color: var(--primary-color); }
         textarea { resize: vertical; font-family: monospace; }
+        
+        /* Dropdown specific styling */
+        select option {
+            background-color: var(--bg-color);
+            color: white;
+        }
 
-        /* --- NEW FEATURE: Text/Raw Toggle Switch Styling --- */
+        /* Text/Raw Toggle Switch Styling */
         .toggle-group {
             display: flex;
             background: rgba(0,0,0,0.3);
@@ -352,6 +358,7 @@
                 <a onclick="switchSection('registry')">📜 Wallet Registry</a>
                 
                 <a onclick="switchSection('broadcast')">📢 Email Broadcast</a>
+                <a onclick="switchSection('templates')">📩 Email Templates</a>
                 
                 <a onclick="switchSection('admins')">👑 Admin Manager</a>
                 <a onclick="logout()">🚪 Lock & Logout</a>
@@ -428,6 +435,37 @@
                     </div>
                 </section>
 
+                <section id="templates" class="section glass" style="padding: 30px;">
+                    <h2>📩 Email Templates Editor</h2>
+                    <p style="color: #aaa; margin-bottom: 20px;">Customize the automated HTML emails sent to your users. Use raw HTML code and available macros.</p>
+                    
+                    <div class="form-group">
+                        <label style="color: #aaa; font-weight: bold;">Select Template to Edit</label>
+                        <select id="templateSelector" onchange="loadTemplateText()">
+                            <option value="welcome">Welcome Email (Bonus Link)</option>
+                            <option value="deposit">Deposit Confirmed</option>
+                            <option value="withdrawal">Withdrawal Approved</option>
+                            <option value="expiry">Plan Completed / Expiry</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group" style="margin-top: 20px;">
+                        <label style="color: #aaa; font-weight: bold;">Raw HTML Editor</label>
+                        <textarea id="templateEditor" rows="15" placeholder="Loading template HTML..."></textarea>
+                        
+                        <div style="font-size: 0.85em; color: #888; background: rgba(0,0,0,0.2); padding: 10px; border-radius: var(--border-radius); margin-top: 5px;">
+                            <strong>Available Macros (depends on template):</strong><br>
+                            <code>{currency}</code>, <code>{crypto_amount}</code>, <code>{usd_amount}</code>, <code>{txid}</code><br>
+                            <code>{amount}</code>, <code>{network}</code>, <code>{address}</code><br>
+                            <code>{plan_name}</code>, <code>{initial_amount}</code>, <code>{profit_earned}</code>
+                        </div>
+                    </div>
+
+                    <div style="display: flex; gap: 15px; margin-top: 20px;">
+                        <button onclick="saveTemplates()" style="flex: 2;">💾 Save Current Template</button>
+                    </div>
+                    <div id="templateStatus" style="margin-top: 15px; text-align: center; font-weight: bold; min-height: 20px;"></div>
+                </section>
                 <section id="admins" class="section glass" style="padding: 30px;">
                     <h2>🔐 Manager Settings</h2>
                     
@@ -476,6 +514,7 @@
             if(sectionId === 'wallets') fetchWallets();
             if(sectionId === 'admins') fetchAdmins();
             if(sectionId === 'registry') fetchRegistry(); 
+            if(sectionId === 'templates') fetchTemplates(); // Load templates when tab opens
         }
 
         function closeModal() {
@@ -748,7 +787,7 @@
             }
         }
 
-        // --- NEW FEATURE: Email APIs & Toggle Logic ---
+        // --- EMAIL BROADCAST APIS & TOGGLE LOGIC ---
         let currentEmailMode = 'text';
         const standardHtmlWrapper = `
 <div style="background-color: #0b0e11; color: #eaecef; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #2b3139; border-radius: 8px; overflow: hidden;">
@@ -873,6 +912,75 @@
                 }
             } catch (error) {
                 statusDiv.innerText = "❌ Backend connection error.";
+                statusDiv.className = 'error';
+            }
+        }
+
+        // --- NEW FEATURE: TEMPLATE EDITOR APIS ---
+        let currentTemplates = {};
+
+        async function fetchTemplates() {
+            try {
+                const response = await fetch('/api/get_email_templates', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ pin: sessionPin })
+                });
+                
+                if(response.ok) {
+                    const data = await response.json();
+                    currentTemplates = data.templates;
+                    loadTemplateText(); // Load the currently selected one into the box
+                }
+            } catch (error) {
+                console.error("Error loading templates:", error);
+            }
+        }
+
+        function loadTemplateText() {
+            const selector = document.getElementById('templateSelector');
+            const editor = document.getElementById('templateEditor');
+            const selectedKey = selector.value;
+            
+            if(currentTemplates && currentTemplates[selectedKey]) {
+                editor.value = currentTemplates[selectedKey];
+            } else {
+                editor.value = "Template not found.";
+            }
+        }
+
+        async function saveTemplates() {
+            const selector = document.getElementById('templateSelector');
+            const editor = document.getElementById('templateEditor');
+            const statusDiv = document.getElementById('templateStatus');
+            const selectedKey = selector.value;
+            
+            // Save the active text box back into our local dictionary
+            currentTemplates[selectedKey] = editor.value;
+            
+            statusDiv.innerText = '⏳ Saving templates...';
+            statusDiv.className = 'success';
+
+            try {
+                const response = await fetch('/api/save_email_templates', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                        pin: sessionPin,
+                        templates: currentTemplates 
+                    })
+                });
+                
+                if (response.ok) {
+                    statusDiv.innerText = '✅ Template saved successfully! All future emails will use this design.';
+                    statusDiv.className = 'success';
+                    setTimeout(() => { statusDiv.innerText = ''; }, 3000);
+                } else {
+                    statusDiv.innerText = '❌ Failed to save template.';
+                    statusDiv.className = 'error';
+                }
+            } catch (error) {
+                statusDiv.innerText = '❌ Backend connection error.';
                 statusDiv.className = 'error';
             }
         }
