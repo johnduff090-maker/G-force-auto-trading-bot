@@ -4218,29 +4218,24 @@ def handle_messages(message):
         btn_count = len(btn_metadata)
         msg_count = sum(len(v) for v in menu_posts.values())
         
-        stats_msg = f"""📊 <b>BOT STATISTICS</b>
-#statistics
-
-@{bot_info.username}
-▪️Created: [Auto]
-
-▪️Users: {total_users}
-▫️Active: {active_users}
-▫️Deleted: {dead_count}
-▪️Admins: {len(ADMIN_IDS)}
-
-▪️Bot structure:
-▫️Buttons: {btn_count} / 200
-▫️Messages: {msg_count} / 400"""
-            
-            markup = InlineKeyboardMarkup()
-            markup.add(InlineKeyboardButton('🔍 Scan', callback_data='cb_scan_users'))
-            
-            try:
-                bot.edit_message_text(stats_msg, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=markup)
-            except: pass
-            
-        threading.Thread(target=background_scan, daemon=True).start()
+        stats_msg = (
+            f"📊 <b>BOT STATISTICS</b>\n"
+            f"#statistics\n\n"
+            f"@{bot_info.username}\n"
+            f"▪️Created: [Auto]\n\n"
+            f"▪️Users: {total_users}\n"
+            f"▫️Active: {total_users}\n"
+            f"▫️Deleted: 0\n"
+            f"▪️Admins: {len(ADMIN_IDS)}\n\n"
+            f"▪️Bot structure:\n"
+            f"▫️Buttons: {btn_count} / 200\n"
+            f"▫️Messages: {msg_count} / 400"
+        )
+        
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton('🔍 Scan', callback_data='cb_scan_users'))
+        
+        bot.send_message(message.chat.id, stats_msg, parse_mode="HTML", reply_markup=markup)
         return
 
     # --- NEW: REFERRAL LINK GENERATION INLINE ---
