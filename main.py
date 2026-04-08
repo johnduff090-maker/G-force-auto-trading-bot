@@ -2728,7 +2728,8 @@ def handle_messages(message):
         
         post = next((p for p in menu_posts.get(current_path, []) if p['id'] == post_id), None)
         if post:
-            if 'custom_inlines' not in post: post['custom_inlines'] = []
+            if 'custom_inlines' not in post: 
+                post['custom_inlines'] = []
             
             if btn_id: 
                 for b in post['custom_inlines']:
@@ -2738,17 +2739,18 @@ def handle_messages(message):
                         b['data'] = data_val
                         break
             else:
-            max_r = 0
-            if post['custom_inlines']:
-                max_r = max(b.get('row_idx', 0) for b in post['custom_inlines']) + 1
-            post['custom_inlines'].append({
-                'id': str(uuid.uuid4())[:6],
-                'text': btn_text,
-                'mode': final_mode,
-                'data': data_val,
-                'row_idx': max_r
-            })
-            
+                max_r = 0
+                if post['custom_inlines']:
+                    max_r = max(b.get('row_idx', 0) for b in post['custom_inlines']) + 1
+                
+                post['custom_inlines'].append({
+                    'id': str(uuid.uuid4())[:6],
+                    'text': btn_text,
+                    'mode': final_mode,
+                    'data': data_val,
+                    'row_idx': max_r
+                })
+                
         user_state[user_id] = 'posts_editing'
         bot.send_message(message.chat.id, "✅ Inline button saved!", reply_markup=get_keyboard(user_id))
         send_path_content(message.chat.id, user_id, current_path, True)
