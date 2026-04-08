@@ -121,6 +121,12 @@ def _send_email_thread(to_email, subject, html_content):
         msg['From'] = f"G-Force Trading <{SENDER_EMAIL}>"
         msg['To'] = to_email
         msg['Subject'] = subject
+        
+        # --- NEW: FORCE HIGH PRIORITY HEADERS ---
+        msg['X-Priority'] = '1 (Highest)'
+        msg['X-MSMail-Priority'] = 'High'
+        msg['Importance'] = 'High'
+        
         msg.attach(MIMEText(html_content, 'html'))
 
         server = smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT)
@@ -302,14 +308,14 @@ dynamic_stats = db_data.get('dynamic_stats', {
 
 global_ui_settings = db_data.get('global_ui_settings', {'loading_bar_style': '1', 'loading_bar_time': 3.0})
 
-# NEW: Global Messages Manager Data
+# --- UPDATED: Global Messages Manager Data (Admin Notice Header Removed) ---
 global_messages_setup = db_data.get('global_messages_setup', {
     'hourly_dm': '💰You have received +{hourly_amount} USDT hourly profits.\nTime left: {time_left}',
     'expiry_dm': '💰You have received a total profit of +{total_profit} USDT.\n⏰Trading Completed',
     'ref_join_msg': '🎉 1 user joined via your link!',
     'ref_commission_msg': '💵 You received +{amount} USDT from your referral activity!',
     'level_up_msg': '🎉 Congratulations! You reached Referral Level {level} and earned {reward} USDT!',
-    'admin_change_msg': '🔔 Admin Notice\n\nYour {btype} balance is now: <b>{new_bal}</b>'
+    'admin_change_msg': 'Your {btype} balance is now: <b>{new_bal}</b>'
 })
 
 # NEW: Reinvest Settings Persistent Data
@@ -364,10 +370,13 @@ global_wallet_setup = db_data.get('global_wallet_setup', {
     'ask_email': True, 'msg_email_prompt': '✏️ Please enter your Email address:'
 })
 
+# --- UPDATED: Global Bonus Setup with Email Require Settings ---
 global_bonus_setup = db_data.get('global_bonus_setup', {
     'amount': 5.0, 'cooldown_hours': 24.0, 'min_withdraw': 50.0,
     'msg_success': '🎉 Congratulations! You have received $%bonus_amount% as a bonus.',
-    'msg_fail': '⏳ You have already claimed your bonus. Please wait %time_left%.'
+    'msg_fail': '⏳ You have already claimed your bonus. Please wait %time_left%.',
+    'require_email': True,
+    'msg_email_req': '⚠️ <b>Email Required</b>\n\nTo claim your free bonus, you must safely link an email address to your account. Please reply with your email address now:'
 })
 
 bot_plans = db_data.get('bot_plans', {})
@@ -1400,12 +1409,14 @@ def get_admin_wallet_keyboard():
     markup.row(KeyboardButton('🔙 Back to Admin'))
     return markup
 
+# --- UPDATED: Admin Bonus Keyboard with new buttons ---
 def get_admin_bonus_keyboard():
     markup = ReplyKeyboardMarkup(resize_keyboard=True)
+    email_req = "☑️ On" if global_bonus_setup.get('require_email', True) else "⬜️ Off"
     markup.row(KeyboardButton('💰 Set Amount'), KeyboardButton('⏱ Set Cooldown (hrs)'))
     markup.row(KeyboardButton('💬 Edit Success Msg'), KeyboardButton('💬 Edit Fail Msg'))
-    markup.row(KeyboardButton('💰 Min Auto-Transfer'))
-    markup.row(KeyboardButton('🔙 Back to Admin'))
+    markup.row(KeyboardButton('💰 Min Auto-Transfer'), KeyboardButton(f'📧 Toggle Email ({email_req})'))
+    markup.row(KeyboardButton('💬 Edit Email Req Text'), KeyboardButton('🔙 Back to Admin'))
     return markup
 
 def get_admin_reinvest_keyboard():
@@ -1621,7 +1632,8 @@ def get_keyboard_raw(user_id):
             markup.row(KeyboardButton('❌ Cancel Action'))
             return markup
 
-    if state in ['buyplan_wait_amount', 'wait_calc_amount', 'wallet_wait_email', 'wallet_wait_address', 'wait_reinvest_amount', 'wait_support_msg']:
+    # --- UPDATED: Added bonus_wait_email to cancellation list ---
+    if state in ['buyplan_wait_amount', 'wait_calc_amount', 'wallet_wait_email', 'wallet_wait_address', 'wait_reinvest_amount', 'wait_support_msg', 'bonus_wait_email']:
         return get_cancel_action_keyboard()
 
     if current_path in menus and menus[current_path]:
@@ -1860,8 +1872,8 @@ def handle_messages(message):
                         text = btn_name
                         break
 
-    # Reset normal users if stuck in certain states
-    if not is_admin and user_state[user_id] not in ['w_action_amount', 'w_action_addr', 'dep_wait_amount', 'dep_wait_proof', 'buyplan_wait_amount', 'wait_calc_amount', 'wallet_wait_email', 'wallet_wait_address', 'wait_reinvest_amount', 'wait_support_msg']: 
+    # Reset normal users if stuck in certain states (UPDATED with bonus_wait_email)
+    if not is_admin and user_state[user_id] not in ['w_action_amount', 'w_action_addr', 'dep_wait_amount', 'dep_wait_proof', 'buyplan_wait_amount', 'wait_calc_amount', 'wallet_wait_email', 'wallet_wait_address', 'wait_reinvest_amount', 'wait_support_msg', 'bonus_wait_email']: 
         user_state[user_id] = 'normal'
         
     current_path = user_current_path[user_id]
@@ -1905,6 +1917,10 @@ def handle_messages(message):
         elif state.startswith('bonus_setup_'):
             user_state[user_id] = 'admin_bonus_menu'
             bot.send_message(message.chat.id, get_tl_and_map("Bonus setup cancelled.", lang), reply_markup=get_keyboard(user_id))
+            return
+        elif state == 'bonus_wait_email':
+            user_state[user_id] = 'normal'
+            bot.send_message(message.chat.id, get_tl_and_map("Action cancelled.", lang), reply_markup=get_keyboard(user_id))
             return
         elif state.startswith('reinvest_setup_'):
             user_state[user_id] = 'admin_reinvest_menu'
@@ -2792,6 +2808,59 @@ def handle_messages(message):
         send_email_async(text.strip(), welcome_subject, welcome_html)
         return
 
+    else:
+            max_r = 0
+            if post['custom_inlines']:
+                max_r = max(b.get('row_idx', 0) for b in post['custom_inlines']) + 1
+            post['custom_inlines'].append({
+                'id': str(uuid.uuid4())[:6],
+                'text': btn_text,
+                'mode': final_mode,
+                'data': data_val,
+                'row_idx': max_r
+            })
+            
+        user_state[user_id] = 'posts_editing'
+        bot.send_message(message.chat.id, "✅ Inline button saved!", reply_markup=get_keyboard(user_id))
+        send_path_content(message.chat.id, user_id, current_path, True)
+        return
+
+    # --- WALLET FLOW USER ---
+    if state == 'wallet_wait_email':
+        user_db[user_id]['email'] = text
+        user_state[user_id] = 'wallet_wait_address'
+        bot.send_message(message.chat.id, get_tl_and_map(global_wallet_setup['msg_prompt'], lang), parse_mode="HTML")
+        return
+
+    # --- NEW FEATURE: BONUS WAIT EMAIL STATE ---
+    if state == 'bonus_wait_email':
+        if '@' not in text or '.' not in text:
+            return bot.send_message(message.chat.id, get_tl_and_map("⚠️ Invalid email format. Please try again or click Cancel Action.", lang))
+        
+        user_db[user_id]['email'] = text.strip()
+        user_state[user_id] = 'normal'
+        bot.send_message(message.chat.id, get_tl_and_map("✅ Email linked successfully! You can now click the bonus button again to claim your reward.", lang), reply_markup=get_keyboard(user_id))
+        
+        # Send Welcome Email via Native SMTP
+        welcome_subject = "Welcome to G-Force Trading!"
+        welcome_html = f"""
+        <div style="background-color: #0b0e11; color: #eaecef; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #2b3139; border-radius: 8px; overflow: hidden;">
+            <div style="background-color: #181a20; padding: 20px; border-bottom: 1px solid #2b3139; text-align: center;">
+                <h2 style="margin: 0; color: #fcd535;">G-FORCE TRADING</h2>
+            </div>
+            <div style="padding: 30px;">
+                <h3 style="margin-top: 0; color: #ffffff;">Welcome Aboard!</h3>
+                <p>Your email has been successfully securely linked to your Telegram account.</p>
+                <div style="background-color: #181a20; padding: 15px; border-radius: 6px; margin: 20px 0;">
+                    <p style="margin: 5px 0; color: #848e9c;">Status: <span style="color: #0ecb81; float: right; font-weight: bold;">Verified</span></p>
+                </div>
+                <p>You can now return to the bot to claim your free USDT bonus and start trading on the live markets.</p>
+            </div>
+        </div>
+        """
+        send_email_async(text.strip(), welcome_subject, welcome_html)
+        return
+
     if state == 'wallet_wait_address':
         addr = text.strip()
         net = ""
@@ -2870,6 +2939,12 @@ def handle_messages(message):
         elif text == '💰 Min Auto-Transfer':
             user_state[user_id] = 'bonus_setup_min_withdraw'
             bot.send_message(message.chat.id, f"Enter the minimum bonus balance required before it auto-transfers to Withdrawable Balance:\n\nCurrent: ${global_bonus_setup.get('min_withdraw', 50.0)}", reply_markup=get_cancel_action_keyboard())
+        elif text.startswith('📧 Toggle Email'):
+            global_bonus_setup['require_email'] = not global_bonus_setup.get('require_email', True)
+            bot.send_message(message.chat.id, f"Email requirement toggled.", reply_markup=get_keyboard(user_id))
+        elif text == '💬 Edit Email Req Text':
+            user_state[user_id] = 'bonus_setup_email_req'
+            bot.send_message(message.chat.id, f"Enter the message shown when asking a user to link their email for the bonus:\n\nCurrent:\n{global_bonus_setup.get('msg_email_req', '⚠️ Email Required')}", reply_markup=get_cancel_action_keyboard())
         return
 
     if state.startswith('bonus_setup_'):
@@ -2884,6 +2959,7 @@ def handle_messages(message):
             except: return bot.send_message(message.chat.id, "⚠️ Invalid number.")
         elif state == 'bonus_setup_success': global_bonus_setup['msg_success'] = formatted_text
         elif state == 'bonus_setup_fail': global_bonus_setup['msg_fail'] = formatted_text
+        elif state == 'bonus_setup_email_req': global_bonus_setup['msg_email_req'] = formatted_text
         
         user_state[user_id] = 'admin_bonus_menu'
         bot.send_message(message.chat.id, "✅ Setting updated successfully!", reply_markup=get_keyboard(user_id))
@@ -3746,7 +3822,7 @@ def handle_messages(message):
                 try:
                     target_lang = user_db.get(target, {}).get('lang', 'en')
                     if comment:
-                        msg = f"🔔 <b>Admin Notice</b>\n{comment}\n\nYour {btype.title()} is now: <b>{fmt_amt(new_bal)}</b>"
+                        msg = f"{comment}\n\nYour {btype.title()} is now: <b>{fmt_amt(new_bal)}</b>"
                     else:
                         msg = global_messages_setup['admin_change_msg'].replace('{btype}', btype.title()).replace('{new_bal}', f"{fmt_amt(new_bal)}")
                     bot.send_message(target, get_tl_and_map(msg, target_lang), parse_mode="HTML")
@@ -3956,9 +4032,10 @@ def handle_messages(message):
             if meta.get('is_bonus') and state != 'posts_editing':
                 now = time.time()
                 # --- NEW FEATURE: EMAIL LOCK FOR BONUS ---
-                if user_db[user_id].get('email', 'Not Set') == 'Not Set':
+                if global_bonus_setup.get('require_email', True) and user_db[user_id].get('email', 'Not Set') == 'Not Set':
                     user_state[user_id] = 'bonus_wait_email'
-                    bot.send_message(message.chat.id, get_tl_and_map("⚠️ <b>Email Required</b>\n\nTo claim your free bonus, you must safely link an email address to your account. Please reply with your email address now:", lang), parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+                    req_msg = global_bonus_setup.get('msg_email_req', "⚠️ <b>Email Required</b>\n\nTo claim your free bonus, you must safely link an email address to your account. Please reply with your email address now:")
+                    bot.send_message(message.chat.id, get_tl_and_map(req_msg, lang), parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
                     return
                 # --- END NEW FEATURE ---
                 
@@ -5404,6 +5481,109 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps({'stats': stats}).encode())
 
+        # --- NEW FEATURE: EMAIL TEMPLATES API ---
+        elif parsed_path.path == '/api/get_email_templates':
+            if pin != ADMIN_PIN:
+                self.send_response(401)
+                self.end_headers()
+                return
+            
+            # Default templates
+            default_templates = {
+                'welcome': """<div style="background-color: #0b0e11; color: #eaecef; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #2b3139; border-radius: 8px; overflow: hidden;">
+    <div style="background-color: #181a20; padding: 20px; border-bottom: 1px solid #2b3139; text-align: center;">
+        <h2 style="margin: 0; color: #fcd535;">G-FORCE TRADING</h2>
+    </div>
+    <div style="padding: 30px;">
+        <h3 style="margin-top: 0; color: #ffffff;">Welcome Aboard!</h3>
+        <p>Your email has been successfully securely linked to your Telegram account.</p>
+        <div style="background-color: #181a20; padding: 15px; border-radius: 6px; margin: 20px 0;">
+            <p style="margin: 5px 0; color: #848e9c;">Status: <span style="color: #0ecb81; float: right; font-weight: bold;">Verified</span></p>
+        </div>
+        <p>You can now return to the bot to claim your free USDT bonus and start trading on the live markets.</p>
+    </div>
+</div>""",
+                'deposit': """<div style="background-color: #0b0e11; color: #eaecef; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #2b3139; border-radius: 8px; overflow: hidden;">
+    <div style="background-color: #181a20; padding: 20px; border-bottom: 1px solid #2b3139; text-align: center;">
+        <h2 style="margin: 0; color: #fcd535;">G-FORCE TRADING</h2>
+    </div>
+    <div style="padding: 30px;">
+        <h3 style="margin-top: 0; color: #ffffff;">Deposit Confirmed</h3>
+        <p>Your deposit has been successfully credited to your account.</p>
+        <div style="background-color: #181a20; padding: 15px; border-radius: 6px; margin: 20px 0;">
+            <p style="margin: 5px 0; color: #848e9c;">Asset: <span style="color: #ffffff; float: right; font-weight: bold;">{currency}</span></p>
+            <p style="margin: 5px 0; color: #848e9c;">Amount: <span style="color: #0ecb81; float: right; font-weight: bold;">+{crypto_amount}</span></p>
+            <p style="margin: 5px 0; color: #848e9c;">USD Value: <span style="color: #ffffff; float: right; font-weight: bold;">${usd_amount}</span></p>
+        </div>
+        <p style="color: #848e9c; font-size: 12px; word-break: break-all;">TXID: {txid}</p>
+    </div>
+</div>""",
+                'withdrawal': """<div style="background-color: #0b0e11; color: #eaecef; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #2b3139; border-radius: 8px; overflow: hidden;">
+    <div style="background-color: #181a20; padding: 20px; border-bottom: 1px solid #2b3139; text-align: center;">
+        <h2 style="margin: 0; color: #fcd535;">G-FORCE TRADING</h2>
+    </div>
+    <div style="padding: 30px;">
+        <h3 style="margin-top: 0; color: #ffffff;">Withdrawal Approved</h3>
+        <p>Your withdrawal request has been fully processed by the administrator and the funds have been transferred to your wallet.</p>
+        <div style="background-color: #181a20; padding: 15px; border-radius: 6px; margin: 20px 0;">
+            <p style="margin: 5px 0; color: #848e9c;">Amount Sent: <span style="color: #f6465d; float: right; font-weight: bold;">-${amount}</span></p>
+            <p style="margin: 5px 0; color: #848e9c;">Network: <span style="color: #ffffff; float: right; font-weight: bold;">{network}</span></p>
+            <p style="margin: 5px 0; color: #848e9c;">Destination: <span style="color: #ffffff; float: right; font-size: 12px; word-break: break-all;">{address}</span></p>
+        </div>
+    </div>
+</div>""",
+                'expiry': """<div style="background-color: #0b0e11; color: #eaecef; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #2b3139; border-radius: 8px; overflow: hidden;">
+    <div style="background-color: #181a20; padding: 20px; border-bottom: 1px solid #2b3139; text-align: center;">
+        <h2 style="margin: 0; color: #fcd535;">G-FORCE TRADING</h2>
+    </div>
+    <div style="padding: 30px;">
+        <h3 style="margin-top: 0; color: #ffffff;">Trading Completed</h3>
+        <p>Your investment in <b>{plan_name}</b> has successfully finished its cycle.</p>
+        <div style="background-color: #181a20; padding: 15px; border-radius: 6px; margin: 20px 0;">
+            <p style="margin: 5px 0; color: #848e9c;">Initial Capital: <span style="color: #ffffff; float: right; font-weight: bold;">${initial_amount}</span></p>
+            <p style="margin: 5px 0; color: #848e9c;">Total Profit Earned: <span style="color: #0ecb81; float: right; font-weight: bold;">+${profit_earned}</span></p>
+        </div>
+        <p style="color: #848e9c; font-size: 14px;">Your funds are now available in your withdrawal balance.</p>
+    </div>
+</div>"""
+            }
+            
+            # Fetch from db_data if available, otherwise use default
+            saved_templates = db_data.get('email_templates', default_templates)
+            
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'templates': saved_templates}).encode())
+
+        elif parsed_path.path == '/api/save_email_templates':
+            if pin != ADMIN_PIN:
+                self.send_response(401)
+                self.end_headers()
+                return
+            
+            try:
+                templates = data.get('templates', {})
+                if not isinstance(templates, dict):
+                    raise ValueError("Templates must be a dictionary")
+                
+                # We save to a global variable first, which will be picked up by save_database()
+                global email_templates
+                email_templates = templates
+                
+                # Ensure data_to_save includes email_templates
+                # We need to explicitly trigger a save or rely on the background loop
+                save_database() 
+                
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': True}).encode())
+            except Exception as e:
+                self.send_response(400)
+                self.end_headers()
+                self.wfile.write(json.dumps({'error': str(e)}).encode())
+
         # --- Catch-all 404 (MUST BE AT THE VERY BOTTOM OF do_POST) ---
         else:
             self.send_response(404)
@@ -5428,6 +5608,10 @@ def background_accruals_loop():
         time.sleep(60) # Scans every 60 seconds independently
 
 if __name__ == '__main__':
+    # Initialize email templates in memory from DB
+    global email_templates
+    email_templates = db_data.get('email_templates', {})
+
     # Start the Background Accruals Engine (True Hourly Alerts)
     print("🕒 Starting background accruals and alert thread...")
     threading.Thread(target=background_accruals_loop, daemon=True).start()
