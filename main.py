@@ -3513,21 +3513,21 @@ def handle_messages(message):
                 process_accruals(target)
                 u = user_db[target]
                 btype = admin_bal_type[user_id]
-
+                
                 info_msg = f"👤 <b>User Found</b>\nID: <code>{target}</code>\nName: {u['first_name']}\nUsername: @{u['username']}\n💰 Current {btype.title()}: <b>{fmt_amt(u[btype])}</b>\n\n"
-                        
-                        if admin_bal_comment_on.get(user_id, False):
-                            user_state[user_id] = state.replace('_id', '_comment')
-                            bot.send_message(message.chat.id, info_msg + "Enter the <b>comment</b> for the balance change:", parse_mode="HTML", reply_markup=get_keyboard(user_id))
-                        else:
-                            admin_bal_comment_text[user_id] = ""
-                            user_state[user_id] = state.replace('_id', '_amount')
-                            bot.send_message(message.chat.id, info_msg + "Enter the <b>numeric value</b> (+/- allowed for change):", parse_mode="HTML", reply_markup=get_keyboard(user_id))
-                    else:
-                        bot.send_message(message.chat.id, "❌ User not found. Try again or Cancel.")
-                except ValueError:
-                    bot.send_message(message.chat.id, "⚠️ Invalid ID. Must be a number.")
-                return
+                
+                if admin_bal_comment_on.get(user_id, False):
+                    user_state[user_id] = state.replace('_id', '_comment')
+                    bot.send_message(message.chat.id, info_msg + "Enter the <b>comment</b> for the balance change:", parse_mode="HTML", reply_markup=get_keyboard(user_id))
+                else:
+                    admin_bal_comment_text[user_id] = ""
+                    user_state[user_id] = state.replace('_id', '_amount')
+                    bot.send_message(message.chat.id, info_msg + "Enter the <b>numeric value</b> (+/- allowed for change):", parse_mode="HTML", reply_markup=get_keyboard(user_id))
+            else:
+                bot.send_message(message.chat.id, "❌ User not found. Try again or Cancel.")
+        except ValueError:
+            bot.send_message(message.chat.id, "⚠️ Invalid ID. Must be a number.")
+        return
 
     if state in ['bal_change_comment', 'bal_set_comment']:
         if text == '➖ Set Empty': admin_bal_comment_text[user_id] = ""
