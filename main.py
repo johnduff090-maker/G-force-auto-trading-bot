@@ -2808,28 +2808,22 @@ def handle_messages(message):
         send_email_async(text.strip(), welcome_subject, welcome_html)
         return
 
-else:
-            max_r = 0
-            if post['custom_inlines']:
-                max_r = max(b.get('row_idx', 0) for b in post['custom_inlines']) + 1
-            post['custom_inlines'].append({
-                'id': str(uuid.uuid4())[:6],
-                'text': btn_text,
-                'mode': final_mode,
-                'data': data_val,
-                'row_idx': max_r
-            })
-            
-        user_state[user_id] = 'posts_editing'
-        bot.send_message(message.chat.id, "✅ Inline button saved!", reply_markup=get_keyboard(user_id))
-        send_path_content(message.chat.id, user_id, current_path, True)
-        return
+    if state == 'wallet_wait_address':
+        addr = text.strip()
+        net = ""
+        if addr.startswith('T') and len(addr) >= 33:
+            net = "TRC20"
+        elif addr.startswith('0x') and len(addr) == 42:
+            net = "BEP20"
+        else:
+            return bot.send_message(message.chat.id, get_tl_and_map("⚠️ Invalid Address. Supported networks are USDT TRC20 (starts with T) and BEP20 (starts with 0x). Try again or Cancel.", lang))
 
-    # --- WALLET FLOW USER ---
-    if state == 'wallet_wait_email':
-        user_db[user_id]['email'] = text
-        user_state[user_id] = 'wallet_wait_address'
-        bot.send_message(message.chat.id, get_tl_and_map(global_wallet_setup['msg_prompt'], lang), parse_mode="HTML")
+        user_db[user_id]['wallet'] = addr
+        user_db[user_id]['wallet_net'] = net
+        user_state[user_id] = 'normal'
+        
+        msg = global_wallet_setup['msg_success'].replace('%wallet%', addr).replace('%network%', net)
+        bot.send_message(message.chat.id, get_tl_and_map(replace_macros(msg, user_id, current_path), lang), parse_mode="HTML", reply_markup=get_keyboard(user_id))
         return
 
     # --- NEW FEATURE: BONUS WAIT EMAIL STATE ---
