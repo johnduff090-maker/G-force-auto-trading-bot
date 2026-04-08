@@ -390,7 +390,8 @@ def get_default_metadata():
         'is_stats': False,   # NEW
         'is_info': False,    # NEW
         'is_invite': False,  # NEW
-        'is_deposit': False  # NEW EDITABLE DEPOSIT
+        'is_deposit': False, # NEW EDITABLE DEPOSIT
+        'is_live_trading': False # NEW LIVE TRADING TERMINAL
     }
 
 def init_user_db(message):
@@ -797,6 +798,41 @@ def replace_macros(text, user_id, full_path, action_data=None):
     t = t.replace('%team_deposits%', f"{fmt_amt(bals.get('team_deposits', 0))}")
     t = t.replace('%affiliate_earnings%', f"{fmt_amt(bals.get('affiliate_earnings', 0))}")
     
+    # --- LIVE TRADING TERMINAL MACRO ENGINE ---
+    if '%trade_runtime%' in t or '%trade_profit%' in t or '%trade_anim_bar%' in t or '%trade_pct%' in t:
+        if active:
+            oldest_plan = min(active, key=lambda x: x['start_time'])
+            elapsed = time.time() - oldest_plan['start_time']
+            h, rem = divmod(elapsed, 3600)
+            m, s = divmod(rem, 60)
+            runtime_str = f"{int(h):02d}h {int(m):02d}m {int(s):02d}s"
+
+            live_profit = 0.0
+            for p in active:
+                profit_per_sec = (p['amount'] * (p['profit_pct'] / 100.0)) / 3600.0
+                plan_elapsed = time.time() - p['start_time']
+                live_profit += plan_elapsed * profit_per_sec
+
+            bar_states = ["[■■■■■■▯▯▯▯]", "[▯■■■■■■▯▯▯]", "[▯▯■■■■■■▯▯]"]
+            bar_anim = bar_states[int(time.time()) % 3]
+
+            if oldest_plan['length_hours'] > 0:
+                total_sec = oldest_plan['length_hours'] * 3600
+                pct = min((elapsed / total_sec) * 100, 100.0)
+                pct_str = f"{pct:.2f}% to Completion"
+            else:
+                pct_str = "Lifetime Contract (Running)"
+        else:
+            runtime_str = "00h 00m 00s"
+            live_profit = 0.0
+            bar_anim = "[▯▯▯▯▯▯▯▯▯▯]"
+            pct_str = "No Active Plans"
+
+        t = t.replace('%trade_runtime%', runtime_str)
+        t = t.replace('%trade_profit%', f"+{live_profit:.6f} USDT")
+        t = t.replace('%trade_anim_bar%', bar_anim)
+        t = t.replace('%trade_pct%', pct_str)
+    
     bot_info = bot.get_me()
     t = t.replace('%ref_link%', f"https://t.me/{bot_info.username}?start={user_id}")
     
@@ -875,7 +911,7 @@ def replace_macros(text, user_id, full_path, action_data=None):
             ascii_box = (
                 "<pre>\n"
                 "╔════════════════════════════╗\n"
-                "║     G-FORCE PAYOUT LOG     ║\n"
+                "║    G-FORCE PAYOUT LOG      ║\n"
                 "╠════════════════════════════╣\n"
                 f"║ TXID:   {tx_short:<18} ║\n"
                 f"║ USER:   @{u_name:<17} ║\n"
@@ -884,7 +920,7 @@ def replace_macros(text, user_id, full_path, action_data=None):
                 f"║ NETWORK:  {n_str:<16} ║\n"
                 "║ FEE:    $0.00              ║\n"
                 "╠════════════════════════════╣\n"
-                "║      [ STATUS: PAID ]      ║\n"
+                "║       [ STATUS: PAID ]     ║\n"
                 "╚════════════════════════════╝\n"
                 "</pre>"
             )
@@ -977,6 +1013,24 @@ def execute_loading_animation(chat_id, msg_id, part_a, style_opt, is_photo, tota
     time.sleep(0.1) # Tiny buffer before deletion
     try: bot.delete_message(chat_id, msg_id)
     except: pass
+
+def execute_live_trading_animation(chat_id, msg_id, user_id, base_text, full_path, is_photo=False):
+    """Daemon thread to update the Live Trading Terminal UI every second for 30 seconds."""
+    for _ in range(30):
+        time.sleep(1.0)
+        try:
+            lang = user_db.get(user_id, {}).get('lang', 'en')
+            # By calling replace_macros again, the engine automatically recalibrates timestamps and modulo math
+            updated_text = get_tl_and_map(replace_macros(base_text, user_id, full_path), lang)
+            if is_photo:
+                bot.edit_message_caption(caption=updated_text, chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
+            else:
+                bot.edit_message_text(text=updated_text, chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
+        except Exception as e:
+            err_str = str(e).lower()
+            if "not found" in err_str or "deleted" in err_str:
+                break # Silently kill thread if the user navigates away or deletes message
+            pass
 
 def send_path_content(chat_id, user_id, path, is_editing=False, reply_keyboard=None):
     if is_editing and user_id in editor_msg_ids:
@@ -1133,10 +1187,14 @@ def send_path_content(chat_id, user_id, path, is_editing=False, reply_keyboard=N
                 # For photos, if text is completely empty after extraction, make sure caption is empty, not a space
                 cap = final_text if final_text else None
                 sent = bot.send_photo(chat_id, p['photo'], caption=cap, parse_mode="HTML", reply_markup=markup)
+                if meta.get('is_live_trading') and not is_editing:
+                    threading.Thread(target=execute_live_trading_animation, args=(chat_id, sent.message_id, user_id, p['text'], path, True), daemon=True).start()
             else:
                 # To prevent sending empty text messages which crash Telegram
                 safe_text = final_text if final_text else " "
                 sent = bot.send_message(chat_id, safe_text, parse_mode="HTML", reply_markup=markup)
+                if meta.get('is_live_trading') and not is_editing:
+                    threading.Thread(target=execute_live_trading_animation, args=(chat_id, sent.message_id, user_id, p['text'], path, False), daemon=True).start()
                 
             if is_editing: editor_msg_ids.setdefault(user_id, []).append(sent.message_id)
                 
@@ -1217,6 +1275,7 @@ def get_settings_keyboard(full_path):
     info_text = "☑️ On" if meta.get('is_info') else "⬜️ Off"
     invt_text = "☑️ On" if meta.get('is_invite') else "⬜️ Off"
     dep_text = "☑️ On" if meta.get('is_deposit') else "⬜️ Off"
+    livet_text = "☑️ On" if meta.get('is_live_trading') else "⬜️ Off"
     
     markup.row(KeyboardButton(f'Random Message ({rm_text})'), KeyboardButton(f'Admin Only ({ao_text})'))
     markup.row(KeyboardButton(f'Invisible ({inv_text})'), KeyboardButton('Subscription (Join)'))
@@ -1226,9 +1285,9 @@ def get_settings_keyboard(full_path):
     markup.row(KeyboardButton(f'Assign Bonus ({bon_text})'), KeyboardButton(f'Assign Wallet ({wal_text})'))
     markup.row(KeyboardButton(f'Assign Balance ({bal_text})'), KeyboardButton(f'Assign Stats ({stat_text})'))
     markup.row(KeyboardButton(f'Assign Reinvest ({reinv_text})'), KeyboardButton(f'Assign Invite ({invt_text})'))
-    markup.row(KeyboardButton(f'Assign Info ({info_text})'), KeyboardButton('Form Settings'))
-    markup.row(KeyboardButton('Assign Editor'), KeyboardButton('Shop Editor'))
-    markup.row(KeyboardButton('🔙 Exit Button Settings'))
+    markup.row(KeyboardButton(f'Assign Info ({info_text})'), KeyboardButton(f'Assign Live Trading ({livet_text})'))
+    markup.row(KeyboardButton('Form Settings'), KeyboardButton('Assign Editor'))
+    markup.row(KeyboardButton('Shop Editor'), KeyboardButton('🔙 Exit Button Settings'))
     return markup
 
 def get_global_withdrawal_keyboard():
@@ -2464,6 +2523,23 @@ def handle_messages(message):
                 }
                 menu_posts[btn_path] = [new_post]
             bot.send_message(message.chat.id, "✅ Invite page assigned and pre-populated.", reply_markup=get_keyboard(user_id))
+
+        # --- NEW: LIVE TRADING TERMINAL ASSIGNMENT TOGGLE ---
+        elif text.startswith('Assign Live Trading'):
+            meta['is_live_trading'] = not meta.get('is_live_trading', False)
+            btn_metadata[btn_path] = meta
+            
+            if meta['is_live_trading'] and not menu_posts.get(btn_path):
+                post_id = str(uuid.uuid4())[:8]
+                new_post = {
+                    'id': post_id,
+                    'type': 'text',
+                    'text': "📊 <b>LIVE TRADING TERMINAL</b> 📊\n════════════════════\n📈 Active Plan: %plan_names%\n💼 Invested: $%plan_invest%\n⏱ Runtime: %trade_runtime%\n\n🟢 Live Profit: %trade_profit%\n%trade_anim_bar% %trade_pct%\n════════════════════",
+                    'photo': None,
+                    'custom_inlines': []
+                }
+                menu_posts[btn_path] = [new_post]
+            bot.send_message(message.chat.id, "✅ Live Trading Terminal assigned and pre-populated.", reply_markup=get_keyboard(user_id))
 
         elif text.startswith('Random Message'):
             meta['random_message'] = not meta.get('random_message', False)
@@ -5165,6 +5241,7 @@ if __name__ == '__main__':
     threading.Thread(target=background_accruals_loop, daemon=True).start()
 
     # Start the Web Server (Required for Render and Dashboard)
+    print("🌐 Starting web server...")
     threading.Thread(target=run_web_server, daemon=True).start()
     
     # Start the Blockchain Scanner (Now with 5-minute patience!)
