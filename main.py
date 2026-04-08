@@ -4876,6 +4876,51 @@ def handle_messages(message):
         bot.answer_callback_query(call.id)
         return
 
+    # --- FEATURE 7: INLINE STATS SCANNER ---
+    if call.data == 'cb_scan_users':
+        if not is_admin: return bot.answer_callback_query(call.id, "Action not permitted.", show_alert=True)
+        bot.answer_callback_query(call.id, "Scanning users in background... This may take a moment.")
+        
+        def background_scan():
+            dead_count = 0
+            total_users = len(user_db)
+            for uid in list(user_db.keys()):
+                try:
+                    bot.send_chat_action(uid, 'typing')
+                    time.sleep(0.05) 
+                except telebot.apihelper.ApiTelegramException as e:
+                    if 'Forbidden' in str(e) or 'chat not found' in str(e) or 'deactivated' in str(e):
+                        dead_count += 1
+            
+            active_users = total_users - dead_count
+            bot_info = bot.get_me()
+            btn_count = len(btn_metadata)
+            msg_count = sum(len(v) for v in menu_posts.values())
+            
+            stats_msg = (
+                f"📊 <b>BOT STATISTICS</b>\n"
+                f"#statistics\n\n"
+                f"@{bot_info.username}\n"
+                f"▪️Created: [Auto]\n\n"
+                f"▪️Users: {total_users}\n"
+                f"▫️Active: {active_users}\n"
+                f"▫️Deleted: {dead_count}\n"
+                f"▪️Admins: {len(ADMIN_IDS)}\n\n"
+                f"▪️Bot structure:\n"
+                f"▫️Buttons: {btn_count} / 200\n"
+                f"▫️Messages: {msg_count} / 400"
+            )
+            
+            markup = InlineKeyboardMarkup()
+            markup.add(InlineKeyboardButton('🔍 Scan', callback_data='cb_scan_users'))
+            
+            try:
+                bot.edit_message_text(stats_msg, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=markup)
+            except: pass
+            
+        threading.Thread(target=background_scan, daemon=True).start()
+        return
+
     # --- LIVE WITHDRAWAL CONFIRMATION ---
     if call.data == 'cb_w_yes':
         if user_state.get(user_id) == 'w_action_conf':
