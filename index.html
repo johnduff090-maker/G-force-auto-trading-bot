@@ -48,8 +48,11 @@
         .login-box {
             padding: 40px;
             width: 100%;
-            max-width: 350px;
+            max-width: 280px; /* Reduced width for better edge visibility */
             text-align: center;
+            /* Neon Glow Effect */
+            box-shadow: 0 0 15px rgba(0, 136, 204, 0.5), 0 0 30px rgba(0, 136, 204, 0.3), inset 0 0 10px rgba(0, 136, 204, 0.2);
+            border: 1px solid var(--primary-color);
         }
 
         /* Dashboard Layout */
@@ -108,6 +111,16 @@
             display: flex;
             flex-direction: column;
             transition: transform 0.3s ease;
+            overflow-y: auto; /* Added scrolling to sidebar */
+        }
+        
+        /* Custom scrollbar for sidebar */
+        aside::-webkit-scrollbar {
+            width: 6px;
+        }
+        aside::-webkit-scrollbar-thumb {
+            background-color: var(--primary-color);
+            border-radius: 10px;
         }
 
         .sidebar-hidden {
@@ -406,6 +419,19 @@
                     <p style="color: #aaa; margin-bottom: 20px;">Send HTML emails directly to all users with a registered email address via your linked Gmail account.</p>
                     
                     <div class="form-group">
+                        <label style="color: #aaa; font-weight: bold;">Target Audience</label>
+                        <select id="emailTargetMode" onchange="toggleEmailTarget()">
+                            <option value="all">Broadcast to ALL Users</option>
+                            <option value="individual">Send to Individual User</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group" id="individualTargetGroup" style="display: none;">
+                        <label style="color: #aaa; font-weight: bold;">Target User Email or ID</label>
+                        <input type="text" id="targetEmailInput" placeholder="Enter user's exact email address...">
+                    </div>
+
+                    <div class="form-group">
                         <label style="color: #aaa; font-weight: bold;">Email Subject</label>
                         <input type="text" id="emailSubject" placeholder="e.g. Important Platform Update!">
                     </div>
@@ -422,7 +448,7 @@
                     </div>
                     
                     <div style="display: flex; gap: 15px; margin-top: 20px;">
-                        <button onclick="sendEmailBroadcast()" style="flex: 2;">🚀 Send Broadcast</button>
+                        <button onclick="sendEmailBroadcast()" style="flex: 2;">🚀 Send Email</button>
                         <button class="btn-outline" onclick="fetchEmails()" style="flex: 1;">🔄 Load User Emails</button>
                     </div>
                     <div id="broadcastStatus" style="margin-top: 15px; text-align: center; font-weight: bold; min-height: 20px;"></div>
@@ -466,6 +492,7 @@
                     </div>
                     <div id="templateStatus" style="margin-top: 15px; text-align: center; font-weight: bold; min-height: 20px;"></div>
                 </section>
+
                 <section id="admins" class="section glass" style="padding: 30px;">
                     <h2>🔐 Manager Settings</h2>
                     
@@ -799,6 +826,11 @@
     </div>
 </div>`;
 
+        function toggleEmailTarget() {
+            const mode = document.getElementById('emailTargetMode').value;
+            document.getElementById('individualTargetGroup').style.display = (mode === 'individual') ? 'flex' : 'none';
+        }
+
         function toggleEmailMode(mode) {
             if (mode === currentEmailMode) return;
             
@@ -868,17 +900,30 @@
         async function sendEmailBroadcast() {
             const subject = document.getElementById('emailSubject').value.trim();
             const bodyContent = document.getElementById('emailBody').value.trim();
+            const targetMode = document.getElementById('emailTargetMode').value;
             const statusDiv = document.getElementById('broadcastStatus');
             
+            let targetEmail = '';
+
             if (!subject || !bodyContent) {
                 statusDiv.innerText = '⚠️ Please enter both a subject and a message body.';
                 statusDiv.className = 'error';
                 return;
             }
+
+            if (targetMode === 'individual') {
+                targetEmail = document.getElementById('targetEmailInput').value.trim();
+                if (!targetEmail) {
+                    statusDiv.innerText = '⚠️ Please enter a target email address.';
+                    statusDiv.className = 'error';
+                    return;
+                }
+                if (!confirm(`Are you sure you want to send this email to ${targetEmail}?`)) return;
+            } else {
+                if (!confirm("Are you sure you want to send this email to ALL registered users? This action cannot be undone.")) return;
+            }
             
-            if (!confirm("Are you sure you want to send this email to ALL registered users? This action cannot be undone.")) return;
-            
-            statusDiv.innerText = '⏳ Sending broadcast in the background...';
+            statusDiv.innerText = '⏳ Sending email(s) in the background...';
             statusDiv.className = 'success'; 
             
             // Build the final payload based on the selected mode
@@ -894,18 +939,21 @@
                     body: JSON.stringify({ 
                         pin: sessionPin,
                         subject: subject,
-                        html_body: finalHtmlPayload
+                        html_body: finalHtmlPayload,
+                        target_mode: targetMode,
+                        target_email: targetEmail
                     })
                 });
                 
                 const result = await response.json();
                 if (response.ok) {
-                    statusDiv.innerText = `✅ Broadcast successfully triggered for ${result.sent} users!`;
+                    statusDiv.innerText = `✅ Email successfully sent! (Delivered to ${result.sent} user(s))`;
                     statusDiv.className = 'success';
                     
                     // Optional: clear the form after sending
                     document.getElementById('emailSubject').value = '';
                     document.getElementById('emailBody').value = '';
+                    if (targetMode === 'individual') document.getElementById('targetEmailInput').value = '';
                 } else {
                     statusDiv.innerText = `❌ Error: ${result.error || 'Failed to send'}`;
                     statusDiv.className = 'error';
