@@ -54,7 +54,6 @@ def get_tl_and_map(text, target_lang):
 # --- 1. SECURITY VAULT (Environment Variables) ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Check for both possible names Windows might have used
 env_file = os.path.join(BASE_DIR, '.env')
 txt_env_file = os.path.join(BASE_DIR, '.env.txt')
 
@@ -92,27 +91,22 @@ MASTER_SEED = os.getenv('MASTER_SEED_PHRASE', '')
 if MASTER_SEED:
     MASTER_SEED = MASTER_SEED.replace('"', '').replace("'", "")
 
-# DASHBOARD SECURITY PIN
 ADMIN_PIN = os.getenv('ADMIN_PIN', '123456')
 
-# --- NEW FEATURE: GMAIL SMTP CREDENTIALS ---
 SMTP_SERVER = os.getenv('SMTP_SERVER', 'smtp.gmail.com')
 SMTP_PORT = int(os.getenv('SMTP_PORT', 465))
 SMTP_USER = os.getenv('SMTP_USER', '')
 SMTP_PASS = os.getenv('SMTP_PASS', '')
 SENDER_EMAIL = os.getenv('SENDER_EMAIL', SMTP_USER)
 
-# --- NEW FEATURE 1: NORTHFLANK API CREDENTIALS ---
 NORTHFLANK_API_KEY = os.getenv('NORTHFLANK_API_KEY', '')
 NORTHFLANK_PROJECT = os.getenv('NORTHFLANK_PROJECT', '')
 NORTHFLANK_VOLUME = os.getenv('NORTHFLANK_VOLUME', '')
 
-# API KEYS FOR BLOCKCHAIN TRACKING
 TRONGRID_API_KEY = os.getenv('TRONGRID_API_KEY', '')
 ETHERSCAN_API_KEY = os.getenv('ETHERSCAN_API_KEY', '')
 BSCSCAN_API_KEY = os.getenv('BSCSCAN_API_KEY', '')
 
-# --- GMAIL NATIVE ENGINE (BACKGROUND THREADED) ---
 def _send_email_thread(to_email, subject, html_content):
     if not SMTP_USER or not SMTP_PASS or to_email == 'Not Set':
         return
@@ -121,12 +115,9 @@ def _send_email_thread(to_email, subject, html_content):
         msg['From'] = f"G-Force Trading <{SENDER_EMAIL}>"
         msg['To'] = to_email
         msg['Subject'] = subject
-        
-        # --- NEW: FORCE HIGH PRIORITY HEADERS ---
         msg['X-Priority'] = '1 (Highest)'
         msg['X-MSMail-Priority'] = 'High'
         msg['Importance'] = 'High'
-        
         msg.attach(MIMEText(html_content, 'html'))
 
         server = smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT)
@@ -138,12 +129,11 @@ def _send_email_thread(to_email, subject, html_content):
         print(f"❌ BACKGROUND EMAIL FAILED: {to_email} | Error: {e}")
 
 def send_email_async(to_email, subject, html_content):
-    """Fires the native SMTP email on a daemon thread to prevent bot freeze."""
     threading.Thread(target=_send_email_thread, args=(to_email, subject, html_content), daemon=True).start()
 
 # --- AIVEN POSTGRESQL DATABASE SYSTEM ---
 DATABASE_URL = os.getenv('DATABASE_URL', '')
-DB_LOADED_SUCCESSFULLY = False  # 🔒 THE NEW SAFETY LOCK
+DB_LOADED_SUCCESSFULLY = False
 
 def init_db():
     if not DATABASE_URL:
@@ -152,7 +142,6 @@ def init_db():
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cur = conn.cursor()
-        # Create a permanent table if it doesn't exist yet
         cur.execute("""
             CREATE TABLE IF NOT EXISTS bot_state (
                 id INT PRIMARY KEY,
@@ -177,12 +166,11 @@ def load_database():
         cur.close()
         conn.close()
         
-        DB_LOADED_SUCCESSFULLY = True # 🔓 UNLOCKS SAVING
+        DB_LOADED_SUCCESSFULLY = True
         print("✅ Aiven Memory successfully loaded into Bot!")
         
         if result and result[0]:
             data = result[0]
-            # JSON converts Python integer keys to strings. We convert User IDs back to numbers!
             if 'user_db' in data:
                 parsed_user_db = {}
                 for k, v in data['user_db'].items():
@@ -192,15 +180,12 @@ def load_database():
             return data
     except Exception as e:
         print(f"⚠️ CRITICAL: Error loading from Aiven DB: {e}")
-        # By NOT unlocking the safety lock here, we prevent the bot from wiping Aiven!
         return {}
 
 def save_database():
-    # 🛑 PREVENTS THE DEADLY OVERWRITE BUG
     if not DATABASE_URL or not DB_LOADED_SUCCESSFULLY: 
         return 
         
-    # Bundle everything we want to save into one master dictionary
     data_to_save = {
         'user_db': user_db,
         'menus': menus,
@@ -214,16 +199,18 @@ def save_database():
         'global_ui_settings': global_ui_settings,
         'reinvest_settings': reinvest_settings,
         'global_messages_setup': global_messages_setup,
-        'processed_txids': list(processed_txids), # Convert set to list for database
-        'blocked_users': list(blocked_users),     # NEW: Blocked users saving
-        'block_settings': block_settings,         # NEW: Block messages saving
-        'dynamic_stats': dynamic_stats,           # NEW: Dynamic Stats saving
-        'invite_settings': invite_settings        # NEW: Invite settings saving
+        'processed_txids': list(processed_txids),
+        'blocked_users': list(blocked_users),
+        'block_settings': block_settings,
+        'dynamic_stats': dynamic_stats,
+        'invite_settings': invite_settings,
+        # --- NEW ARCHITECTURE: SAVE MASTER GATEWAY CONFIGS ---
+        'subscription_settings': subscription_settings,
+        'homepage_bonus_settings': homepage_bonus_settings
     }
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cur = conn.cursor()
-        # Securely upsert the data into row id 1
         cur.execute("""
             INSERT INTO bot_state (id, data) 
             VALUES (1, %s)
@@ -233,24 +220,19 @@ def save_database():
         conn.commit()
         cur.close()
         conn.close()
-        # 💓 THE HEARTBEAT MONITOR:
         print(f"💾 AIVEN AUTO-SAVE: {len(user_db)} users backed up successfully!")
     except Exception as e:
         print(f"⚠️ AIVEN DB SAVE ERROR: {e}")
 
 def auto_save_loop():
-    """Runs forever in the background, saving data every 10 seconds."""
     while True:
         time.sleep(10)
         save_database()
 
-# Initialize Neon and Load Data
 init_db()
 db_data = load_database()
 
-# --- NEW: SMART DECIMAL FORMATTER ---
 def fmt_amt(val):
-    """Dynamically shows 2 decimals for standard numbers, or exactly infinite decimals for micro-amounts."""
     if val is None: return "0.00"
     try:
         v = float(val)
@@ -264,7 +246,6 @@ def fmt_amt(val):
     except:
         return "0.00"
 
-# --- DYNAMIC MEMORY & STATE ---
 user_current_path = {}
 user_state = {} 
 user_selected_button = {} 
@@ -272,7 +253,6 @@ user_clipboard = {}
 user_action_data = {} 
 editor_msg_ids = {}
 
-# --- ADMIN TRACKERS (Don't need to be saved to DB) ---
 admin_bal_type = {}            
 admin_bal_notify = {}          
 admin_bal_comment_on = {}      
@@ -282,23 +262,20 @@ user_plan_setup = {}
 pending_deposits = {}
 admin_dep_setup = {}
 pending_auto_txids = {}
-pending_withdrawals = {} # Tracker for Admin Withdrawal System
+pending_withdrawals = {}
 
-# --- PERSISTENT DATA (Loaded from Neon DB) ---
 user_db = db_data.get('user_db', {})
 menus = db_data.get('menus', {'root': []})
 menu_posts = db_data.get('menu_posts', {'root': [{'id': 'init', 'type': 'text', 'text': 'Welcome to the Main Menu! Select an option below:', 'photo': None}]})
 btn_metadata = db_data.get('btn_metadata', {})
 processed_txids = set(db_data.get('processed_txids', []))
 
-# NEW: Blocked Users Persistent Data
 blocked_users = set(db_data.get('blocked_users', []))
 block_settings = db_data.get('block_settings', {
     'msg_block': '🚫 You have been blocked by the admin and cannot use this bot.',
     'msg_unblock': '✅ You have been unblocked. Welcome back!'
 })
 
-# NEW: Dynamic Stats Persistent Data
 dynamic_stats = db_data.get('dynamic_stats', {
     'investments': 0.0,
     'withdrawn': 0.0,
@@ -308,7 +285,6 @@ dynamic_stats = db_data.get('dynamic_stats', {
 
 global_ui_settings = db_data.get('global_ui_settings', {'loading_bar_style': '1', 'loading_bar_time': 3.0})
 
-# --- UPDATED: Global Messages Manager Data (Admin Notice Header Removed) ---
 global_messages_setup = db_data.get('global_messages_setup', {
     'hourly_dm': '💰You have received +{hourly_amount} USDT hourly profits.\nTime left: {time_left}',
     'expiry_dm': '💰You have received a total profit of +{total_profit} USDT.\n⏰Trading Completed',
@@ -318,14 +294,12 @@ global_messages_setup = db_data.get('global_messages_setup', {
     'admin_change_msg': 'Your {btype} balance is now: <b>{new_bal}</b>'
 })
 
-# NEW: Reinvest Settings Persistent Data
 reinvest_settings = db_data.get('reinvest_settings', {
     'msg_success': '✅ <b>Reinvest Successful!</b>\nYou have successfully reinvested <b>$%amount%</b> into <b>%plan_name%</b>.',
     'msg_fail': '❌ You can not invest right now: You need at least %min_amount% USDT to invest!',
     'inline_deposit_text': '🏦 Deposit Now'
 })
 
-# NEW: Invite Settings Persistent Data (UPDATED WITH DYNAMIC LINK TOGGLE)
 invite_settings = db_data.get('invite_settings', {
     'levels': [{'users': 10, 'reward': 5.0}, {'users': 25, 'reward': 15.0}, {'users': 100, 'reward': 50.0}],
     'msg_template': "👥 <b>Referral Statistics</b>\n\n%levels_display%\n\n👥 My team Deposits: %team_deposits% USDT\n♾ Earnings: %affiliate_earnings% USDT",
@@ -370,7 +344,6 @@ global_wallet_setup = db_data.get('global_wallet_setup', {
     'ask_email': True, 'msg_email_prompt': '✏️ Please enter your Email address:'
 })
 
-# --- UPDATED: Global Bonus Setup with Email Require Settings ---
 global_bonus_setup = db_data.get('global_bonus_setup', {
     'amount': 5.0, 'cooldown_hours': 24.0, 'min_withdraw': 50.0,
     'msg_success': '🎉 Congratulations! You have received $%bonus_amount% as a bonus.',
@@ -381,7 +354,6 @@ global_bonus_setup = db_data.get('global_bonus_setup', {
 
 bot_plans = db_data.get('bot_plans', {})
 
-# --- SYSTEM PLANS INITIALIZATION ---
 if not bot_plans:
     for i in range(6):
         name_str = 'G-Force Free Plan' if i == 0 else f'G-Force Plan {i}'
@@ -392,9 +364,23 @@ if not bot_plans:
             'redirect_cmd': None, 'is_free': (i == 0), 'bonus_amount': 50.0 if i == 0 else 0.0
         }
 
-# --- NEW: BACKGROUND CACHE PRELOADER ---
+# --- NEW ARCHITECTURE: FORCED SUBSCRIPTION & HOMEPAGE CONFIGS ---
+subscription_settings = db_data.get('subscription_settings', {
+    'enabled': False,
+    'target_mode': 'all', # 'new', 'all', 'referrals'
+    'channels': [], # Format: [{'name': 'Group 1', 'url': 'https...', 'chat_id': '-100...'}]
+    'check_time_hours': 24.0,
+    'msg_wall': '🚨 <b>Mandatory Subscription Required</b>\n\nTo use this bot, you must join our official community channels.',
+    'msg_fail': '❌ You have not joined all required channels. Please join them and try again.',
+    'btn_check': '✅ I have joined, check now'
+})
+
+homepage_bonus_settings = db_data.get('homepage_bonus_settings', {
+    'enabled': False,
+    'btn_text': '🎁 Claim Free Capital'
+})
+
 def preload_core_languages():
-    """Background-translates and caches the bot's core strings and active menus for new users."""
     all_strings = set([
         '🏠 Home', '🔙 Back', '❌ Cancel Action', '💵 Balance', '🔐 Admin',
         'Deposit balance', 'Withdrawal balance', '✔️ Leave as Is', '➖ Set Empty'
@@ -408,7 +394,6 @@ def preload_core_languages():
             get_tl_and_map(text, lang)
         time.sleep(0.5)
 
-# --- TRANSACTION LEDGER LOGGER ---
 def log_tx(uid, t_type, amt):
     if uid in user_db:
         date_str = time.strftime('%Y-%m-%d %H:%M', time.gmtime())
@@ -417,25 +402,12 @@ def log_tx(uid, t_type, amt):
 
 def get_default_metadata():
     return {
-        'random_message': False,
-        'admin_only': False,
-        'invisible': False,
-        'command': None,
-        'move_by_command': False,
-        'withdrawal': False, 
-        'is_wallet': False,  
-        'is_bonus': False,   
-        'is_balance': False,
-        'assigned_plan': None, 
-        'is_calculator': False, 
-        'is_history': False,
-        'is_language': False,
-        'is_reinvest': False,
-        'is_stats': False,   # NEW
-        'is_info': False,    # NEW
-        'is_invite': False,  # NEW
-        'is_deposit': False, # NEW EDITABLE DEPOSIT
-        'is_live_trading': False # NEW LIVE TRADING TERMINAL
+        'random_message': False, 'admin_only': False, 'invisible': False,
+        'command': None, 'move_by_command': False, 'withdrawal': False, 
+        'is_wallet': False, 'is_bonus': False, 'is_balance': False,
+        'assigned_plan': None, 'is_calculator': False, 'is_history': False,
+        'is_language': False, 'is_reinvest': False, 'is_stats': False,
+        'is_info': False, 'is_invite': False, 'is_deposit': False, 'is_live_trading': False
     }
 
 def init_user_db(message):
@@ -443,7 +415,6 @@ def init_user_db(message):
     is_new_user = False
     if user_id not in user_db:
         is_new_user = True
-        # ALL NEW USERS START AT ZERO
         user_db[user_id] = {
             'balance': 0.00, 'bonus': 0.00, 'deposit': 0.00, 
             'hourly': 0.00, 'plan': 0.00, 'address': 'Not Set',
@@ -451,18 +422,12 @@ def init_user_db(message):
             'first_name': message.from_user.first_name or 'Unknown',
             'last_name': message.from_user.last_name or '',
             'username': message.from_user.username or 'No Username',
-            'active_plans': [], 
-            'pending_plan': None,
-            'wallets': {},
-            'transactions': [],
-            'ref_count': 0,
-            'total_withdrawn': 0.0,
-            'lang': 'en',
-            'referred_by': None,           # NEW
-            'team_deposits': 0.0,          # NEW
-            'affiliate_earnings': 0.0,     # NEW
-            'claimed_levels': [],          # NEW
-            'invite_links_map': []         # NEW
+            'active_plans': [], 'pending_plan': None, 'wallets': {},
+            'transactions': [], 'ref_count': 0, 'total_withdrawn': 0.0,
+            'lang': 'en', 'referred_by': None, 'team_deposits': 0.0,
+            'affiliate_earnings': 0.0, 'claimed_levels': [], 'invite_links_map': [],
+            # --- NEW ARCHITECTURE: HIDDEN MARKERS ---
+            'sub_verified': False, 'last_sub_check': 0.0, 'has_seen_homepage': False, 'is_referral': False
         }
     else:
         user_db[user_id]['first_name'] = message.from_user.first_name or 'Unknown'
@@ -483,12 +448,101 @@ def init_user_db(message):
         if 'affiliate_earnings' not in user_db[user_id]: user_db[user_id]['affiliate_earnings'] = 0.0
         if 'claimed_levels' not in user_db[user_id]: user_db[user_id]['claimed_levels'] = []
         if 'invite_links_map' not in user_db[user_id]: user_db[user_id]['invite_links_map'] = []
+        
+        if 'sub_verified' not in user_db[user_id]: user_db[user_id]['sub_verified'] = False
+        if 'last_sub_check' not in user_db[user_id]: user_db[user_id]['last_sub_check'] = 0.0
+        if 'has_seen_homepage' not in user_db[user_id]: user_db[user_id]['has_seen_homepage'] = False
+        if 'is_referral' not in user_db[user_id]: user_db[user_id]['is_referral'] = False
     
     return is_new_user
 
-# --- 2. LIVE PRICE ORACLE ENGINE (WITH FALLBACKS) ---
+# --- NEW ARCHITECTURE: THE ENFORCER (BACKGROUND SUBSCRIPTION RETENTION) ---
+def subscription_enforcer_loop():
+    """Silently revokes access from users who join to pass the wall, then leave 10 minutes later."""
+    while True:
+        time.sleep(3600) # Runs every hour silently
+        if not subscription_settings.get('enabled', False) or subscription_settings.get('check_time_hours', 0) == 0:
+            continue
+        
+        cooldown_sec = subscription_settings['check_time_hours'] * 3600
+        now = time.time()
+        
+        for uid, udata in list(user_db.items()):
+            if uid in ADMIN_IDS: continue
+            if udata.get('sub_verified', False):
+                if (now - udata.get('last_sub_check', 0.0)) >= cooldown_sec:
+                    all_joined = True
+                    for ch in subscription_settings.get('channels', []):
+                        try:
+                            member = bot.get_chat_member(ch['chat_id'], uid)
+                            if member.status in ['left', 'kicked']:
+                                all_joined = False
+                                break
+                        except Exception:
+                            pass # Failsafe against API limits or bot lacking admin rights
+                    
+                    if not all_joined:
+                        user_db[uid]['sub_verified'] = False # The Silent Trap
+                    else:
+                        user_db[uid]['last_sub_check'] = now
+
+threading.Thread(target=subscription_enforcer_loop, daemon=True).start()
+
+# --- NEW ARCHITECTURE: THE INTERCEPTOR LOGIC ---
+def requires_subscription_wall(user_id, is_new_user):
+    """The Master Gateway check. Evaluates Target Modes to determine who hits the wall."""
+    if not subscription_settings.get('enabled', False): return False
+    if user_id in ADMIN_IDS: return False
+    
+    udata = user_db.get(user_id, {})
+    if udata.get('sub_verified', False): return False
+        
+    mode = subscription_settings.get('target_mode', 'all')
+    if mode == 'new' and not is_new_user:
+        user_db[user_id]['sub_verified'] = True # Grandfather in old users
+        return False
+    if mode == 'referrals' and not udata.get('is_referral', False):
+        user_db[user_id]['sub_verified'] = True
+        return False
+        
+    return True
+
+def deploy_subscription_wall(chat_id, user_id):
+    """Deploys the un-bypassable Multi-Channel UI wall."""
+    udata = user_db.get(user_id, {})
+    lang = udata.get('lang', 'en')
+    markup = InlineKeyboardMarkup()
+    
+    for ch in subscription_settings.get('channels', []):
+        markup.row(InlineKeyboardButton(ch['name'], url=ch['url']))
+        
+    btn_text = get_tl_and_map(subscription_settings.get('btn_check', '✅ I have joined, check now'), lang)
+    markup.row(InlineKeyboardButton(btn_text, callback_data="cb_verify_sub"))
+    
+    msg_text = get_tl_and_map(subscription_settings.get('msg_wall'), lang)
+    bot.send_message(chat_id, msg_text, parse_mode="HTML", reply_markup=markup)
+
+# --- NEW ARCHITECTURE: HOMEPAGE BONUS ROUTING ---
+def check_homepage_bonus(chat_id, user_id):
+    """The frictionless, one-time popup bridge."""
+    if not homepage_bonus_settings.get('enabled', False): return False
+    udata = user_db.get(user_id, {})
+    if udata.get('has_seen_homepage', False): return False
+    
+    p_data = bot_plans.get('plan0', {})
+    lang = udata.get('lang', 'en')
+    
+    msg = f"✨ <b>{p_data['name']}</b> ✨\n\nProfit: {p_data['profit']}%\nBonus Capital: ${p_data.get('bonus_amount', 50.0)}\nContract: Lifetime"
+    btn_text = get_tl_and_map(homepage_bonus_settings.get('btn_text', '🎁 Claim 50 USDT Free Capital'), lang)
+    
+    markup = InlineKeyboardMarkup()
+    markup.row(InlineKeyboardButton(btn_text, callback_data="cb_claim_homepage"))
+    
+    # Send WITHOUT the massive bottom keyboard to completely lock their focus
+    bot.send_message(chat_id, get_tl_and_map(msg, lang), parse_mode="HTML", reply_markup=markup)
+    return True
+
 def get_crypto_price(currency_code):
-    """Fetches live USD price for the requested currency from CoinGecko with hard fallbacks."""
     mapping = {
         'USDT_TRC20': 'tether', 'USDT_BEP20': 'tether', 'USDT_ERC20': 'tether',
         'TRX': 'tron', 'BTC': 'bitcoin'
@@ -507,9 +561,7 @@ def get_crypto_price(currency_code):
         if 'BTC' in currency_code: return 65000.0
         return 1.0
 
-# --- 3. HD WALLET ENGINE (BIP39/44) ---
 def generate_user_wallet(user_id, currency):
-    """Generates a unique deterministic wallet for a user based on their Telegram ID."""
     if not MASTER_SEED:
         return "ERROR_NO_SEED", "ERROR_NO_SEED"
         
@@ -530,7 +582,6 @@ def generate_user_wallet(user_id, currency):
         
         public_address = bip44_acc.PublicKey().ToAddress()
         
-        # BTC requires WIF Private Key, EVM/Tron uses Hex
         if currency == 'BTC':
             private_key = bip44_acc.PrivateKey().ToWif()
         else:
@@ -541,7 +592,6 @@ def generate_user_wallet(user_id, currency):
         print(f"Wallet Gen Error: {e}")
         return "GEN_ERROR", "GEN_ERROR"
 
-# --- HELPER: REFERRAL COMMISSION ENGINE ---
 def process_referral_commission(user_id, amount, is_deposit=True):
     inviter = user_db.get(user_id, {}).get('referred_by')
     if inviter and inviter in user_db:
@@ -560,9 +610,7 @@ def process_referral_commission(user_id, amount, is_deposit=True):
         if is_deposit:
             user_db[inviter]['team_deposits'] += amount
 
-# --- MASTER API SCANNER HELPER (100% AUTOMATED NETWORK SCAN) ---
 def check_address_for_new_deposit(addr, curr):
-    """Scans the respective blockchain for new incoming transfers and extracts timestamps."""
     crypto_amount = 0.0
     txid_found = ""
     tx_time = 0.0
@@ -641,9 +689,7 @@ def check_address_for_new_deposit(addr, curr):
         
     return False, 0.0, "", 0.0
 
-# --- 4. AUTO-DETECTION WATCHER ENGINE ---
 def blockchain_watcher_loop():
-    """Continuously checks the blockchain, verifying official timestamps for the 5-min delay."""
     while True:
         try:
             for uid, data in list(user_db.items()):
@@ -651,13 +697,9 @@ def blockchain_watcher_loop():
                     addr = w_data['address']
                     found, crypto_amount, txid, tx_time = check_address_for_new_deposit(addr, curr)
                     
-                    # If we found a transaction and it hasn't been processed yet
                     if found and txid not in processed_txids:
                         now = time.time()
                         
-                        # THE FIX: We use the blockchain's official timestamp!
-                        # If the block was mined 5+ minutes ago (300 seconds), approve it instantly.
-                        # Even if the server restarts, this math is perfectly stateless and robust.
                         if (now - tx_time) >= 300:
                             processed_txids.add(txid)
                             
@@ -668,7 +710,7 @@ def blockchain_watcher_loop():
                             user_db[uid]['wallets'][curr]['total_deposited'] = user_db[uid]['wallets'][curr].get('total_deposited', 0.0) + usd_value
                             log_tx(uid, f"Auto-Deposit ({curr})", usd_value)
                             
-                            process_referral_commission(uid, usd_value, is_deposit=True) # NEW: Commission
+                            process_referral_commission(uid, usd_value, is_deposit=True)
                             
                             try:
                                 conf = deposit_settings[curr]
@@ -685,7 +727,6 @@ def blockchain_watcher_loop():
                                 
                             check_and_trigger_auto_buy(uid)
 
-                            # --- NEW FEATURE: HTML EMAIL TRIGGER FOR DEPOSITS ---
                             user_email = user_db.get(uid, {}).get('email', 'Not Set')
                             if user_email != 'Not Set':
                                 dep_subject = "Deposit Confirmed - G-Force"
@@ -713,7 +754,6 @@ def blockchain_watcher_loop():
             pass
         time.sleep(30)
 
-# --- UNIVERSAL AUTO-BUY ENGINE ---
 def check_and_trigger_auto_buy(user_id):
     if not user_db[user_id].get('pending_plan'): return
     p_macro = user_db[user_id]['pending_plan']
@@ -723,7 +763,6 @@ def check_and_trigger_auto_buy(user_id):
         if p_macro == 'plan0':
             invest_amt = p_data.get('bonus_amount', 50.0)
             user_db[user_id]['pending_plan'] = None
-            # Free plan activation bypasses balance reduction
         else:
             if user_db[user_id]['deposit'] >= p_data['min']:
                 invest_amt = min(user_db[user_id]['deposit'], p_data['max'])
@@ -752,7 +791,6 @@ def check_and_trigger_auto_buy(user_id):
             bot.send_message(user_id, get_tl_and_map(msg, lang), parse_mode="HTML")
         except Exception: pass
 
-# --- TRUE BACKGROUND HOURLY ALERTS (FIX APPLIED HERE) ---
 def process_accruals(user_id):
     u = user_db.get(user_id)
     if not u or not u.get('active_plans'): return
@@ -771,7 +809,6 @@ def process_accruals(user_id):
                 p['earned'] += hourly_earned
                 p['last_accrual'] += 3600
                 
-                # Calculate time left for DM
                 time_left_str = "Lifetime"
                 if p['length_hours'] > 0:
                     time_left_sec = (p['start_time'] + (p['length_hours'] * 3600)) - p['last_accrual']
@@ -800,7 +837,6 @@ def process_accruals(user_id):
                     bot.send_message(user_id, get_tl_and_map(msg, lang), parse_mode="HTML")
                 except: pass
 
-                # --- NEW FEATURE: HTML EMAIL TRIGGER FOR PLAN EXPIRATION ---
                 user_email = u.get('email', 'Not Set')
                 if user_email != 'Not Set':
                     exp_subject = "Trading Plan Completed - G-Force"
@@ -839,10 +875,8 @@ def change_menu_paths(old_base, new_base):
             new_pk = pk.replace(old_base, new_base, 1)
             menu_posts[new_pk] = menu_posts.pop(pk)
 
-# --- NEW: DYNAMIC STATS REFRESH ENGINE ---
 def refresh_dynamic_stats():
     now = time.time()
-    # Initial seeding if 0
     if dynamic_stats['last_refresh'] == 0.0:
         dynamic_stats['investments'] = random.uniform(50000, 100000)
         dynamic_stats['withdrawn'] = dynamic_stats['investments'] * 3
@@ -862,7 +896,6 @@ def replace_macros(text, user_id, full_path, action_data=None):
     
     bals = user_db.get(user_id, {})
     
-    # CALCULATE NEW BALANCE MACROS
     active = [p for p in bals.get('active_plans', []) if p['status'] == 'active']
     plan_invest = sum(p['amount'] for p in active)
     hourly_profit = sum(p['amount'] * (p['profit_pct'] / 100.0) for p in active)
@@ -879,7 +912,6 @@ def replace_macros(text, user_id, full_path, action_data=None):
     t = t.replace('%deposit%', f"{fmt_amt(bals.get('deposit', 0))}")
     t = t.replace('%lang%', bals.get('lang', 'en').upper())
     
-    # NEW EXTENDED MACROS
     t = t.replace('%plan_invest%', f"{fmt_amt(plan_invest)}")
     t = t.replace('%hourly_profit%', f"{fmt_amt(hourly_profit)}")
     t = t.replace('%plan_names%', plan_names)
@@ -888,7 +920,6 @@ def replace_macros(text, user_id, full_path, action_data=None):
     t = t.replace('%team_deposits%', f"{fmt_amt(bals.get('team_deposits', 0))}")
     t = t.replace('%affiliate_earnings%', f"{fmt_amt(bals.get('affiliate_earnings', 0))}")
     
-    # --- LIVE TRADING TERMINAL MACRO ENGINE ---
     if '%trade_runtime%' in t or '%trade_profit%' in t or '%trade_anim_bar%' in t or '%trade_pct%' in t:
         if active:
             oldest_plan = min(active, key=lambda x: x['start_time'])
@@ -926,7 +957,6 @@ def replace_macros(text, user_id, full_path, action_data=None):
     bot_info = bot.get_me()
     t = t.replace('%ref_link%', f"https://t.me/{bot_info.username}?start={user_id}")
     
-    # DYNAMIC LEVELS MACRO
     if '%levels_display%' in t:
         levels_str = ""
         for i, level in enumerate(invite_settings['levels']):
@@ -937,7 +967,6 @@ def replace_macros(text, user_id, full_path, action_data=None):
             levels_str += f"{i+1}° Level: [{bar}] {req} users\n"
         t = t.replace('%levels_display%', levels_str)
     
-    # NEW DYNAMIC STATS MACROS
     t = t.replace('%stats_invest%', f"{dynamic_stats['investments']:,.2f}")
     t = t.replace('%stats_withdrawn%', f"{dynamic_stats['withdrawn']:,.2f}")
     t = t.replace('%stats_users%', str(dynamic_stats['users']))
@@ -947,7 +976,6 @@ def replace_macros(text, user_id, full_path, action_data=None):
     t = t.replace('%bonus_amount%', str(global_bonus_setup['amount']))
     t = t.replace('%commission%', str(global_w_setup.get('w_commission', 0.0)))
     
-    # Use GLOBAL withdrawal settings for macros
     t = t.replace('%min%', str(global_w_setup.get('w_min') or 0))
     t = t.replace('%max%', str(global_w_setup.get('w_max') or 'No Limit'))
     
@@ -985,7 +1013,6 @@ def replace_macros(text, user_id, full_path, action_data=None):
         t = t.replace('%address%', bals.get('address', 'Not Set'))
         t = t.replace('%network%', bals.get('wallet_net', 'Unknown'))
         
-    # --- NEW FEATURE 1: ASCII RECEIPT MACRO ENGINE ---
     if '%ascii_receipt%' in t:
         if global_w_setup.get('use_ascii_receipt', False):
             tx_full = action_data.get('txid', 'N/A') if action_data else 'N/A'
@@ -997,7 +1024,6 @@ def replace_macros(text, user_id, full_path, action_data=None):
             n_str = action_data.get('network', bals.get('wallet_net', 'Unknown')) if action_data else bals.get('wallet_net', 'Unknown')
             if len(n_str) > 14: n_str = n_str[:11] + "..."
             
-            # Using precise '<18' string padding to guarantee alignment across all screen sizes
             ascii_box = (
                 "<pre>\n"
                 "╔════════════════════════════╗\n"
@@ -1016,12 +1042,10 @@ def replace_macros(text, user_id, full_path, action_data=None):
             )
             t = t.replace('%ascii_receipt%', ascii_box)
         else:
-            # Silent clear if toggled off
             t = t.replace('%ascii_receipt%', '')
             
     return t
 
-# --- POSTS ENGINE ---
 def get_post_inline_tools(post_id):
     markup = InlineKeyboardMarkup()
     markup.row(
@@ -1061,9 +1085,7 @@ def render_pi_manager(chat_id, post, message_id=None):
     else:
         bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=markup)
 
-# --- THE FIX: GLOBAL MACRO: %loading_bar% ANIMATOR ---
 def execute_loading_animation(chat_id, msg_id, part_a, style_opt, is_photo, total_seconds):
-    """Animates a standalone loading message, then deletes it."""
     frames = {
         '1': ["[▯▯▯▯▯▯▯▯▯▯] 0%", "[■■▯▯▯▯▯▯▯▯] 20%", "[■■■■▯▯▯▯▯▯] 40%", "[■■■■■■▯▯▯▯] 60%", "[■■■■■■■■▯▯] 80%", "[■■■■■■■■■■] 100%"],
         '2': ["░░░░░░░░░░ 0%", "▓▓░░░░░░░░ 20%", "▓▓▓▓░░░░░░ 40%", "▓▓▓▓▓▓░░░░ 60%", "▓▓▓▓▓▓▓▓░░ 80%", "▓▓▓▓▓▓▓▓▓▓ 100%"],
@@ -1071,15 +1093,14 @@ def execute_loading_animation(chat_id, msg_id, part_a, style_opt, is_photo, tota
     }
     all_bars = frames.get(str(style_opt), frames['1'])
     
-    # NATIVE TELEGRAM API LIMIT FIX: Skip frames if the requested time is too short to physically render them all
     if total_seconds <= 0.5:
-        bars = [all_bars[-1]] # Instantly 100%
+        bars = [all_bars[-1]]
     elif total_seconds <= 1.5:
-        bars = [all_bars[0], all_bars[-1]] # 0% -> 100%
+        bars = [all_bars[0], all_bars[-1]]
     elif total_seconds <= 2.5:
-        bars = [all_bars[0], all_bars[len(all_bars)//2], all_bars[-1]] # 0% -> 50% -> 100%
+        bars = [all_bars[0], all_bars[len(all_bars)//2], all_bars[-1]]
     else:
-        bars = all_bars # Full 6 frames
+        bars = all_bars
 
     sleep_time = total_seconds / len(bars)
     sep = "\n\n" if part_a.strip() else ""
@@ -1100,17 +1121,15 @@ def execute_loading_animation(chat_id, msg_id, part_a, style_opt, is_photo, tota
         if remaining > 0:
             time.sleep(remaining)
             
-    time.sleep(0.1) # Tiny buffer before deletion
+    time.sleep(0.1)
     try: bot.delete_message(chat_id, msg_id)
     except: pass
 
 def execute_live_trading_animation(chat_id, msg_id, user_id, base_text, full_path, is_photo=False):
-    """Daemon thread to update the Live Trading Terminal UI every second for 30 seconds."""
     for _ in range(30):
         time.sleep(1.0)
         try:
             lang = user_db.get(user_id, {}).get('lang', 'en')
-            # By calling replace_macros again, the engine automatically recalibrates timestamps and modulo math
             updated_text = get_tl_and_map(replace_macros(base_text, user_id, full_path), lang)
             if is_photo:
                 bot.edit_message_caption(caption=updated_text, chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
@@ -1119,7 +1138,7 @@ def execute_live_trading_animation(chat_id, msg_id, user_id, base_text, full_pat
         except Exception as e:
             err_str = str(e).lower()
             if "not found" in err_str or "deleted" in err_str:
-                break # Silently kill thread if the user navigates away or deletes message
+                break
             pass
 
 def send_path_content(chat_id, user_id, path, is_editing=False, reply_keyboard=None):
@@ -1168,11 +1187,10 @@ def send_path_content(chat_id, user_id, path, is_editing=False, reply_keyboard=N
         raw_text = get_tl_and_map(replace_macros(p['text'], user_id, path), lang)
         
         has_loading_macro = False
-        total_loading_time = float(global_ui_settings.get('loading_bar_time', 3.0)) # Fetch default time dynamically
+        total_loading_time = float(global_ui_settings.get('loading_bar_time', 3.0))
         part_a = ""
         final_text = ""
         
-        # THE FIX: Finds %loading_bar% OR %loading_bar_5s% custom times!
         match = re.search(r'%loading_bar(?:_(\d+(?:\.\d+)?)s)?%', raw_text)
         if match:
             has_loading_macro = True
@@ -1182,7 +1200,6 @@ def send_path_content(chat_id, user_id, path, is_editing=False, reply_keyboard=N
             part_b = raw_text[match.end():].strip()
             final_text = part_a + ("\n\n" if part_a and part_b else "") + part_b
             
-            # FIX: If we are in editing mode, make sure final_text retains the raw macro so it doesn't vanish
             if is_editing:
                 final_text = raw_text
         else:
@@ -1191,7 +1208,6 @@ def send_path_content(chat_id, user_id, path, is_editing=False, reply_keyboard=N
         style = global_ui_settings.get('loading_bar_style', '1')
         
         if has_loading_macro and not is_editing:
-            # 1. SEND THE TEMPORARY LOADING MESSAGE FIRST
             sep = "\n\n" if part_a else ""
             bars = ["[▯▯▯▯▯▯▯▯▯▯] 0%", "░░░░░░░░░░ 0%", "▒▒▒▒▒▒▒▒▒▒ 0%"]
             initial_bar = bars[int(style)-1] if style in ['1', '2', '3'] else bars[0]
@@ -1202,22 +1218,16 @@ def send_path_content(chat_id, user_id, path, is_editing=False, reply_keyboard=N
                     temp_msg = bot.send_photo(chat_id, p['photo'], caption=temp_msg_text, parse_mode="HTML")
                 else:
                     temp_msg = bot.send_message(chat_id, temp_msg_text, parse_mode="HTML")
-                # 2. PAUSE THE MENU AND ANIMATE it SYNCHRONOUSLY
                 execute_loading_animation(chat_id, temp_msg.message_id, part_a, style, p['type'] == 'photo', total_loading_time)
             except: pass
             
-        # 3. IF THERE IS NOTHING LEFT AFTER THE BAR DELETES ITSELF, SKIP SENDING AN EMPTY BUBBLE
-        # Because we set final_text = raw_text during is_editing, it won't be completely empty,
-        # so this logic naturally bypasses the 'skip' when editing!
         if has_loading_macro and not final_text and not p.get('custom_inlines') and not p.get('photo'):
-            # Only skip if we aren't supposed to attach a reply keyboard here
             if not (i == len(posts) - 1 and not kb_attached and reply_keyboard):
                 continue
         
         markup = InlineKeyboardMarkup()
         custom_inlines = p.get('custom_inlines', [])
         
-        # APPEND NEW GEN LINK BUTTON DYNAMICALLY IF ASSIGN INVITE IS TRUE
         if meta.get('is_invite') and i == len(posts) - 1 and not is_editing:
             btn_text = get_tl_and_map("🔗 Generate Referral Link", lang)
             markup.row(InlineKeyboardButton(btn_text, callback_data='cb_gen_ref_link'))
@@ -1231,7 +1241,6 @@ def send_path_content(chat_id, user_id, path, is_editing=False, reply_keyboard=N
             for r_idx in sorted(rows_dict.keys()):
                 row_btns = []
                 for b in rows_dict[r_idx]:
-                    # Bypass translating Language indicator buttons so the flags and native names stay perfect
                     if b['mode'] == 'set_lang':
                         tl_btn_text = b['text']
                     else:
@@ -1266,21 +1275,17 @@ def send_path_content(chat_id, user_id, path, is_editing=False, reply_keyboard=N
         if not markup.keyboard: 
             markup = None
             
-        # INTELLIGENT KEYBOARD INJECTION: Try to hide the reply keyboard inside the last normal post to avoid empty bubbles
         if i == len(posts) - 1 and not markup and not kb_attached and reply_keyboard:
             markup = reply_keyboard
             kb_attached = True
         
-        # 4. FINALLY, SEND THE REAL POST (PART B)
         try:
             if p['type'] == 'photo':
-                # For photos, if text is completely empty after extraction, make sure caption is empty, not a space
                 cap = final_text if final_text else None
                 sent = bot.send_photo(chat_id, p['photo'], caption=cap, parse_mode="HTML", reply_markup=markup)
                 if meta.get('is_live_trading') and not is_editing:
                     threading.Thread(target=execute_live_trading_animation, args=(chat_id, sent.message_id, user_id, p['text'], path, True), daemon=True).start()
             else:
-                # To prevent sending empty text messages which crash Telegram
                 safe_text = final_text if final_text else " "
                 sent = bot.send_message(chat_id, safe_text, parse_mode="HTML", reply_markup=markup)
                 if meta.get('is_live_trading') and not is_editing:
@@ -1289,12 +1294,10 @@ def send_path_content(chat_id, user_id, path, is_editing=False, reply_keyboard=N
             if is_editing: editor_msg_ids.setdefault(user_id, []).append(sent.message_id)
                 
         except Exception as e:
-            # FIX: Prevent editor lockout when HTML parse fails, send error and attach the editor markup
             err_msg = f"⚠️ <b>Error rendering post:</b>\n<code>{html.escape(str(e))}</code>\n\n<i>Fix or delete this using the buttons below!</i>"
             sent = bot.send_message(chat_id, err_msg, parse_mode="HTML", reply_markup=markup)
             if is_editing: editor_msg_ids.setdefault(user_id, []).append(sent.message_id)
 
-# --- NATIVE ENTITY EXTRACTOR (Safely translates Telegram Formatting to Database HTML) ---
 def extract_html(message):
     text = message.text or message.caption or ""
     entities = message.entities or message.caption_entities or []
@@ -1322,7 +1325,6 @@ def extract_html(message):
             tags.append((start, open_tag, 'open', ent.length))
             tags.append((end, close_tag, 'close', ent.length))
             
-    # Sort backwards to not mess up offsets.
     tags.sort(key=lambda x: (x[0], x[2] == 'open', x[3] if x[2]=='close' else -x[3]), reverse=True)
     
     for index, tag_str, _, _ in tags:
@@ -1368,7 +1370,7 @@ def get_settings_keyboard(full_path):
     livet_text = "☑️ On" if meta.get('is_live_trading') else "⬜️ Off"
     
     markup.row(KeyboardButton(f'Random Message ({rm_text})'), KeyboardButton(f'Admin Only ({ao_text})'))
-    markup.row(KeyboardButton(f'Invisible ({inv_text})'), KeyboardButton('Subscription (Join)'))
+    markup.row(KeyboardButton(f'Invisible ({inv_text})'))
     markup.row(KeyboardButton('Assign Command'), KeyboardButton('Assign Plan'), KeyboardButton('Assign Language')) 
     markup.row(KeyboardButton(f'Assign Calculator ({calc_text})'), KeyboardButton(f'Assign History ({hist_text})'))
     markup.row(KeyboardButton(f'Assign Withdrawal ({w_text})'), KeyboardButton(f'Assign Deposit ({dep_text})'))
@@ -1409,7 +1411,6 @@ def get_admin_wallet_keyboard():
     markup.row(KeyboardButton('🔙 Back to Admin'))
     return markup
 
-# --- UPDATED: Admin Bonus Keyboard with new buttons ---
 def get_admin_bonus_keyboard():
     markup = ReplyKeyboardMarkup(resize_keyboard=True)
     email_req = "☑️ On" if global_bonus_setup.get('require_email', True) else "⬜️ Off"
@@ -1489,12 +1490,25 @@ def get_keyboard_raw(user_id):
             markup.row(KeyboardButton('📢 Broadcast Message'), KeyboardButton('🔄 Reinvest Settings'))
             markup.row(KeyboardButton('Loading Bar Settings'), KeyboardButton('🚫 Block User System'))
             markup.row(KeyboardButton('💬 Messages'), KeyboardButton('Invite Settings'))
-            # --- NEW FEATURES 7 & 8: DEDICATED ADMIN BUTTONS ---
+            # --- NEW ARCHITECTURE: MASTER GATEWAYS ADDED TO ADMIN UI ---
+            markup.row(KeyboardButton('🧱 Forced Sub Wall'), KeyboardButton('🎁 Homepage Pop-Up'))
             markup.row(KeyboardButton('📊 Bot Stats'), KeyboardButton('🧹 Data Wipe Dashboard'))
             markup.row(KeyboardButton('🔙 Back to Main'))
             return markup
             
-        # --- NEW FEATURE 8: ADVANCED WIPE DASHBOARD KEYBOARD ---
+        # --- NEW ARCHITECTURE: ADMIN UI BUILDERS ---
+        if state == 'admin_sub_wall':
+            markup.row(KeyboardButton('Toggle Wall On/Off'), KeyboardButton('Set Target Mode'))
+            markup.row(KeyboardButton('Add Required Channel'), KeyboardButton('Remove Channel'))
+            markup.row(KeyboardButton('Set Cooldown Check'), KeyboardButton('Edit Wall Message'))
+            markup.row(KeyboardButton('👀 Check User API Sweep'), KeyboardButton('🔙 Back to Admin'))
+            return markup
+            
+        if state == 'admin_homepage_bonus':
+            markup.row(KeyboardButton('Toggle Pop-Up On/Off'), KeyboardButton('Edit Button Text'))
+            markup.row(KeyboardButton('🔙 Back to Admin'))
+            return markup
+            
         if state == 'admin_wipe_menu':
             markup.row(KeyboardButton('🧹 Targeted Wipe'), KeyboardButton('☢️ General Wipe (All Users)'))
             markup.row(KeyboardButton('🔙 Back to Admin'))
@@ -1552,8 +1566,8 @@ def get_keyboard_raw(user_id):
             markup.row(KeyboardButton('🔙 Back to Deposit Menu'))
             return markup
 
-        # --- NEW FEATURE 2: CANCELLATION FOR WIPE WAIT STATES & POPUP STATES ---
-        if state.startswith('dep_setup_') or state.startswith('wallet_setup_') or state.startswith('bonus_setup_') or state.startswith('reinvest_setup_') or state.startswith('msg_setup_') or state in ['admin_loading_time', 'wait_invite_msg', 'wait_invite_levels', 'wait_ref_bonus_pct', 'wait_support_msg', 'wait_payout_popup'] or state.startswith('wait_block_') or state.startswith('wait_edit_block') or state.startswith('wait_edit_unblock') or state in ['admin_broadcast_input', 'bc_wait_text', 'wait_wipe_id', 'wait_general_wipe_confirm']:
+        # Add Gateway states to cancellation bypasses
+        if state.startswith('dep_setup_') or state.startswith('wallet_setup_') or state.startswith('bonus_setup_') or state.startswith('reinvest_setup_') or state.startswith('msg_setup_') or state in ['admin_loading_time', 'wait_invite_msg', 'wait_invite_levels', 'wait_ref_bonus_pct', 'wait_support_msg', 'wait_payout_popup'] or state.startswith('wait_block_') or state.startswith('wait_edit_block') or state.startswith('wait_edit_unblock') or state in ['admin_broadcast_input', 'bc_wait_text', 'wait_wipe_id', 'wait_general_wipe_confirm'] or state.startswith('wait_sub_') or state.startswith('wait_home_'):
             return get_cancel_action_keyboard()
 
         if state == 'admin_plans':
@@ -1632,7 +1646,6 @@ def get_keyboard_raw(user_id):
             markup.row(KeyboardButton('❌ Cancel Action'))
             return markup
 
-    # --- UPDATED: Added bonus_wait_email to cancellation list ---
     if state in ['buyplan_wait_amount', 'wait_calc_amount', 'wallet_wait_email', 'wallet_wait_address', 'wait_reinvest_amount', 'wait_support_msg', 'bonus_wait_email']:
         return get_cancel_action_keyboard()
 
@@ -1673,7 +1686,6 @@ def get_keyboard_raw(user_id):
     return markup
 
 def get_keyboard(user_id):
-    """Intercepts and translates Reply Keyboard outputs transparently."""
     markup = get_keyboard_raw(user_id)
     lang = user_db.get(user_id, {}).get('lang', 'en')
     if lang == 'en' or not markup: return markup
@@ -1718,17 +1730,14 @@ def get_withdrawal_conf_inline(lang='en'):
 def send_welcome(message):
     user_id = message.from_user.id
     
-    # --- NEW: INTERCEPT BLOCKED USERS ---
     if user_id in blocked_users:
         lang = user_db.get(user_id, {}).get('lang', 'en')
         bot.send_message(message.chat.id, get_tl_and_map(block_settings['msg_block'], lang), parse_mode="HTML")
         return
 
-    # Payload Extraction for Deep Linking
     parts = message.text.split()
     payload = parts[1] if len(parts) > 1 else None
 
-    # --- NEW: HOMEPAGE HARDCODED LOADING BAR (Independent) ---
     frames = ["[▯▯▯▯▯▯▯▯▯▯] 0%", "[■■▯▯▯▯▯▯▯▯] 20%", "[■■■■▯▯▯▯▯▯] 40%", "[■■■■■■▯▯▯▯] 60%", "[■■■■■■■■▯▯] 80%", "[■■■■■■■■■■] 100%"]
     try:
         loading_msg = bot.send_message(message.chat.id, f"♻️ <b>INITIALIZING SYSTEM...</b>\n{frames[0]}", parse_mode="HTML")
@@ -1740,7 +1749,6 @@ def send_welcome(message):
     except Exception:
         pass
 
-    # --- NEW: NEW USER ADMIN ALERT & PRELOAD ---
     is_new = init_user_db(message)
     inviter_id = None
     
@@ -1748,18 +1756,19 @@ def send_welcome(message):
         if payload.isdigit():
             inviter_id = int(payload)
         else:
-            # Check dynamic invite links from memory bank
             for uid, udata in user_db.items():
                 if payload in udata.get('invite_links_map', []):
                     inviter_id = uid
                     break
-            # Fallback dynamic lookup
             if not inviter_id and payload.startswith('gf_'):
                 potential_username = payload[3:]
                 for uid, udata in user_db.items():
                     if str(uid) == potential_username or udata.get('username', '').lower() == potential_username.lower():
                         inviter_id = uid
                         break
+                        
+    if inviter_id and is_new:
+        user_db[user_id]['is_referral'] = True # Critical for "Referrals Only" gateway mode
                         
     if is_new:
         if inviter_id and inviter_id in user_db and inviter_id != user_id:
@@ -1770,7 +1779,6 @@ def send_welcome(message):
                 bot.send_message(inviter_id, get_tl_and_map(global_messages_setup['ref_join_msg'], lang))
             except: pass
             
-            # Check level thresholds
             for i, level in enumerate(invite_settings['levels']):
                 if user_db[inviter_id]['ref_count'] >= level['users']:
                     if i not in user_db[inviter_id].get('claimed_levels', []):
@@ -1797,8 +1805,16 @@ def send_welcome(message):
             try: bot.send_message(admin, alert_msg, parse_mode="HTML")
             except: pass
             
-        # Trigger background language preload
         threading.Thread(target=preload_core_languages, daemon=True).start()
+
+    # --- NEW ARCHITECTURE: MASTER INTERCEPTOR (TRAPS USER IF TRUE) ---
+    if requires_subscription_wall(user_id, is_new):
+        deploy_subscription_wall(message.chat.id, user_id)
+        return
+
+    # --- NEW ARCHITECTURE: HOMEPAGE POPUP BRIDGE (INTERCEPTS BEFORE MAIN MENU) ---
+    if check_homepage_bonus(message.chat.id, user_id):
+        return
 
     user_current_path[user_id] = 'root'
     user_state[user_id] = 'normal'
@@ -1811,18 +1827,14 @@ def handle_messages(message):
     user_id = message.from_user.id
     text = message.text if message.text else (message.caption if message.caption else "")
     
-    # --- NEW: INTERCEPT BLOCKED USERS ---
     if user_id in blocked_users:
         lang = user_db.get(user_id, {}).get('lang', 'en')
         bot.send_message(message.chat.id, get_tl_and_map(block_settings['msg_block'], lang), parse_mode="HTML")
         return
     
-    # --- NEW: NATIVE FORMATTING CAPTURE ---
     formatted_text = extract_html(message)
-
     is_admin = user_id in ADMIN_IDS
     
-    # Initialize and check if new user
     is_new = init_user_db(message)
     if is_new:
         total_bot_users = len(user_db)
@@ -1835,8 +1847,20 @@ def handle_messages(message):
         for admin in ADMIN_IDS:
             try: bot.send_message(admin, alert_msg, parse_mode="HTML")
             except: pass
-        # Trigger background language preload
         threading.Thread(target=preload_core_languages, daemon=True).start()
+
+    # --- NEW ARCHITECTURE: MASTER INTERCEPTOR (ENFORCES GATEWAY ON ALL TEXT COMMANDS) ---
+    if requires_subscription_wall(user_id, is_new):
+        try: bot.delete_message(message.chat.id, message.message_id) # Erase what they tried to do
+        except: pass
+        deploy_subscription_wall(message.chat.id, user_id)
+        return
+
+    # --- NEW ARCHITECTURE: HOMEPAGE POPUP BRIDGE (ENFORCES CLAIM ON ALL TEXT COMMANDS) ---
+    if check_homepage_bonus(message.chat.id, user_id):
+        try: bot.delete_message(message.chat.id, message.message_id) # Erase what they tried to do
+        except: pass
+        return
 
     process_accruals(user_id) 
     
@@ -1854,13 +1878,10 @@ def handle_messages(message):
     if user_id not in user_current_path: user_current_path[user_id] = 'root'
     if user_id not in user_state: user_state[user_id] = 'normal'
     
-    # REVERSE MAP: Transparently translate incoming buttons back to English logic!
-    # This loop absolutely guarantees that BACK and HOME buttons always work in any language!
     if lang != 'en':
         if text in REVERSE_TL_MAP.get(lang, {}):
             text = REVERSE_TL_MAP[lang][text]
         else:
-            # Bulletproof Fallback check for core navigation (fixes bot reboot translation amnesia)
             core_commands = ['🏠 Home', '🔙 Back', '❌ Cancel Action', '🔙 Exit Button Settings', '🔙 Exit Balance', '🔙 Back to Main', '🔙 Back to Admin', '🎛️ Buttons Editor', '📝 Posts Editor', '💵 Balance', '🔐 Admin']
             for cmd in core_commands:
                 if text == get_tl_and_map(cmd, lang):
@@ -1872,7 +1893,6 @@ def handle_messages(message):
                         text = btn_name
                         break
 
-    # Reset normal users if stuck in certain states (UPDATED with bonus_wait_email)
     if not is_admin and user_state[user_id] not in ['w_action_amount', 'w_action_addr', 'dep_wait_amount', 'dep_wait_proof', 'buyplan_wait_amount', 'wait_calc_amount', 'wallet_wait_email', 'wallet_wait_address', 'wait_reinvest_amount', 'wait_support_msg', 'bonus_wait_email']: 
         user_state[user_id] = 'normal'
         
@@ -1881,7 +1901,6 @@ def handle_messages(message):
     selected_btn = user_selected_button.get(user_id)
     full_path = f"{current_path}/{selected_btn}" if selected_btn else None
 
-    # --- HANDLE USER ABORTING OR NAVIGATING FIRST (BEFORE STATE LOGIC CATCHES IT) ---
     if text in ['❌ Cancel Action', '❌ Cancel', '🚫 Cancel Action']:
         if state in ['posts_adding', 'posts_insert_after', 'posts_rep_text', 'posts_rep_all']:
             user_state[user_id] = 'posts_editing'
@@ -1946,7 +1965,6 @@ def handle_messages(message):
             user_state[user_id] = 'admin_menu'
             bot.send_message(message.chat.id, get_tl_and_map("Broadcast cancelled.", lang), reply_markup=get_keyboard(user_id))
             return
-        # --- NEW FEATURE 2: WIPE CANCELLATION & POPUP MENU ---
         elif state in ['wait_wipe_id', 'wait_general_wipe_confirm']:
             user_state[user_id] = 'admin_wipe_menu'
             bot.send_message(message.chat.id, "Wipe action cancelled.", reply_markup=get_keyboard(user_id))
@@ -1959,18 +1977,25 @@ def handle_messages(message):
             user_state[user_id] = 'normal'
             bot.send_message(message.chat.id, get_tl_and_map("Action cancelled.", lang), reply_markup=get_keyboard(user_id))
             return
+        # --- NEW ARCHITECTURE: ADMIN GATEWAY SETTINGS CANCEL ROUTES ---
+        elif state.startswith('wait_sub_'):
+            user_state[user_id] = 'admin_sub_wall'
+            bot.send_message(message.chat.id, "Gateway action cancelled.", reply_markup=get_keyboard(user_id))
+            return
+        elif state.startswith('wait_home_'):
+            user_state[user_id] = 'admin_homepage_bonus'
+            bot.send_message(message.chat.id, "Homepage setting cancelled.", reply_markup=get_keyboard(user_id))
+            return
         else:
             user_state[user_id] = 'normal'
             bot.send_message(message.chat.id, get_tl_and_map("❌ Action Cancelled.", lang), reply_markup=get_keyboard(user_id))
             return
 
-    # --- INTERCEPT MENU CLICKS WHILE IN SETUP ---
     msg_menu_cmds = ['Edit Hourly DM', 'Edit Expiry DM', 'Edit Ref Join Msg', 'Edit Ref Comm Msg', 'Edit Level Up Msg', 'Edit Admin Change Msg']
     if text in msg_menu_cmds and state.startswith('msg_setup_'):
         user_state[user_id] = 'admin_messages_menu'
         state = 'admin_messages_menu'
         
-    # --- SUPPORT DESK LOGIC ---
     if state == 'wait_support_msg':
         bot.send_message(message.chat.id, "Sending... ⏳")
         time.sleep(1.5)
@@ -1999,7 +2024,6 @@ def handle_messages(message):
         user_state[user_id] = 'normal'
         return
 
-    # --- ADMIN MESSAGES MANAGER ---
     if state == 'admin_menu' and text == '💬 Messages':
         user_state[user_id] = 'admin_messages_menu'
         bot.send_message(message.chat.id, "💬 <b>Messages Manager</b>", parse_mode="HTML", reply_markup=get_keyboard(user_id))
@@ -2086,7 +2110,6 @@ def handle_messages(message):
             bot.send_message(message.chat.id, "⚠️ Invalid format. Use Users-Reward, separated by commas (e.g. 10-5, 25-15).")
         return
 
-    # --- NEW: BROADCAST SYSTEM ENTRY ---
     if text == '📢 Broadcast Message' and is_admin:
         user_state[user_id] = 'admin_broadcast_input'
         user_action_data[user_id] = {'broadcast': {'text': '', 'photo': None, 'inlines': []}}
@@ -2179,7 +2202,6 @@ def handle_messages(message):
 
     if state == 'admin_broadcast_preview' and text == '🚀 Send Broadcast':
         bc_data = user_action_data[user_id]['broadcast']
-        # Prepare inline markup
         markup = InlineKeyboardMarkup()
         for b in bc_data['inlines']:
             if b['mode'] == 'url': markup.add(InlineKeyboardButton(b['text'], url=b['data']))
@@ -2224,7 +2246,7 @@ def handle_messages(message):
                         dead_users.append(uid)
                 except Exception:
                     fail_count += 1
-                time.sleep(0.05) # Prevent flood wait
+                time.sleep(0.05)
                 
             for d in dead_users:
                 user_db.pop(d, None)
@@ -2235,7 +2257,6 @@ def handle_messages(message):
         threading.Thread(target=send_bc, daemon=True).start()
         return
 
-    # --- FEATURE 2: ADVANCED STATS & WIPE SYSTEM HANDLERS ---
     if state == 'admin_menu' and text == '📊 Bot Stats':
         bot_info = bot.get_me()
         total_users = len(user_db)
@@ -2322,7 +2343,139 @@ def handle_messages(message):
             bot.send_message(message.chat.id, "❌ Confirmation failed. General Wipe aborted.", reply_markup=get_keyboard(user_id))
         return
 
-    # --- UPDATED MACRO LIST LOGIC (BULLETPROOF PARSE CATCHER + LIST STYLE) ---
+    # --- NEW ARCHITECTURE: MASTER ADMIN GATEWAY SETTINGS ---
+    if state == 'admin_menu' and text == '🧱 Forced Sub Wall':
+        user_state[user_id] = 'admin_sub_wall'
+        status = "🟢 Enabled" if subscription_settings.get('enabled') else "🔴 Disabled"
+        mode = subscription_settings.get('target_mode', 'all').upper()
+        ch_count = len(subscription_settings.get('channels', []))
+        bot.send_message(message.chat.id, f"🧱 <b>Forced Subscription Gateway</b>\n\nStatus: {status}\nTarget Mode: {mode}\nRequired Channels: {ch_count}\nBackground Check Cooldown: {subscription_settings.get('check_time_hours')} hrs", parse_mode="HTML", reply_markup=get_keyboard(user_id))
+        return
+        
+    if state == 'admin_menu' and text == '🎁 Homepage Pop-Up':
+        user_state[user_id] = 'admin_homepage_bonus'
+        status = "🟢 Enabled" if homepage_bonus_settings.get('enabled') else "🔴 Disabled"
+        btn_txt = homepage_bonus_settings.get('btn_text', 'Claim Bonus')
+        bot.send_message(message.chat.id, f"🎁 <b>Homepage Welcome Bonus</b>\n\nStatus: {status}\nButton Text: {btn_txt}\n\n<i>Note: This bridges the gap between /start and the Main Menu perfectly.</i>", parse_mode="HTML", reply_markup=get_keyboard(user_id))
+        return
+
+    if state == 'admin_sub_wall':
+        if text == '🔙 Back to Admin':
+            user_state[user_id] = 'admin_menu'
+            bot.send_message(message.chat.id, "🔐 <b>Admin Panel</b>", parse_mode="HTML", reply_markup=get_keyboard(user_id))
+        elif text == 'Toggle Wall On/Off':
+            subscription_settings['enabled'] = not subscription_settings.get('enabled', False)
+            bot.send_message(message.chat.id, "✅ Wall Status Toggled.", reply_markup=get_keyboard(user_id))
+        elif text == 'Set Target Mode':
+            user_state[user_id] = 'wait_sub_mode'
+            markup = ReplyKeyboardMarkup(resize_keyboard=True)
+            markup.row(KeyboardButton('new'), KeyboardButton('all'), KeyboardButton('referrals'))
+            markup.row(KeyboardButton('❌ Cancel Action'))
+            bot.send_message(message.chat.id, "Select who this wall applies to:\n\n<b>New:</b> Only fresh /start users\n<b>All:</b> Everyone hits the wall\n<b>Referrals:</b> Only users joining via invite links", parse_mode="HTML", reply_markup=markup)
+        elif text == 'Add Required Channel':
+            user_state[user_id] = 'wait_sub_channel'
+            bot.send_message(message.chat.id, "Send the channel details separated by a pipe (|).\n\nFormat: <code>Button Name | Telegram URL | Chat ID</code>\nExample: <code>Official Channel | https://t.me/example | -100123456789</code>", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+        elif text == 'Remove Channel':
+            subscription_settings['channels'] = []
+            bot.send_message(message.chat.id, "🗑 All configured channels have been removed.", reply_markup=get_keyboard(user_id))
+        elif text == 'Set Cooldown Check':
+            user_state[user_id] = 'wait_sub_time'
+            bot.send_message(message.chat.id, "Enter the background retention cooldown in hours (e.g., 24). Enter 0 to disable background sweeps.", reply_markup=get_cancel_action_keyboard())
+        elif text == 'Edit Wall Message':
+            user_state[user_id] = 'wait_sub_msg'
+            bot.send_message(message.chat.id, f"Enter the new text for the subscription wall:\n\nCurrent:\n{subscription_settings.get('msg_wall')}", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+        elif text == '👀 Check User API Sweep':
+            user_state[user_id] = 'wait_sub_check_user'
+            bot.send_message(message.chat.id, "Enter the Telegram ID of the user you want to manually sweep through the verification logic.", reply_markup=get_cancel_action_keyboard())
+        return
+
+    if state == 'wait_sub_mode':
+        if text in ['new', 'all', 'referrals']:
+            subscription_settings['target_mode'] = text
+            user_state[user_id] = 'admin_sub_wall'
+            bot.send_message(message.chat.id, f"✅ Target Mode set to: {text}", reply_markup=get_keyboard(user_id))
+        else:
+            bot.send_message(message.chat.id, "Invalid mode.")
+        return
+        
+    if state == 'wait_sub_channel':
+        try:
+            parts = text.split('|')
+            if len(parts) == 3:
+                subscription_settings['channels'].append({
+                    'name': parts[0].strip(),
+                    'url': parts[1].strip(),
+                    'chat_id': parts[2].strip()
+                })
+                user_state[user_id] = 'admin_sub_wall'
+                bot.send_message(message.chat.id, "✅ Channel successfully appended to the Wall list.", reply_markup=get_keyboard(user_id))
+            else:
+                bot.send_message(message.chat.id, "⚠️ Invalid format. Must use two pipe (|) characters.")
+        except Exception:
+            bot.send_message(message.chat.id, "Error processing string.")
+        return
+        
+    if state == 'wait_sub_time':
+        try:
+            subscription_settings['check_time_hours'] = float(text)
+            user_state[user_id] = 'admin_sub_wall'
+            bot.send_message(message.chat.id, "✅ Background retention timer updated.", reply_markup=get_keyboard(user_id))
+        except ValueError:
+            bot.send_message(message.chat.id, "Invalid number.")
+        return
+        
+    if state == 'wait_sub_msg':
+        subscription_settings['msg_wall'] = formatted_text
+        user_state[user_id] = 'admin_sub_wall'
+        bot.send_message(message.chat.id, "✅ Wall message updated.", reply_markup=get_keyboard(user_id))
+        return
+        
+    if state == 'wait_sub_check_user':
+        try:
+            target_uid = int(text)
+            bot.send_message(message.chat.id, f"🔍 <b>Performing Manual Diagnostics on {target_uid}...</b>", parse_mode="HTML")
+            
+            sweep_results = ""
+            all_passed = True
+            for ch in subscription_settings.get('channels', []):
+                try:
+                    member = bot.get_chat_member(ch['chat_id'], target_uid)
+                    if member.status in ['left', 'kicked']:
+                        all_passed = False
+                        sweep_results += f"❌ Missing: {ch['name']}\n"
+                    else:
+                        sweep_results += f"✅ Joined: {ch['name']}\n"
+                except Exception as e:
+                    sweep_results += f"⚠️ API Error on {ch['name']}: {e}\n"
+                    all_passed = False
+            
+            if target_uid in user_db:
+                user_db[target_uid]['sub_verified'] = all_passed
+                
+            bot.send_message(message.chat.id, f"<b>Sweep Results:</b>\n{sweep_results}\n\nFinal Verified Status: {all_passed}", parse_mode="HTML", reply_markup=get_keyboard(user_id))
+            user_state[user_id] = 'admin_sub_wall'
+        except ValueError:
+            bot.send_message(message.chat.id, "Invalid User ID format.")
+        return
+
+    if state == 'admin_homepage_bonus':
+        if text == '🔙 Back to Admin':
+            user_state[user_id] = 'admin_menu'
+            bot.send_message(message.chat.id, "🔐 <b>Admin Panel</b>", parse_mode="HTML", reply_markup=get_keyboard(user_id))
+        elif text == 'Toggle Pop-Up On/Off':
+            homepage_bonus_settings['enabled'] = not homepage_bonus_settings.get('enabled', False)
+            bot.send_message(message.chat.id, "✅ Homepage Pop-Up Toggled.", reply_markup=get_keyboard(user_id))
+        elif text == 'Edit Button Text':
+            user_state[user_id] = 'wait_home_btn'
+            bot.send_message(message.chat.id, f"Enter the new Call to Action button text:\n\nCurrent: {homepage_bonus_settings.get('btn_text')}", reply_markup=get_cancel_action_keyboard())
+        return
+        
+    if state == 'wait_home_btn':
+        homepage_bonus_settings['btn_text'] = text
+        user_state[user_id] = 'admin_homepage_bonus'
+        bot.send_message(message.chat.id, "✅ Button text updated.", reply_markup=get_keyboard(user_id))
+        return
+
     if text in ['User Macro', 'User Macros', '📜 Macros'] and is_admin:
         macros_msg = (
             "📝 <b>Available Macros List</b>\n"
@@ -2344,8 +2497,8 @@ def handle_messages(message):
             "• <code>%email%</code> - User's Email address\n"
             "• <code>%bonus_amount%</code> - The defined bonus amount\n"
             "• <code>%time_left%</code> - Used dynamically in Bonus fail msg\n"
-            "• <code>%loading_bar%</code> - Animates a loading bar (0% to 100%) globally\n"
-            "• <code>%loading_bar_5s%</code> - Custom time loading bar (e.g. 5s, 10.5s)\n\n"
+            "• <code>%loading_bar%</code> - Animates a loading bar globally\n"
+            "• <code>%loading_bar_5s%</code> - Custom time loading bar (e.g. 5s)\n\n"
             "• <code>%plan0%</code> ... <code>%plan5%</code> - Plan details\n"
             "• <code>%lang%</code> - User's current language\n\n"
             "<b>NEW BALANCE MACROS:</b>\n"
@@ -2372,10 +2525,9 @@ def handle_messages(message):
             bot.send_message(message.chat.id, "Error rendering Macros.", reply_markup=get_keyboard(user_id))
         return
 
-    # --- FIX 1: NAVIGATION BUTTONS (HOME, BACK, EXITS) ---
     if text == '🏠 Home':
         user_current_path[user_id] = 'root'
-        user_state[user_id] = 'normal' if not is_admin else state # Maintain editing states if admin
+        user_state[user_id] = 'normal' if not is_admin else state 
         if state in ['posts_adding', 'w_action_amount', 'w_action_addr', 'buyplan_wait_amount', 'dep_wait_amount', 'dep_wait_proof', 'wait_calc_amount', 'wallet_wait_email', 'wallet_wait_address', 'wait_reinvest_amount']:
             user_state[user_id] = 'normal'
         send_path_content(message.chat.id, user_id, 'root', is_editing=(user_state[user_id] == 'posts_editing'), reply_keyboard=get_keyboard(user_id))
@@ -2402,7 +2554,6 @@ def handle_messages(message):
         bot.send_message(message.chat.id, get_tl_and_map("Exited balance management.", lang), reply_markup=get_keyboard(user_id))
         return
 
-    # --- FIX: POSTS ADDING / EDITING PROCESSORS ---
     if state == 'posts_adding':
         if current_path not in menu_posts: menu_posts[current_path] = []
         new_post = {
@@ -2462,7 +2613,6 @@ def handle_messages(message):
         send_path_content(message.chat.id, user_id, current_path, True)
         return
 
-    # --- FIX 2: BUTTON ASSIGNMENTS HANDLER ---
     if state == 'button_settings':
         btn_path = f"{current_path}/{user_selected_button.get(user_id)}"
         meta = btn_metadata.get(btn_path, get_default_metadata())
@@ -2621,7 +2771,6 @@ def handle_messages(message):
                 menu_posts[btn_path] = [new_post]
             bot.send_message(message.chat.id, "✅ Invite page assigned and pre-populated.", reply_markup=get_keyboard(user_id))
 
-        # --- NEW: LIVE TRADING TERMINAL ASSIGNMENT TOGGLE ---
         elif text.startswith('Assign Live Trading'):
             meta['is_live_trading'] = not meta.get('is_live_trading', False)
             btn_metadata[btn_path] = meta
@@ -2675,7 +2824,6 @@ def handle_messages(message):
         bot.send_message(message.chat.id, f"✅ Plan assigned!", reply_markup=get_keyboard(user_id))
         return
 
-    # --- INLINE POST EDITOR LOGIC FIX ---
     if state == 'pi_wait_mode':
         if text not in ['🔗 URL or Share', '💬 Popup Window', '🚀 Command', '🛒 Buy Plan', '🏦 Deposit', '🌐 Set Language', '❓ Ask Question']:
             return bot.send_message(message.chat.id, "Invalid option. Select from keyboard.")
@@ -2770,135 +2918,6 @@ def handle_messages(message):
         user_state[user_id] = 'posts_editing'
         bot.send_message(message.chat.id, "✅ Inline button saved!", reply_markup=get_keyboard(user_id))
         send_path_content(message.chat.id, user_id, current_path, True)
-        return
-
-    # --- WALLET FLOW USER ---
-    if state == 'wallet_wait_email':
-        user_db[user_id]['email'] = text
-        user_state[user_id] = 'wallet_wait_address'
-        bot.send_message(message.chat.id, get_tl_and_map(global_wallet_setup['msg_prompt'], lang), parse_mode="HTML")
-        return
-
-    # --- NEW FEATURE: BONUS WAIT EMAIL STATE ---
-    if state == 'bonus_wait_email':
-        if '@' not in text or '.' not in text:
-            return bot.send_message(message.chat.id, get_tl_and_map("⚠️ Invalid email format. Please try again or click Cancel Action.", lang))
-        
-        user_db[user_id]['email'] = text.strip()
-        user_state[user_id] = 'normal'
-        bot.send_message(message.chat.id, get_tl_and_map("✅ Email linked successfully! You can now click the bonus button again to claim your reward.", lang), reply_markup=get_keyboard(user_id))
-        
-        # Send Welcome Email via Native SMTP
-        welcome_subject = "Welcome to G-Force Trading!"
-        welcome_html = f"""
-        <div style="background-color: #0b0e11; color: #eaecef; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #2b3139; border-radius: 8px; overflow: hidden;">
-            <div style="background-color: #181a20; padding: 20px; border-bottom: 1px solid #2b3139; text-align: center;">
-                <h2 style="margin: 0; color: #fcd535;">G-FORCE TRADING</h2>
-            </div>
-            <div style="padding: 30px;">
-                <h3 style="margin-top: 0; color: #ffffff;">Welcome Aboard!</h3>
-                <p>Your email has been successfully securely linked to your Telegram account.</p>
-                <div style="background-color: #181a20; padding: 15px; border-radius: 6px; margin: 20px 0;">
-                    <p style="margin: 5px 0; color: #848e9c;">Status: <span style="color: #0ecb81; float: right; font-weight: bold;">Verified</span></p>
-                </div>
-                <p>You can now return to the bot to claim your free USDT bonus and start trading on the live markets.</p>
-            </div>
-        </div>
-        """
-        send_email_async(text.strip(), welcome_subject, welcome_html)
-        return
-
-    if state == 'wallet_wait_address':
-        addr = text.strip()
-        net = ""
-        if addr.startswith('T') and len(addr) >= 33:
-            net = "TRC20"
-        elif addr.startswith('0x') and len(addr) == 42:
-            net = "BEP20"
-        else:
-            return bot.send_message(message.chat.id, get_tl_and_map("⚠️ Invalid Address. Supported networks are USDT TRC20 (starts with T) and BEP20 (starts with 0x). Try again or Cancel.", lang))
-
-        user_db[user_id]['wallet'] = addr
-        user_db[user_id]['wallet_net'] = net
-        user_state[user_id] = 'normal'
-        
-        msg = global_wallet_setup['msg_success'].replace('%wallet%', addr).replace('%network%', net)
-        bot.send_message(message.chat.id, get_tl_and_map(replace_macros(msg, user_id, current_path), lang), parse_mode="HTML", reply_markup=get_keyboard(user_id))
-        return
-
-    # --- NEW FEATURE: BONUS WAIT EMAIL STATE ---
-    if state == 'bonus_wait_email':
-        if '@' not in text or '.' not in text:
-            return bot.send_message(message.chat.id, get_tl_and_map("⚠️ Invalid email format. Please try again or click Cancel Action.", lang))
-        
-        user_db[user_id]['email'] = text.strip()
-        user_state[user_id] = 'normal'
-        bot.send_message(message.chat.id, get_tl_and_map("✅ Email linked successfully! You can now click the bonus button again to claim your reward.", lang), reply_markup=get_keyboard(user_id))
-        
-        # Send Welcome Email via Native SMTP
-        welcome_subject = "Welcome to G-Force Trading!"
-        welcome_html = f"""
-        <div style="background-color: #0b0e11; color: #eaecef; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #2b3139; border-radius: 8px; overflow: hidden;">
-            <div style="background-color: #181a20; padding: 20px; border-bottom: 1px solid #2b3139; text-align: center;">
-                <h2 style="margin: 0; color: #fcd535;">G-FORCE TRADING</h2>
-            </div>
-            <div style="padding: 30px;">
-                <h3 style="margin-top: 0; color: #ffffff;">Welcome Aboard!</h3>
-                <p>Your email has been successfully securely linked to your Telegram account.</p>
-                <div style="background-color: #181a20; padding: 15px; border-radius: 6px; margin: 20px 0;">
-                    <p style="margin: 5px 0; color: #848e9c;">Status: <span style="color: #0ecb81; float: right; font-weight: bold;">Verified</span></p>
-                </div>
-                <p>You can now return to the bot to claim your free USDT bonus and start trading on the live markets.</p>
-            </div>
-        </div>
-        """
-        send_email_async(text.strip(), welcome_subject, welcome_html)
-        return
-
-    if state == 'wallet_wait_address':
-        addr = text.strip()
-        net = ""
-        if addr.startswith('T') and len(addr) >= 33:
-            net = "TRC20"
-        elif addr.startswith('0x') and len(addr) == 42:
-            net = "BEP20"
-        else:
-            return bot.send_message(message.chat.id, get_tl_and_map("⚠️ Invalid Address. Supported networks are USDT TRC20 (starts with T) and BEP20 (starts with 0x). Try again or Cancel.", lang))
-
-        user_db[user_id]['wallet'] = addr
-        user_db[user_id]['wallet_net'] = net
-        user_state[user_id] = 'normal'
-        
-        msg = global_wallet_setup['msg_success'].replace('%wallet%', addr).replace('%network%', net)
-        bot.send_message(message.chat.id, get_tl_and_map(replace_macros(msg, user_id, current_path), lang), parse_mode="HTML", reply_markup=get_keyboard(user_id))
-        return
-
-    # --- ADMIN WALLET SETTINGS ---
-    if state == 'admin_wallet_menu':
-        if text == '🔙 Back to Admin':
-            user_state[user_id] = 'admin_menu'
-            bot.send_message(message.chat.id, "🔐 <b>Admin Panel</b>", parse_mode="HTML", reply_markup=get_keyboard(user_id))
-        elif text == '💬 Edit Main Msg':
-            user_state[user_id] = 'wallet_setup_main'
-            bot.send_message(message.chat.id, f"Enter the main wallet page message (macros: %wallet%, %email%):\n\nCurrent:\n{global_wallet_setup['msg_main']}", reply_markup=get_cancel_action_keyboard())
-        elif text == '💬 Edit Prompt Msg':
-            user_state[user_id] = 'wallet_setup_prompt'
-            bot.send_message(message.chat.id, f"Enter the message asking for address:\n\nCurrent:\n{global_wallet_setup['msg_prompt']}", reply_markup=get_cancel_action_keyboard())
-        elif text == '💬 Edit Success Msg':
-            user_state[user_id] = 'wallet_setup_success'
-            bot.send_message(message.chat.id, f"Enter the success message:\n\nCurrent:\n{global_wallet_setup['msg_success']}", reply_markup=get_cancel_action_keyboard())
-        elif text == '💬 Edit Email Prompt':
-            user_state[user_id] = 'wallet_setup_email_prompt'
-            bot.send_message(message.chat.id, f"Enter the message asking for email:\n\nCurrent:\n{global_wallet_setup['msg_email_prompt']}", reply_markup=get_cancel_action_keyboard())
-        elif text == '🔘 Edit Inline (Set)':
-            user_state[user_id] = 'wallet_setup_inline_set'
-            bot.send_message(message.chat.id, f"Enter the button text for first time setup:\n\nCurrent: {global_wallet_setup['inline_set']}", reply_markup=get_cancel_action_keyboard())
-        elif text == '🔘 Edit Inline (Change)':
-            user_state[user_id] = 'wallet_setup_inline_change'
-            bot.send_message(message.chat.id, f"Enter the button text for changing wallet:\n\nCurrent: {global_wallet_setup['inline_change']}", reply_markup=get_cancel_action_keyboard())
-        elif text.startswith('📧 Toggle Email'):
-            global_wallet_setup['ask_email'] = not global_wallet_setup['ask_email']
-            bot.send_message(message.chat.id, f"Email requirement toggled.", reply_markup=get_keyboard(user_id))
         return
 
     if state.startswith('wallet_setup_'):
@@ -3462,7 +3481,6 @@ def handle_messages(message):
             user_state[user_id] = 'admin_plans'
             bot.send_message(message.chat.id, "📊 <b>Plans Manager</b>", parse_mode="HTML", reply_markup=get_keyboard(user_id))
         
-        # FIX: Plan 0 custom logic
         elif text == '💰 Set Bonus Amount' and p_id == 'plan0':
             user_state[user_id] = 'plan_setup_bonus'
             bot.send_message(message.chat.id, f"Enter free bonus capital amount for <b>{bot_plans[p_id]['name']}</b>:\n\nℹ️ Current: ${bot_plans[p_id].get('bonus_amount', 50.0)}", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
@@ -3540,7 +3558,7 @@ def handle_messages(message):
         return
 
     # --- BLOCK UNAUTHORIZED ADMIN COMMANDS ---
-    admin_commands = ['🎛️ Buttons Editor', '📝 Posts Editor', '💵 Balance', '🔐 Admin', '➕ Add Button', '🛑 Stop Editor', '✅ Confirm', '🚫 Cancel', '✖️ Delete', 'Deposit balance', 'Withdrawal balance', 'User Macro', 'User Macros', '📜 Macros', '📊 Plans', '🔙 Back to Main', '🔙 Back to Admin', '➕ Add Plan', '➕ Add Message', 'Pagination in Editor (10)', '🏦 Deposit Settings', 'Withdrawal Settings', '🔙 Back to Deposit Menu', '📍 Set Static Address', '🔑 Set HD Wallet Key', '💬 Edit Enter Msg', '💬 Edit Instruct Msg', '💰 Set Min Deposit', '💰 Set Max Deposit', '💬 Edit Pending Msg', '💬 Edit Success Msg', '🧮 Calculator', '📜 Transactions', '💳 Wallet Settings', '🎁 Bonus Settings', '🔄 Reinvest Settings', 'Loading Bar Settings', '🚫 Block User System', '🚫 Block', '✅ Unblock', '💬 Edit Block Msg', '💬 Edit Unblock Msg', '📢 Broadcast Message', '💬 Messages', 'Invite Settings', '🛠 Advanced Stats & Wipe']
+    admin_commands = ['🎛️ Buttons Editor', '📝 Posts Editor', '💵 Balance', '🔐 Admin', '➕ Add Button', '🛑 Stop Editor', '✅ Confirm', '🚫 Cancel', '✖️ Delete', 'Deposit balance', 'Withdrawal balance', 'User Macro', 'User Macros', '📜 Macros', '📊 Plans', '🔙 Back to Main', '🔙 Back to Admin', '➕ Add Plan', '➕ Add Message', 'Pagination in Editor (10)', '🏦 Deposit Settings', 'Withdrawal Settings', '🔙 Back to Deposit Menu', '📍 Set Static Address', '🔑 Set HD Wallet Key', '💬 Edit Enter Msg', '💬 Edit Instruct Msg', '💰 Set Min Deposit', '💰 Set Max Deposit', '💬 Edit Pending Msg', '💬 Edit Success Msg', '🧮 Calculator', '📜 Transactions', '💳 Wallet Settings', '🎁 Bonus Settings', '🔄 Reinvest Settings', 'Loading Bar Settings', '🚫 Block User System', '🚫 Block', '✅ Unblock', '💬 Edit Block Msg', '💬 Edit Unblock Msg', '📢 Broadcast Message', '💬 Messages', 'Invite Settings', '🛠 Advanced Stats & Wipe', '🧱 Forced Sub Wall', '🎁 Homepage Pop-Up', 'Toggle Wall On/Off', 'Set Target Mode', 'Add Required Channel', 'Remove Channel', 'Set Cooldown Check', 'Edit Wall Message', '👀 Check User API Sweep', 'Toggle Pop-Up On/Off', 'Edit Button Text', '🧹 Targeted Wipe', '☢️ General Wipe (All Users)']
     if not is_admin and (text in admin_commands or text.startswith('📋 Paste "') or text == '✔️ Leave as Is' or text == '➖ Set Empty' or text.startswith('⚙️ Edit ') or text.startswith('Style ')):
         bot.send_message(message.chat.id, get_tl_and_map("Unrecognized command.", lang), reply_markup=get_keyboard(user_id))
         return
@@ -3888,7 +3906,6 @@ def handle_messages(message):
                 user_current_path[user_id] = path
                 if path not in menus: menus[path] = []
                 
-                # --- BREADCRUMB LOGIC FOR COMMANDS ---
                 has_submenus = len(menus[path]) > 0
                 if has_submenus and not (is_admin and state == 'posts_editing'):
                     btn_name = path.split('/')[-1]
@@ -3966,7 +3983,6 @@ def handle_messages(message):
             
         elif (current_path in menus and text in menus[current_path]) or any(text in btns for btns in menus.values()):
             
-            # If the button isn't in our current folder, teleport to the folder where it actually lives!
             if current_path not in menus or text not in menus[current_path]:
                 for search_path, btns in menus.items():
                     if text in btns:
@@ -3983,7 +3999,6 @@ def handle_messages(message):
             if meta.get('withdrawal') and state != 'posts_editing':
                 user_action_data[user_id] = {'path': custom_btn_path}
                 
-                # Check Auto-Redirection if Do Not Ask Address is active
                 if global_w_setup.get('do_not_ask_address'):
                     addr_var = global_w_setup.get('addr_var', 'wallet')
                     user_addr = user_db[user_id].get(addr_var, 'Not Set')
@@ -4025,13 +4040,11 @@ def handle_messages(message):
 
             if meta.get('is_bonus') and state != 'posts_editing':
                 now = time.time()
-                # --- NEW FEATURE: EMAIL LOCK FOR BONUS ---
                 if global_bonus_setup.get('require_email', True) and user_db[user_id].get('email', 'Not Set') == 'Not Set':
                     user_state[user_id] = 'bonus_wait_email'
                     req_msg = global_bonus_setup.get('msg_email_req', "⚠️ <b>Email Required</b>\n\nTo claim your free bonus, you must safely link an email address to your account. Please reply with your email address now:")
                     bot.send_message(message.chat.id, get_tl_and_map(req_msg, lang), parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
                     return
-                # --- END NEW FEATURE ---
                 
                 last_time = user_db[user_id].get('last_bonus_time', 0)
                 cooldown = global_bonus_setup['cooldown_hours'] * 3600
@@ -4044,7 +4057,6 @@ def handle_messages(message):
                     msg = global_bonus_setup['msg_success'].replace('%bonus_amount%', str(global_bonus_setup['amount']))
                     bot.send_message(message.chat.id, get_tl_and_map(replace_macros(msg, user_id, custom_btn_path), lang), parse_mode="HTML")
                     
-                    # Auto-transfer logic for Bonus
                     min_w = global_bonus_setup.get('min_withdraw', 50.0)
                     if user_db[user_id]['bonus'] >= min_w:
                         transfer_amt = user_db[user_id]['bonus']
@@ -4111,7 +4123,6 @@ def handle_messages(message):
                     bot.send_message(message.chat.id, get_tl_and_map(f"🔄 <b>Reinvest</b>\n\nAvailable Balance: ${fmt_amt(total_avail)}\nMinimum Investment: ${fmt_amt(min_plan_amount)}\n\nEnter the amount you wish to reinvest:", lang), parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
                 return
 
-            # --- THE FIX: FOLDERS VS POSTS (BREADCRUMB LOGIC) ---
             has_submenus = custom_btn_path in menus and len(menus[custom_btn_path]) > 0
             
             if is_admin and state in ['editing', 'posts_editing']:
@@ -4120,28 +4131,19 @@ def handle_messages(message):
                 send_path_content(message.chat.id, user_id, custom_btn_path, is_editing=(state == 'posts_editing'), reply_keyboard=get_keyboard(user_id))
                 
             elif has_submenus:
-                # 1. IT HAS SUB-MENUS: Deploy the Breadcrumb Header to carry the bottom keyboard!
                 user_current_path[user_id] = custom_btn_path
-                
-                # The Breadcrumb is hardcoded and uneditable by the Posts Editor
                 breadcrumb_text = f"📂 <b>{text}</b>"
-                
                 try:
                     bot.send_message(
                         message.chat.id, 
                         get_tl_and_map(breadcrumb_text, lang), 
                         parse_mode="HTML", 
-                        reply_markup=get_keyboard(user_id) # The bottom keyboard rides on the Breadcrumb
+                        reply_markup=get_keyboard(user_id)
                     )
                 except Exception: pass
-                
-                # Send the actual text/assigned content BELOW the Breadcrumb.
-                # Notice we pass reply_keyboard=None so it doesn't try to attach a bottom keyboard again!
                 send_path_content(message.chat.id, user_id, custom_btn_path, is_editing=False, reply_keyboard=None)
                 
             else:
-                # 2. NO SUB-MENUS: It's just a regular button (a Leaf)
-                # We skip the Breadcrumb entirely, and we DO NOT change the bottom keyboard.
                 send_path_content(message.chat.id, user_id, custom_btn_path, is_editing=False, reply_keyboard=None)
                 
         else:
@@ -4161,7 +4163,6 @@ def execute_plan_purchase_via_popup(user_id, chat_id, message_id, call_id, plan_
 
     lang = user_db.get(user_id, {}).get('lang', 'en')
 
-    # Handle Free / Bonus Plans
     if p_data.get('is_free', False) or plan_id == 'plan0':
         if any(p['macro'] == plan_id and p['status'] == 'active' for p in user_db[user_id].get('active_plans', [])):
             return bot.answer_callback_query(call_id, get_tl_and_map(f"❌ You already have {p_data['name']} active!", lang), show_alert=True)
@@ -4175,12 +4176,10 @@ def execute_plan_purchase_via_popup(user_id, chat_id, message_id, call_id, plan_
         log_tx(user_id, f"Activated Free {p_data['name']}", invest_amount)
         bot.answer_callback_query(call_id, get_tl_and_map(f"🎉 Success! Activated {p_data['name']} with ${fmt_amt(invest_amount)} virtual capital!", lang), show_alert=True)
         
-        # Optionally Return home
         user_current_path[user_id] = 'root'
         send_path_content(chat_id, user_id, 'root', False)
         return
         
-    # Handle Standard Paid Plans
     u_dep = user_db[user_id].get('deposit', 0)
     u_bal = user_db[user_id].get('balance', 0)
     total_avail = u_dep + u_bal
@@ -4193,7 +4192,6 @@ def execute_plan_purchase_via_popup(user_id, chat_id, message_id, call_id, plan_
         try: bot.delete_message(chat_id, message_id)
         except Exception: pass
         
-        # Trigger redirect command securely
         msg = telebot.types.Message(message_id, None, None, None, redirect_cmd, [], None)
         msg.from_user = telebot.types.User(user_id, False, user_db[user_id]['first_name'])
         msg.chat = telebot.types.Chat(chat_id, 'private')
@@ -4233,21 +4231,108 @@ def handle_inline(call):
     is_admin = user_id in ADMIN_IDS
     lang = user_db.get(user_id, {}).get('lang', 'en')
     
-    # Declare it globally ONCE at the very top of the function
     global pending_withdrawals
 
-    # --- NEW: INTERCEPT BLOCKED USERS INLINE CALLS ---
     if user_id in blocked_users:
         bot.answer_callback_query(call.id, get_tl_and_map("🚫 You are currently blocked.", lang), show_alert=True)
         return
 
-    # --- FEATURE 2: NATIVE TELEGRAM POPUP ALERT LISTENER ---
+    # --- NEW ARCHITECTURE: THE INTERCEPTOR (INLINE GATEWAY) ---
+    if requires_subscription_wall(user_id, False) and call.data != 'cb_verify_sub':
+        bot.answer_callback_query(call.id, get_tl_and_map("🚨 Please verify your subscription first.", lang), show_alert=True)
+        return
+        
+    # --- NEW ARCHITECTURE: HOMEPAGE POP-UP GATEWAY ---
+    if call.data == 'cb_claim_homepage':
+        if user_db[user_id].get('has_seen_homepage', False):
+            bot.answer_callback_query(call.id, "⚠️ Already claimed.", show_alert=True)
+            try: bot.delete_message(call.message.chat.id, call.message.message_id)
+            except: pass
+            return
+            
+        p_data = bot_plans.get('plan0', {})
+        if not p_data: return bot.answer_callback_query(call.id, "Plan 0 not configured.", show_alert=True)
+            
+        invest_amt = p_data.get('bonus_amount', 50.0)
+            
+        new_plan = {
+            'id': str(uuid.uuid4())[:8], 'macro': 'plan0', 'amount': invest_amt,
+            'profit_pct': p_data['profit'], 'length_hours': p_data.get('length', 0),
+            'start_time': time.time(), 'last_accrual': time.time(), 'earned': 0.0, 'status': 'active'
+        }
+        user_db[user_id]['active_plans'].append(new_plan)
+        log_tx(user_id, "Claimed Homepage Bonus", invest_amt)
+            
+        user_db[user_id]['has_seen_homepage'] = True
+            
+        try: bot.delete_message(call.message.chat.id, call.message.message_id)
+        except: pass
+            
+        bot.answer_callback_query(call.id, get_tl_and_map(f"🎉 Success! You claimed ${fmt_amt(invest_amt)} capital!", lang), show_alert=True)
+            
+        user_current_path[user_id] = 'root'
+        user_state[user_id] = 'normal'
+        send_path_content(call.message.chat.id, user_id, 'root', is_editing=False, reply_keyboard=get_keyboard(user_id))
+        return
+
+    # --- NEW ARCHITECTURE: THE VERIFIER (SUBSCRIPTION API SWEEP) ---
+    if call.data == 'cb_verify_sub':
+        bot.answer_callback_query(call.id)
+        
+        style_opt = global_ui_settings.get('loading_bar_style', '1')
+        frames = {
+            '1': ["[▯▯▯▯▯▯▯▯▯▯] 0%", "[■■▯▯▯▯▯▯▯▯] 20%", "[■■■■▯▯▯▯▯▯] 40%", "[■■■■■■▯▯▯▯] 60%", "[■■■■■■■■▯▯] 80%", "[■■■■■■■■■■] 100%"],
+            '2': ["░░░░░░░░░░ 0%", "▓▓░░░░░░░░ 20%", "▓▓▓▓░░░░░░ 40%", "▓▓▓▓▓▓░░░░ 60%", "▓▓▓▓▓▓▓▓░░ 80%", "▓▓▓▓▓▓▓▓▓▓ 100%"],
+            '3': ["▒▒▒▒▒▒▒▒▒▒ 0%", "██▒▒▒▒▒▒▒▒ 20%", "████▒▒▒▒▒▒ 40%", "██████▒▒▒▒ 60%", "████████▒▒ 80%", "██████████ 100%"]
+        }
+        bars = frames.get(str(style_opt), frames['1'])
+        
+        all_passed = True
+        for bar in bars:
+            time.sleep(0.4)
+            try: bot.edit_message_text(get_tl_and_map(f"♻️ <b>VERIFYING SUBSCRIPTIONS...</b>\n{bar}", lang), call.message.chat.id, call.message.message_id, parse_mode="HTML")
+            except: pass
+            
+        for ch in subscription_settings.get('channels', []):
+            try:
+                member = bot.get_chat_member(ch['chat_id'], user_id)
+                if member.status in ['left', 'kicked']:
+                    all_passed = False
+                    break
+            except Exception as e:
+                pass 
+                
+        if not all_passed:
+            fail_msg = get_tl_and_map(subscription_settings.get('msg_fail', '❌ You haven\'t joined all channels. Try again.'), lang)
+            markup = InlineKeyboardMarkup()
+            for ch in subscription_settings.get('channels', []):
+                markup.row(InlineKeyboardButton(ch['name'], url=ch['url']))
+            btn_text = get_tl_and_map(subscription_settings.get('btn_check', '✅ I have joined, check now'), lang)
+            markup.row(InlineKeyboardButton(btn_text, callback_data="cb_verify_sub"))
+            
+            try: bot.edit_message_text(fail_msg, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=markup)
+            except: pass
+            return
+        else:
+            user_db[user_id]['sub_verified'] = True
+            user_db[user_id]['last_sub_check'] = time.time()
+            
+            try: bot.delete_message(call.message.chat.id, call.message.message_id)
+            except: pass
+            
+            if check_homepage_bonus(call.message.chat.id, user_id):
+                return
+                
+            user_current_path[user_id] = 'root'
+            user_state[user_id] = 'normal'
+            send_path_content(call.message.chat.id, user_id, 'root', is_editing=False, reply_keyboard=get_keyboard(user_id))
+            return
+
     if call.data == 'cb_payout_popup_alert':
         popup_msg = global_w_setup.get('payout_popup_msg', 'Payment Success!')
         bot.answer_callback_query(call.id, get_tl_and_map(popup_msg, lang), show_alert=True)
         return
 
-    # --- FEATURE 7: INLINE STATS SCANNER ---
     if call.data == 'cb_scan_users':
         if not is_admin: return bot.answer_callback_query(call.id, "Action not permitted.", show_alert=True)
         bot.answer_callback_query(call.id, "Scanning users in background... This may take a moment.")
@@ -4293,12 +4378,10 @@ def handle_inline(call):
         threading.Thread(target=background_scan, daemon=True).start()
         return
 
-    # --- NEW: REFERRAL LINK GENERATION INLINE ---
     if call.data == 'cb_gen_ref_link':
         bot.answer_callback_query(call.id)
         bot_info = bot.get_me()
         
-        # FEATURE 3: DYNAMIC INVITE LINKS TOGGLE
         if invite_settings.get('use_dynamic_link', False):
             username_clean = call.from_user.username
             if username_clean:
@@ -4306,7 +4389,6 @@ def handle_inline(call):
             else:
                 ref_id = f"gf_{user_id}_{str(uuid.uuid4())[:4]}"
             
-            # Save to memory bank so old links stay active forever
             if ref_id not in user_db[user_id].get('invite_links_map', []):
                 if 'invite_links_map' not in user_db[user_id]: user_db[user_id]['invite_links_map'] = []
                 user_db[user_id]['invite_links_map'].append(ref_id)
@@ -4336,14 +4418,12 @@ def handle_inline(call):
         bot.send_message(call.message.chat.id, get_tl_and_map(f"✅ <b>Your Unique Referral Link:</b>\n\n{ref_link}", lang), parse_mode="HTML")
         return
 
-    # --- NEW: SUPPORT QUESTION INLINE BUTTON ---
     if call.data.startswith('cb_question_'):
         bot.answer_callback_query(call.id)
         user_state[user_id] = 'wait_support_msg'
         bot.send_message(call.message.chat.id, get_tl_and_map("💬 <b>Support Desk</b>\n\nPlease type your message below. An administrator will reply as soon as possible.", lang), parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
         return
 
-    # --- ADMIN SUPPORT REPLY BUTTON ---
     if call.data.startswith('cb_suprep_'):
         if not is_admin: return bot.answer_callback_query(call.id, "Action not permitted.", show_alert=True)
         target_uid = call.data.replace('cb_suprep_', '')
@@ -4351,7 +4431,6 @@ def handle_inline(call):
         bot.send_message(call.message.chat.id, f"Type your reply to User <code>{target_uid}</code>. It will be sent anonymously as 'Support'.", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
         return bot.answer_callback_query(call.id)
 
-    # --- NEW: TRANSACTION PAGINATION INLINE ---
     if call.data.startswith('cb_txpage_'):
         page = int(call.data.replace('cb_txpage_', ''))
         txs = user_db.get(user_id, {}).get('transactions', [])
@@ -4384,7 +4463,6 @@ def handle_inline(call):
             pass
         return bot.answer_callback_query(call.id)
 
-    # --- NEW: ADMIN BROADCAST INLINE COMMANDS ---
     if call.data.startswith('cb_cmd_bc_'):
         cmd = call.data.replace('cb_cmd_bc_', '')
         try: bot.delete_message(call.message.chat.id, call.message.message_id)
@@ -4427,7 +4505,6 @@ def handle_inline(call):
         bot.answer_callback_query(call.id)
         return
 
-    # --- NEW: UNBLOCK USER INLINE BUTTON ---
     if call.data.startswith('cb_unblock_'):
         if not is_admin: return bot.answer_callback_query(call.id, "Action not permitted.", show_alert=True)
         target_id = int(call.data.replace('cb_unblock_', ''))
@@ -4436,12 +4513,10 @@ def handle_inline(call):
             blocked_users.remove(target_id)
             bot.answer_callback_query(call.id, f"✅ User {target_id} successfully unblocked.", show_alert=True)
             
-            # Notify the unblocked user
             target_lang = user_db.get(target_id, {}).get('lang', 'en')
             try: bot.send_message(target_id, get_tl_and_map(block_settings['msg_unblock'], target_lang), parse_mode="HTML")
             except: pass
             
-            # Refresh the inline menu list
             if not blocked_users:
                 bot.edit_message_text("All users are now unblocked.", call.message.chat.id, call.message.message_id)
             else:
@@ -4454,12 +4529,11 @@ def handle_inline(call):
             bot.answer_callback_query(call.id, "User is not currently blocked.", show_alert=True)
         return
 
-    # --- NEW: ADMIN WITHDRAWAL NOTIFICATION INLINES ---
     if call.data.startswith('cb_wad_'):
         if not is_admin: return bot.answer_callback_query(call.id, "Action not permitted.", show_alert=True)
         parts = call.data.split('_')
-        action = parts[2] # 'app', 'dec', 'ign'
-        mode = parts[3] # 's' (silent), 'm' (message)
+        action = parts[2] 
+        mode = parts[3] 
         w_id = parts[4]
         
         if 'pending_withdrawals' not in globals() or w_id not in pending_withdrawals:
@@ -4475,7 +4549,6 @@ def handle_inline(call):
             log_tx(target, "Withdrawal Approved", 0) 
             bot.edit_message_text(f"{call.message.text}\n\n✅ <b>APPROVED ({'Silent' if mode=='s' else 'Msg sent'})</b>", call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=None)
             
-            # --- NEW FEATURE: HTML EMAIL TRIGGER FOR WITHDRAWAL APPROVAL ---
             user_email = user_db.get(target, {}).get('email', 'Not Set')
             if user_email != 'Not Set':
                 w_subject = "Withdrawal Processed - G-Force"
@@ -4496,14 +4569,12 @@ def handle_inline(call):
                 </div>
                 """
                 send_email_async(user_email, w_subject, w_html)
-            # --- END NEW FEATURE ---
             
             if mode == 'm':
                 msg_template = global_w_setup.get('w_msg_approve')
                 if msg_template:
                     msg = replace_macros(msg_template, target, w_data['path'], w_data)
                     
-                    # FEATURE 2: Attach Native Telegram Popup Button
                     payout_markup = InlineKeyboardMarkup()
                     btn_text = global_w_setup.get('payout_btn_text', '📜 View Receipt')
                     payout_markup.row(InlineKeyboardButton(get_tl_and_map(btn_text, target_lang), callback_data='cb_payout_popup_alert'))
@@ -4545,7 +4616,6 @@ def handle_inline(call):
         return bot.answer_callback_query(call.id, "Action executed successfully.")
 
 
-    # --- ON-DEMAND DEPOSIT BLOCKCHAIN SCAN ---
     if call.data.startswith('cb_depcheck_'):
         try: bot.answer_callback_query(call.id, get_tl_and_map("Checking the blockchain network...", lang))
         except: pass
@@ -4576,7 +4646,7 @@ def handle_inline(call):
         
         if found_deposit:
             processed_txids.add(txid_found)
-            pending_auto_txids.pop(txid_found, None) # NEW: Stop the auto-timer if they manually clicked!
+            pending_auto_txids.pop(txid_found, None) 
             
             live_price = get_crypto_price(curr) if 'USDT' not in curr else 1.0
             usd_value = crypto_amount * live_price
@@ -4585,7 +4655,7 @@ def handle_inline(call):
             user_db[user_id]['wallets'][curr]['total_deposited'] = user_db[user_id]['wallets'][curr].get('total_deposited', 0.0) + usd_value
             log_tx(user_id, f"Deposit ({curr})", usd_value)
             
-            process_referral_commission(user_id, usd_value, is_deposit=True) # NEW: Referral Commission
+            process_referral_commission(user_id, usd_value, is_deposit=True) 
             
             admin_msg = f"🟢 <b>DEPOSIT CONFIRMED (MANUAL)</b>\nUser: <code>{user_id}</code>\nCurrency: {curr.replace('_', ' ')}\nCrypto Amount: {fmt_amt(crypto_amount)}\nUSD Credited: ${fmt_amt(usd_value)}\nHash (TXID): <code>{txid_found}</code>"
             for admin in ADMIN_IDS:
@@ -4605,7 +4675,6 @@ def handle_inline(call):
         except: pass
         return
 
-    # --- WALLET SETUP NATIVE INLINE ---
     if call.data == 'cb_wallet_start':
         bot.answer_callback_query(call.id)
         if global_wallet_setup['ask_email'] and user_db[user_id].get('email', 'Not Set') == 'Not Set':
@@ -4616,7 +4685,6 @@ def handle_inline(call):
             bot.send_message(call.message.chat.id, get_tl_and_map(global_wallet_setup['msg_prompt'], lang), parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
         return
 
-    # --- LANGUAGE TRANSLATOR SELECTOR ENGINE ---
     if call.data.startswith('cb_lang_'):
         btn_id = call.data.split('_')[2]
         target_lang = 'en'
@@ -4626,7 +4694,6 @@ def handle_inline(call):
                     if b['id'] == btn_id:
                         target_lang = b['data'].strip()
         
-        # Fallback handling for deep-translator target naming convention
         if target_lang.lower() == 'zh-cn': target_lang = 'zh-CN'
         else: target_lang = target_lang.lower()
 
@@ -4635,13 +4702,11 @@ def handle_inline(call):
         try: bot.delete_message(call.message.chat.id, call.message.message_id)
         except: pass
         
-        # REFRESH MAIN MENU IMMEDIATELY
         user_current_path[user_id] = 'root'
         user_state[user_id] = 'normal'
         send_path_content(call.message.chat.id, user_id, 'root', is_editing=False, reply_keyboard=get_keyboard(user_id))
         return
 
-    # --- CALCULATOR DYNAMIC BUY NOW (POPUP ENGINE) ---
     if call.data.startswith('cb_calcbuy_'):
         parts = call.data.split('_')
         plan_id = parts[2]
@@ -4649,7 +4714,6 @@ def handle_inline(call):
         execute_plan_purchase_via_popup(user_id, call.message.chat.id, call.message.message_id, call.id, plan_id, amount)
         return
 
-    # --- ENHANCED DYNAMIC PLAN BUYER INLINE ACTION ---
     if call.data.startswith('cb_buyplan_'):
         plan_id = call.data.split('_')[2]
         if plan_id not in bot_plans:
@@ -4657,12 +4721,10 @@ def handle_inline(call):
             
         p_data = bot_plans[plan_id]
         
-        # If Plan is free, or Min == Max, execute instantly with Popup engine
         if p_data.get('is_free', False) or plan_id == 'plan0' or p_data['min'] == p_data['max']:
             execute_plan_purchase_via_popup(user_id, call.message.chat.id, call.message.message_id, call.id, plan_id, p_data['min'] if plan_id != 'plan0' else None)
             return
             
-        # Else check total available funds before starting Wizard
         u_dep = user_db[user_id].get('deposit', 0)
         u_bal = user_db[user_id].get('balance', 0)
         total_avail = u_dep + u_bal
@@ -4675,13 +4737,13 @@ def handle_inline(call):
             try: bot.delete_message(call.message.chat.id, call.message.message_id)
             except Exception: pass
             
-            msg = call.message
+            msg = telebot.types.Message(call.message.message_id, None, None, None, redirect_cmd, [], None)
             msg.from_user = call.from_user
+            msg.chat = telebot.types.Chat(call.message.chat.id, 'private')
             msg.text = redirect_cmd
             handle_messages(msg)
             return
             
-        # Funds OK -> Move to Amount Entry State (Popup impossible for text input)
         if user_id not in user_action_data: user_action_data[user_id] = {}
         user_action_data[user_id]['buy_plan_id'] = plan_id
             
@@ -4690,7 +4752,6 @@ def handle_inline(call):
         bot.answer_callback_query(call.id)
         return
 
-    # --- CUSTOM INLINE 'BUY' BUTTON TRIGGER (POPUP ENGINE) ---
     if call.data.startswith('cb_buy_'):
         btn_id = call.data.split('_')[2]
         for path, posts in menu_posts.items():
@@ -4703,12 +4764,10 @@ def handle_inline(call):
                         if plan_macro not in bot_plans:
                             return bot.answer_callback_query(call.id, get_tl_and_map("⚠️ Error: This plan no longer exists.", lang), show_alert=True)
                             
-                        # Instant buy behavior if triggered via custom inline
                         execute_plan_purchase_via_popup(user_id, call.message.chat.id, call.message.message_id, call.id, plan_macro)
                         return
         return bot.answer_callback_query(call.id)
 
-    # --- ADMIN MANUAL DEPOSIT APPROVAL RECEIPTS ---
     if call.data.startswith('cb_depapp_'):
         if not is_admin: return bot.answer_callback_query(call.id, "Action not permitted.", show_alert=True)
         dep_id = call.data.split('_')[2]
@@ -4724,7 +4783,7 @@ def handle_inline(call):
             user_db[target]['deposit'] += amt
             log_tx(target, f"Deposit ({curr.replace('_', ' ')})", amt)
             
-            process_referral_commission(target, amt, is_deposit=True) # NEW: Referral Commission
+            process_referral_commission(target, amt, is_deposit=True) 
             
             msg_success = conf.get('msg_success', "✅ <b>Deposit Approved!</b>\n<b>$%usd_amount%</b> has been successfully added to your deposit balance.")
             msg_success = msg_success.replace('%usd_amount%', f"{fmt_amt(amt)}").replace('%crypto_amount%', '')
@@ -4756,7 +4815,6 @@ def handle_inline(call):
         except Exception: pass
         return bot.answer_callback_query(call.id, "Rejected successfully.")
 
-    # --- NATIVE INLINE ACTIONS FOR ALL USERS ---
     if call.data.startswith('cb_pop_'):
         btn_id = call.data.split('_')[2]
         for path, posts in menu_posts.items():
@@ -4806,7 +4864,6 @@ def handle_inline(call):
         bot.send_message(call.message.chat.id, get_tl_and_map(deposit_settings[curr]['msg_enter'], lang), parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
         return
 
-    # --- ADMIN POSTS INLINE TOOLS ---
     if call.data.startswith('cb_p_'):
         if not is_admin: return bot.answer_callback_query(call.id, "Action not permitted.", show_alert=True)
         parts = call.data.split('_')
@@ -4866,7 +4923,6 @@ def handle_inline(call):
         bot.answer_callback_query(call.id)
         return
 
-    # --- CUSTOM INLINE BUTTONS MANAGER ---
     if call.data.startswith('cb_pi_'):
         action = call.data.replace('cb_pi_', '')
         if action == 'add':
@@ -4949,7 +5005,6 @@ def handle_inline(call):
         bot.answer_callback_query(call.id)
         return
 
-    # --- LIVE WITHDRAWAL CONFIRMATION ---
     if call.data == 'cb_w_yes':
         if user_state.get(user_id) == 'w_action_conf':
             data = user_action_data[user_id]
@@ -4958,16 +5013,13 @@ def handle_inline(call):
             amount = data['amount']
             w_var = global_w_setup.get('w_var', 'balance')
             
-            # Deduct balance
             user_db[user_id][w_var] -= amount
             user_db[user_id]['total_withdrawn'] = user_db[user_id].get('total_withdrawn', 0.0) + amount
             log_tx(user_id, "Withdrawal Pending", -amount)
             
-            # Delete confirm inline msg FIRST
             try: bot.delete_message(call.message.chat.id, call.message.message_id)
             except: pass
 
-            # Send Processing message (Now with %loading_bar% support!)
             proc_msg = global_w_setup.get('w_msg_processing', '♻️ Your Withdrawal of %withdraw% is processing on the blockchain...')
             raw_text = get_tl_and_map(replace_macros(proc_msg, user_id, data['path'], data), lang)
             
@@ -4995,13 +5047,11 @@ def handle_inline(call):
             
             user_state[user_id] = 'normal'
             
-            # Add to pending global dictionary
             w_id = str(uuid.uuid4())[:8]
             
             if 'pending_withdrawals' not in globals():
                 pending_withdrawals = {}
             
-            # Retrieve the correct address/network depending on if it was manual or pre-set
             addr = data.get('address', user_db[user_id].get('wallet', 'Unknown'))
             net = data.get('network', user_db[user_id].get('wallet_net', 'Unknown'))
             comm_pct = global_w_setup.get('w_commission', 0.0)
@@ -5013,7 +5063,6 @@ def handle_inline(call):
                 'path': data['path']
             }
             
-            # Build Admin Inline Keyboard
             adm_markup = InlineKeyboardMarkup()
             adm_markup.row(
                 InlineKeyboardButton('Approve ✅', callback_data=f'cb_wad_app_s_{w_id}'),
@@ -5118,9 +5167,9 @@ def handle_inline(call):
     elif call.data == 'cb_del_yes':
         menus[current_path].remove(target_btn)
         full_path_to_del = f"{current_path}/{target_btn}"
-        for k in [k for k in menus.keys() if k == full_path_to_del or k.startswith(full_path_to_del + '/')]: del menus[k]
-        for k in [k for k in btn_metadata.keys() if k == full_path_to_del or k.startswith(full_path_to_del + '/')]: del btn_metadata[k]
-        for k in [k for k in menu_posts.keys() if k == full_path_to_del or k.startswith(full_path_to_del + '/')]: del menu_posts[k]
+        for k in [k for k in list(menus.keys()) if k == full_path_to_del or k.startswith(full_path_to_del + '/')]: del menus[k]
+        for k in [k for k in list(btn_metadata.keys()) if k == full_path_to_del or k.startswith(full_path_to_del + '/')]: del btn_metadata[k]
+        for k in [k for k in list(menu_posts.keys()) if k == full_path_to_del or k.startswith(full_path_to_del + '/')]: del menu_posts[k]
         
         user_selected_button[user_id] = None
         bot.delete_message(call.message.chat.id, call.message.message_id)
@@ -5360,7 +5409,7 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps({'emails': emails_list}).encode())
 
-        # --- NEW FEATURE: EMAIL BROADCAST API ---
+        # --- NEW ARCHITECTURE: TARGETED EMAIL BROADCAST API ---
         elif parsed_path.path == '/api/send_email_broadcast':
             if pin != ADMIN_PIN:
                 self.send_response(401)
@@ -5369,6 +5418,8 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
             
             subject = data.get('subject', 'Important Update')
             html_body = data.get('html_body', '')
+            target_mode = data.get('target_mode', 'all')
+            target_email = data.get('target_email', '')
             
             if not html_body:
                 self.send_response(400)
@@ -5377,11 +5428,17 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                 return
             
             sent_count = 0
-            for uid, udata in user_db.items():
-                email = udata.get('email', 'Not Set')
-                if email != 'Not Set':
-                    send_email_async(email, subject, html_body)
-                    sent_count += 1
+            
+            if target_mode == 'individual':
+                if target_email:
+                    send_email_async(target_email, subject, html_body)
+                    sent_count = 1
+            else:
+                for uid, udata in user_db.items():
+                    email = udata.get('email', 'Not Set')
+                    if email != 'Not Set':
+                        send_email_async(email, subject, html_body)
+                        sent_count += 1
                     
             self.send_response(200)
             self.send_header('Content-type', 'application/json')
@@ -5396,9 +5453,9 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                 return
                 
             stats = {
-                'aiven_storage': {'used_mb': 0, 'total_mb': 1024}, # Your 1GB Aiven Disk
-                'bot_ram': {'used_mb': 0, 'total_mb': 1024},       # Your 1GB Northflank RAM
-                'bot_cpu': {'percent': 0}                          # Your 1 CPU Core
+                'aiven_storage': {'used_mb': 0, 'total_mb': 1024}, 
+                'bot_ram': {'used_mb': 0, 'total_mb': 1024},       
+                'bot_cpu': {'percent': 0}                          
             }
             
             # 1. Measure Aiven Storage (Disk)
@@ -5415,12 +5472,10 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
 
             # 2. Measure Bot RAM (Memory)
             try:
-                # Direct read from Northflank/Linux container memory
                 with open('/sys/fs/cgroup/memory.current', 'r') as f:
                     ram_bytes = int(f.read().strip())
                 stats['bot_ram']['used_mb'] = round(ram_bytes / (1024 * 1024), 2)
             except:
-                # Fallback for local testing
                 stats['bot_ram']['used_mb'] = round(psutil.virtual_memory().used / (1024 * 1024), 2)
 
             # 3. Measure Bot CPU (Brain Power)
@@ -5431,7 +5486,6 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps({'stats': stats}).encode())
 
-            # 2. Fetch Northflank RAM Usage
             if NORTHFLANK_API_KEY and NORTHFLANK_PROJECT:
                 try:
                     headers = {"Authorization": f"Bearer {NORTHFLANK_API_KEY}"}
@@ -5443,21 +5497,18 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                         services = data.get('data', {}).get('services', [])
                         
                         if services:
-                            # 🧠 THE FIX: Read the exact RAM directly from the Linux server!
                             try:
-                                # Standard Northflank / Docker container memory (cgroup v2)
                                 with open('/sys/fs/cgroup/memory.current', 'r') as f:
                                     ram_bytes = int(f.read().strip())
                             except FileNotFoundError:
                                 try:
-                                    # Fallback for older Linux containers (cgroup v1)
                                     with open('/sys/fs/cgroup/memory/memory.usage_in_bytes', 'r') as f:
                                         ram_bytes = int(f.read().strip())
                                 except FileNotFoundError:
-                                    ram_bytes = 0 # Safety net if testing on Windows
+                                    ram_bytes = 0 
                                     
                             stats['northflank']['used_mb'] = round(ram_bytes / (1024 * 1024), 2)
-                            stats['northflank']['total_mb'] = 512.00 # Standard Northflank free tier limit
+                            stats['northflank']['total_mb'] = 512.00 
                             stats['northflank']['status'] = 'Active'
                         else:
                             stats['northflank']['status'] = 'No Services Found'
@@ -5482,7 +5533,6 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
             
-            # Default templates
             default_templates = {
                 'welcome': """<div style="background-color: #0b0e11; color: #eaecef; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #2b3139; border-radius: 8px; overflow: hidden;">
     <div style="background-color: #181a20; padding: 20px; border-bottom: 1px solid #2b3139; text-align: center;">
@@ -5542,7 +5592,6 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
 </div>"""
             }
             
-            # Fetch from db_data if available, otherwise use default
             saved_templates = db_data.get('email_templates', default_templates)
             
             self.send_response(200)
@@ -5561,12 +5610,9 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                 if not isinstance(templates, dict):
                     raise ValueError("Templates must be a dictionary")
                 
-                # We save to a global variable first, which will be picked up by save_database()
                 global email_templates
                 email_templates = templates
                 
-                # Ensure data_to_save includes email_templates
-                # We need to explicitly trigger a save or rely on the background loop
                 save_database() 
                 
                 self.send_response(200)
