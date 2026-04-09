@@ -427,7 +427,7 @@ def init_user_db(message):
             'lang': 'en', 'referred_by': None, 'team_deposits': 0.0,
             'affiliate_earnings': 0.0, 'claimed_levels': [], 'invite_links_map': [],
             # --- NEW ARCHITECTURE: HIDDEN MARKERS ---
-            'sub_verified': False, 'last_sub_check': 0.0, 'has_seen_homepage': False, 'is_referral': False
+            'sub_verified': False, 'last_sub_check': 0.0, 'has_seen_homepage': False, 'is_referral': False, 'has_claimed_free_plan': False
         }
     else:
         user_db[user_id]['first_name'] = message.from_user.first_name or 'Unknown'
@@ -453,6 +453,7 @@ def init_user_db(message):
         if 'last_sub_check' not in user_db[user_id]: user_db[user_id]['last_sub_check'] = 0.0
         if 'has_seen_homepage' not in user_db[user_id]: user_db[user_id]['has_seen_homepage'] = False
         if 'is_referral' not in user_db[user_id]: user_db[user_id]['is_referral'] = False
+        if 'has_claimed_free_plan' not in user_db[user_id]: user_db[user_id]['has_claimed_free_plan'] = False
     
     return is_new_user
 
@@ -760,9 +761,15 @@ def check_and_trigger_auto_buy(user_id):
     if p_macro in bot_plans:
         p_data = bot_plans[p_macro]
         
-        if p_macro == 'plan0':
-            invest_amt = p_data.get('bonus_amount', 50.0)
+        if p_data.get('is_free', False) or p_macro == 'plan0':
+            # --- FREE PLAN LOOPHOLE FIX ---
+            if user_db[user_id].get('has_claimed_free_plan', False) or any(p['macro'] == p_macro for p in user_db[user_id].get('active_plans', [])):
+                user_db[user_id]['has_claimed_free_plan'] = True
+                user_db[user_id]['pending_plan'] = None
+                return
+            invest_amt = p_data.get('bonus_amount', 50.0) if p_macro == 'plan0' else p_data.get('min', 0.0)
             user_db[user_id]['pending_plan'] = None
+            user_db[user_id]['has_claimed_free_plan'] = True
         else:
             if user_db[user_id]['deposit'] >= p_data['min']:
                 invest_amt = min(user_db[user_id]['deposit'], p_data['max'])
@@ -1587,6 +1594,7 @@ def get_keyboard_raw(user_id):
             else:
                 markup.row(KeyboardButton('💰 Set Min Deposit'), KeyboardButton('💰 Set Max Deposit'))
                 
+            markup.row(KeyboardButton('✏️ Rename Plan'))
             markup.row(KeyboardButton('⏱ Contract Length'), KeyboardButton('📈 Plan Percentage'))
             markup.row(KeyboardButton('🖼 Plan Display'), KeyboardButton('💬 Set Inline Text'))
             markup.row(KeyboardButton('💬 Set Active Inline Text'), KeyboardButton(f'🆓 Toggle Free Plan ({free_txt})'))
@@ -3052,6 +3060,32 @@ def handle_messages(message):
         user_state[user_id] = 'normal'
         return
 
+        if not matched_plan_id:
+            min_plan_amount = min(p['min'] for p in valid_plans.values())
+            max_plan_amount = max(p['max'] for p in valid_plans.values())
+            return bot.send_message(message.chat.id, get_tl_and_map(f"⚠️ Amount does not match any plan. Please enter an amount between ${fmt_amt(min_plan_amount)} and ${fmt_amt(max_plan_amount)}.", lang))
+
+        if u_dep >= amount:
+            user_db[user_id]['deposit'] -= amount
+        else:
+            rem = amount - u_dep
+            user_db[user_id]['deposit'] = 0
+            user_db[user_id]['balance'] -= rem
+
+        log_tx(user_id, f"Reinvested {matched_plan_data['name']}", -amount)
+
+        new_plan = {
+            'id': str(uuid.uuid4())[:8], 'macro': matched_plan_id, 'amount': amount,
+            'profit_pct': matched_plan_data['profit'], 'length_hours': matched_plan_data.get('length', 0),
+            'start_time': time.time(), 'last_accrual': time.time(), 'earned': 0.0, 'status': 'active'
+        }
+        user_db[user_id]['active_plans'].append(new_plan)
+
+        succ_msg = reinvest_settings['msg_success'].replace('%amount%', f"{fmt_amt(amount)}").replace('%plan_name%', matched_plan_data['name'])
+        bot.send_message(message.chat.id, get_tl_and_map(replace_macros(succ_msg, user_id, user_current_path[user_id]), lang), parse_mode="HTML", reply_markup=get_keyboard(user_id))
+        user_state[user_id] = 'normal'
+        return
+
     # --- ADMIN LOADING BAR SETTINGS ---
     if state == 'admin_loading_bar':
         if text == '🔙 Back to Admin':
@@ -3491,6 +3525,10 @@ def handle_messages(message):
         elif text == '💰 Set Max Deposit' and p_id != 'plan0':
             user_state[user_id] = 'plan_setup_max'
             bot.send_message(message.chat.id, f"Enter Maximum Deposit for <b>{bot_plans[p_id]['name']}</b>:\n\nℹ️ Current: ${bot_plans[p_id]['max']}", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+        # --- NEW FEATURE: DYNAMIC PLAN RENAMING ---
+        elif text == '✏️ Rename Plan':
+            user_state[user_id] = 'plan_setup_name'
+            bot.send_message(message.chat.id, f"Enter the new name for <b>{bot_plans[p_id]['name']}</b>:\n\nℹ️ Current: {bot_plans[p_id]['name']}", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
         elif text == '⏱ Contract Length':
             user_state[user_id] = 'plan_setup_length'
             msg_instruct = f"Enter Contract Length for <b>{bot_plans[p_id]['name']}</b>:\n\n"
@@ -3530,6 +3568,9 @@ def handle_messages(message):
         elif state == 'plan_setup_max':
             try: bot_plans[p_id]['max'] = float(text)
             except ValueError: return bot.send_message(message.chat.id, "⚠️ Invalid amount. Numbers only.")
+        # --- NEW FEATURE: DYNAMIC PLAN RENAMING ---
+        elif state == 'plan_setup_name':
+            bot_plans[p_id]['name'] = formatted_text
         elif state == 'plan_setup_length':
             try: 
                 raw_val = float(text)
@@ -4164,9 +4205,13 @@ def execute_plan_purchase_via_popup(user_id, chat_id, message_id, call_id, plan_
     lang = user_db.get(user_id, {}).get('lang', 'en')
 
     if p_data.get('is_free', False) or plan_id == 'plan0':
-        if any(p['macro'] == plan_id and p['status'] == 'active' for p in user_db[user_id].get('active_plans', [])):
-            return bot.answer_callback_query(call_id, get_tl_and_map(f"❌ You already have {p_data['name']} active!", lang), show_alert=True)
+        # --- FREE PLAN LOOPHOLE FIX ---
+        if user_db[user_id].get('has_claimed_free_plan', False) or any(p['macro'] == plan_id for p in user_db[user_id].get('active_plans', [])):
+            user_db[user_id]['has_claimed_free_plan'] = True # Lock it down permanently if they snuck in
+            return bot.answer_callback_query(call_id, get_tl_and_map(f"❌ Access Denied: You have already claimed your one-time Free Plan!", lang), show_alert=True)
             
+        user_db[user_id]['has_claimed_free_plan'] = True # Set flag to true immediately
+        
         new_plan = {
             'id': str(uuid.uuid4())[:8], 'macro': plan_id, 'amount': invest_amount,
             'profit_pct': p_data['profit'], 'length_hours': p_data.get('length', 0),
