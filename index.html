@@ -444,7 +444,14 @@
                                 <button type="button" id="btnModeRaw" class="toggle-btn" onclick="toggleEmailMode('raw')">⚙️ Raw HTML</button>
                             </div>
                         </div>
-                        <textarea id="emailBody" rows="12" placeholder="Type your plain text message here. It will be automatically wrapped in the standard dark-mode HTML template..."></textarea>
+                        <textarea id="emailBody" rows="12" placeholder="Type your plain text message here. It will be automatically wrapped in the standard dark-mode HTML template..." oninput="updateBroadcastPreview()"></textarea>
+                    </div>
+
+                    <div style="margin-top: 20px;">
+                        <label style="color: #aaa; font-weight: bold;">Live HTML Preview</label>
+                        <div id="broadcastPreview" style="margin-top: 5px; border: 1px solid var(--glass-border); border-radius: var(--border-radius); background: #ffffff; color: #000; min-height: 200px; padding: 10px; overflow-y: auto;">
+                            <p style="color: #888; text-align: center; margin-top: 80px;">Type to see live preview...</p>
+                        </div>
                     </div>
                     
                     <div style="display: flex; gap: 15px; margin-top: 20px;">
@@ -476,14 +483,27 @@
                     </div>
 
                     <div class="form-group" style="margin-top: 20px;">
-                        <label style="color: #aaa; font-weight: bold;">Raw HTML Editor</label>
-                        <textarea id="templateEditor" rows="15" placeholder="Loading template HTML..."></textarea>
+                        <div style="display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 5px;">
+                            <label style="color: #aaa; font-weight: bold;">Editor</label>
+                            <div class="toggle-group">
+                                <button type="button" id="btnTemplateModeText" class="toggle-btn" onclick="toggleTemplateMode('text')">📝 Text</button>
+                                <button type="button" id="btnTemplateModeRaw" class="toggle-btn active" onclick="toggleTemplateMode('raw')">⚙️ Raw HTML</button>
+                            </div>
+                        </div>
+                        <textarea id="templateEditor" rows="15" placeholder="Loading template HTML..." oninput="updateTemplatePreview()"></textarea>
                         
                         <div style="font-size: 0.85em; color: #888; background: rgba(0,0,0,0.2); padding: 10px; border-radius: var(--border-radius); margin-top: 5px;">
                             <strong>Available Macros (depends on template):</strong><br>
                             <code>{currency}</code>, <code>{crypto_amount}</code>, <code>{usd_amount}</code>, <code>{txid}</code><br>
                             <code>{amount}</code>, <code>{network}</code>, <code>{address}</code><br>
                             <code>{plan_name}</code>, <code>{initial_amount}</code>, <code>{profit_earned}</code>
+                        </div>
+                    </div>
+
+                    <div style="margin-top: 20px;">
+                        <label style="color: #aaa; font-weight: bold;">Live Template Preview</label>
+                        <div id="templatePreview" style="margin-top: 5px; border: 1px solid var(--glass-border); border-radius: var(--border-radius); background: #ffffff; color: #000; min-height: 200px; padding: 10px; overflow-y: auto;">
+                            <p style="color: #888; text-align: center; margin-top: 80px;">Select a template to preview...</p>
                         </div>
                     </div>
 
@@ -858,6 +878,24 @@
                     currentEmailMode = 'text';
                 }
             }
+            updateBroadcastPreview(); // NEW ARCHITECTURE: Auto-refresh preview on toggle
+        }
+
+        // NEW ARCHITECTURE: LIVE BROADCAST PREVIEW RENDERER
+        function updateBroadcastPreview() {
+            const bodyContent = document.getElementById('emailBody').value;
+            const previewDiv = document.getElementById('broadcastPreview');
+            
+            if (!bodyContent.trim()) {
+                previewDiv.innerHTML = '<p style="color: #888; text-align: center; margin-top: 80px;">Type to see live preview...</p>';
+                return;
+            }
+
+            let finalHtml = bodyContent;
+            if (currentEmailMode === 'text') {
+                finalHtml = standardHtmlWrapper.replace('{{CONTENT}}', bodyContent.replace(/\n/g, '<br>'));
+            }
+            previewDiv.innerHTML = finalHtml;
         }
 
         async function fetchEmails() {
@@ -954,6 +992,8 @@
                     document.getElementById('emailSubject').value = '';
                     document.getElementById('emailBody').value = '';
                     if (targetMode === 'individual') document.getElementById('targetEmailInput').value = '';
+                    
+                    updateBroadcastPreview(); // Clear preview
                 } else {
                     statusDiv.innerText = `❌ Error: ${result.error || 'Failed to send'}`;
                     statusDiv.className = 'error';
@@ -964,8 +1004,10 @@
             }
         }
 
-        // --- NEW FEATURE: TEMPLATE EDITOR APIS ---
+        // --- NEW FEATURE: TEMPLATE EDITOR APIS & LIVE PREVIEW ---
         let currentTemplates = {};
+        let currentTemplateMode = 'raw';
+        let rawTemplateCache = '';
 
         async function fetchTemplates() {
             try {
@@ -985,6 +1027,45 @@
             }
         }
 
+        // NEW ARCHITECTURE: TEMPLATE TEXT/RAW DUAL TOGGLE
+        function toggleTemplateMode(mode) {
+            if (mode === currentTemplateMode) return;
+            
+            const textArea = document.getElementById('templateEditor');
+            const textBtn = document.getElementById('btnTemplateModeText');
+            const rawBtn = document.getElementById('btnTemplateModeRaw');
+            
+            if (mode === 'text') {
+                rawTemplateCache = textArea.value;
+                const tempDiv = document.createElement('div');
+                tempDiv.innerHTML = textArea.value;
+                
+                // Attempt to parse standard padding content box
+                const contentDiv = tempDiv.querySelector('div[style*="padding: 30px"]');
+                if (contentDiv) {
+                    let htmlContent = contentDiv.innerHTML;
+                    htmlContent = htmlContent.replace(/<br\s*[\/]?>/gi, '\n');
+                    htmlContent = htmlContent.replace(/<\/p>/gi, '\n\n');
+                    const textContent = htmlContent.replace(/<[^>]+>/g, '').trim();
+                    textArea.value = textContent;
+                } else {
+                    textArea.value = tempDiv.innerText.trim();
+                }
+                
+                rawBtn.classList.remove('active');
+                textBtn.classList.add('active');
+                currentTemplateMode = 'text';
+            } else {
+                if(confirm("Switching back to Raw Mode will revert to the last saved HTML code. Continue?")) {
+                    textArea.value = rawTemplateCache;
+                    textBtn.classList.remove('active');
+                    rawBtn.classList.add('active');
+                    currentTemplateMode = 'raw';
+                }
+            }
+            updateTemplatePreview();
+        }
+
         function loadTemplateText() {
             const selector = document.getElementById('templateSelector');
             const editor = document.getElementById('templateEditor');
@@ -992,9 +1073,57 @@
             
             if(currentTemplates && currentTemplates[selectedKey]) {
                 editor.value = currentTemplates[selectedKey];
+                rawTemplateCache = currentTemplates[selectedKey];
             } else {
                 editor.value = "Template not found.";
             }
+            
+            // Reset to raw mode whenever switching templates
+            document.getElementById('btnTemplateModeText').classList.remove('active');
+            document.getElementById('btnTemplateModeRaw').classList.add('active');
+            currentTemplateMode = 'raw';
+            
+            updateTemplatePreview();
+        }
+
+        // NEW ARCHITECTURE: LIVE TEMPLATE DUMMY DATA RENDERER
+        function updateTemplatePreview() {
+            let htmlContent = document.getElementById('templateEditor').value;
+            const previewDiv = document.getElementById('templatePreview');
+            const selectedKey = document.getElementById('templateSelector').value;
+
+            if (!htmlContent.trim()) {
+                previewDiv.innerHTML = '<p style="color: #888; text-align: center; margin-top: 80px;">Template is empty...</p>';
+                return;
+            }
+
+            if (currentTemplateMode === 'text') {
+                let baseHtml = rawTemplateCache || currentTemplates[selectedKey] || "";
+                const tempDiv = document.createElement('div');
+                tempDiv.innerHTML = baseHtml;
+                const contentDiv = tempDiv.querySelector('div[style*="padding: 30px"]');
+                
+                if (contentDiv) {
+                    contentDiv.innerHTML = htmlContent.replace(/\n/g, '<br>');
+                    htmlContent = tempDiv.innerHTML;
+                } else {
+                    htmlContent = htmlContent.replace(/\n/g, '<br>');
+                }
+            }
+
+            // Inject dummy data to show exactly what users will see
+            htmlContent = htmlContent.replace(/{currency}/g, 'USDT');
+            htmlContent = htmlContent.replace(/{crypto_amount}/g, '150.00');
+            htmlContent = htmlContent.replace(/{usd_amount}/g, '150.00');
+            htmlContent = htmlContent.replace(/{txid}/g, '0xabc123...def456');
+            htmlContent = htmlContent.replace(/{amount}/g, '500.00');
+            htmlContent = htmlContent.replace(/{network}/g, 'TRC20');
+            htmlContent = htmlContent.replace(/{address}/g, 'Txxxxx...');
+            htmlContent = htmlContent.replace(/{plan_name}/g, 'Premium Plan');
+            htmlContent = htmlContent.replace(/{initial_amount}/g, '1000.00');
+            htmlContent = htmlContent.replace(/{profit_earned}/g, '150.00');
+
+            previewDiv.innerHTML = htmlContent;
         }
 
         async function saveTemplates() {
@@ -1003,8 +1132,24 @@
             const statusDiv = document.getElementById('templateStatus');
             const selectedKey = selector.value;
             
-            // Save the active text box back into our local dictionary
-            currentTemplates[selectedKey] = editor.value;
+            // If they save while in Text mode, we need to wrap it using the cache, 
+            // otherwise we just take the raw input.
+            if (currentTemplateMode === 'text') {
+                let baseHtml = rawTemplateCache;
+                const tempDiv = document.createElement('div');
+                tempDiv.innerHTML = baseHtml;
+                const contentDiv = tempDiv.querySelector('div[style*="padding: 30px"]');
+                if (contentDiv) {
+                    contentDiv.innerHTML = editor.value.replace(/\n/g, '<br>');
+                    currentTemplates[selectedKey] = tempDiv.innerHTML;
+                    rawTemplateCache = tempDiv.innerHTML; // update cache
+                } else {
+                    currentTemplates[selectedKey] = editor.value; // Fallback
+                }
+            } else {
+                currentTemplates[selectedKey] = editor.value;
+                rawTemplateCache = editor.value;
+            }
             
             statusDiv.innerText = '⏳ Saving templates...';
             statusDiv.className = 'success';
