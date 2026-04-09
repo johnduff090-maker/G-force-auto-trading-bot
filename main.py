@@ -1726,16 +1726,51 @@ def get_edit_inline_tools():
     )
     return markup
 
-def get_back_button():
-    markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton('🔙 Go Back to Previous Menu', callback_data='go_back'))
-    return markup
+def finalize_user_registration(user_id):
+    """The master engine that triggers only when a user successfully enters the bot."""
+    udata = user_db.get(user_id)
+    if not udata or udata.get('is_fully_registered', False): return
+    
+    udata['is_fully_registered'] = True
+    inviter_id = udata.get('pending_inviter')
+    
+    # Process Referral Pay & Notifications NOW
+    if inviter_id and inviter_id in user_db and inviter_id != user_id:
+        udata['referred_by'] = inviter_id
+        user_db[inviter_id]['ref_count'] += 1
+        try:
+            lang = user_db[inviter_id].get('lang', 'en')
+            bot.send_message(inviter_id, get_tl_and_map(global_messages_setup['ref_join_msg'], lang))
+        except: pass
+        
+        for i, level in enumerate(invite_settings['levels']):
+            if user_db[inviter_id]['ref_count'] >= level['users']:
+                if i not in user_db[inviter_id].get('claimed_levels', []):
+                    user_db[inviter_id]['balance'] += level['reward']
+                    if 'claimed_levels' not in user_db[inviter_id]: user_db[inviter_id]['claimed_levels'] = []
+                    user_db[inviter_id]['claimed_levels'].append(i)
+                    log_tx(inviter_id, f"Referral Level {i+1} Reward", level['reward'])
+                    try:
+                        msg = global_messages_setup['level_up_msg'].replace('{level}', str(i+1)).replace('{reward}', str(level['reward']))
+                        bot.send_message(inviter_id, get_tl_and_map(msg, lang))
+                    except: pass
 
-def get_withdrawal_conf_inline(lang='en'):
-    markup = InlineKeyboardMarkup()
-    markup.row(InlineKeyboardButton(get_tl_and_map('✅ Confirm', lang), callback_data='cb_w_yes'), 
-               InlineKeyboardButton(get_tl_and_map('🚫 Cancel', lang), callback_data='cb_w_no'))
-    return markup
+    # Alert the Admin NOW
+    total_verified_users = len([u for u, d in user_db.items() if d.get('is_fully_registered', False)])
+    alert_msg = (
+        f"🆕 New User Fully Verified!\n"
+        f"User ID: <code>{user_id}</code>\n"
+        f"Total Verified: [{total_verified_users}]\n"
+        f"Name: {udata.get('first_name', 'Unknown')}"
+    )
+    if udata.get('referred_by'):
+        alert_msg += f"\nReferred by: <code>{udata['referred_by']}</code>"
+        
+    for admin in ADMIN_IDS:
+        try: bot.send_message(admin, alert_msg, parse_mode="HTML")
+        except: pass
+        
+    threading.Thread(target=preload_core_languages, daemon=True).start()
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
@@ -1778,60 +1813,28 @@ def send_welcome(message):
                         inviter_id = uid
                         break
                         
-    if inviter_id and is_new:
+    if is_new and inviter_id:
+        user_db[user_id]['pending_inviter'] = inviter_id
         user_db[user_id]['is_referral'] = True # Critical for "Referrals Only" gateway mode
-                        
-    if is_new:
-        if inviter_id and inviter_id in user_db and inviter_id != user_id:
-            user_db[user_id]['referred_by'] = inviter_id
-            user_db[inviter_id]['ref_count'] += 1
-            try:
-                lang = user_db[inviter_id].get('lang', 'en')
-                bot.send_message(inviter_id, get_tl_and_map(global_messages_setup['ref_join_msg'], lang))
-            except: pass
-            
-            for i, level in enumerate(invite_settings['levels']):
-                if user_db[inviter_id]['ref_count'] >= level['users']:
-                    if i not in user_db[inviter_id].get('claimed_levels', []):
-                        user_db[inviter_id]['balance'] += level['reward']
-                        if 'claimed_levels' not in user_db[inviter_id]: user_db[inviter_id]['claimed_levels'] = []
-                        user_db[inviter_id]['claimed_levels'].append(i)
-                        log_tx(inviter_id, f"Referral Level {i+1} Reward", level['reward'])
-                        try:
-                            msg = global_messages_setup['level_up_msg'].replace('{level}', str(i+1)).replace('{reward}', str(level['reward']))
-                            bot.send_message(inviter_id, get_tl_and_map(msg, lang))
-                        except: pass
 
-        total_bot_users = len(user_db)
-        alert_msg = (
-            f"🆕 New User!\n"
-            f"User ID: <code>{user_id}</code>\n"
-            f"Total: [{total_bot_users}]\n"
-            f"Name: {message.from_user.first_name}"
-        )
-        if user_db[user_id]['referred_by']:
-            alert_msg += f"\nReferred by: <code>{user_db[user_id]['referred_by']}</code>"
-            
-        for admin in ADMIN_IDS:
-            try: bot.send_message(admin, alert_msg, parse_mode="HTML")
-            except: pass
-            
-        threading.Thread(target=preload_core_languages, daemon=True).start()
-
-    # --- NEW ARCHITECTURE: MASTER INTERCEPTOR (TRAPS USER IF TRUE) ---
+    # --- NEW ARCHITECTURE: MASTER INTERCEPTOR (TRAPS USER AT SUB WALL) ---
     if requires_subscription_wall(user_id, is_new):
         deploy_subscription_wall(message.chat.id, user_id)
         return
 
-    # --- NEW ARCHITECTURE: HOMEPAGE POPUP BRIDGE (INTERCEPTS BEFORE MAIN MENU) ---
+    # --- NEW ARCHITECTURE: HOMEPAGE POPUP BRIDGE (TRAPS USER AT BONUS) ---
     if check_homepage_bonus(message.chat.id, user_id):
         return
+
+    # IF BOTH WALLS ARE OFF, FINALIZE REGISTRATION IMMEDIATELY
+    finalize_user_registration(user_id)
 
     user_current_path[user_id] = 'root'
     user_state[user_id] = 'normal'
     user_selected_button[user_id] = None
     
     send_path_content(message.chat.id, user_id, 'root', is_editing=False, reply_keyboard=get_keyboard(user_id))
+
 
 @bot.message_handler(content_types=['text', 'photo'])
 def handle_messages(message):
@@ -1847,18 +1850,6 @@ def handle_messages(message):
     is_admin = user_id in ADMIN_IDS
     
     is_new = init_user_db(message)
-    if is_new:
-        total_bot_users = len(user_db)
-        alert_msg = (
-            f"🆕 New User!\n"
-            f"User ID: <code>{user_id}</code>\n"
-            f"Total: [{total_bot_users}]\n"
-            f"Name: {message.from_user.first_name}"
-        )
-        for admin in ADMIN_IDS:
-            try: bot.send_message(admin, alert_msg, parse_mode="HTML")
-            except: pass
-        threading.Thread(target=preload_core_languages, daemon=True).start()
 
     # --- NEW ARCHITECTURE: MASTER INTERCEPTOR (ENFORCES GATEWAY ON ALL TEXT COMMANDS) ---
     if requires_subscription_wall(user_id, is_new):
@@ -1872,6 +1863,9 @@ def handle_messages(message):
         try: bot.delete_message(message.chat.id, message.message_id) # Erase what they tried to do
         except: pass
         return
+
+    # IF THEY PASS BOTH GATES (OR BOTH ARE OFF), ENSURE THEY ARE FINALIZED
+    finalize_user_registration(user_id)
 
     process_accruals(user_id) 
     
