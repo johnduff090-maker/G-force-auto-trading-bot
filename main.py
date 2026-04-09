@@ -4597,7 +4597,7 @@ def handle_inline(call):
                 return
                 
             # If the Pop-up is OFF, they have cleared all gates. Register them!
-            finalize_user_registration(user_
+            finalize_user_registration(user_id)
 
     if call.data == 'cb_scan_users':
         if not is_admin: return bot.answer_callback_query(call.id, "Action not permitted.", show_alert=True)
