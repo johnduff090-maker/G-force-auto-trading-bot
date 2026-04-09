@@ -4511,7 +4511,7 @@ def handle_inline(call):
         bot.answer_callback_query(call.id, get_tl_and_map("🚨 Please verify your subscription first.", lang), show_alert=True)
         return
         
-    # --- NEW ARCHITECTURE: HOMEPAGE POP-UP GATEWAY ---
+    # --- NEW ARCHITECTURE: HOMEPAGE POPUP GATEWAY ---
     if call.data == 'cb_claim_homepage':
         if user_db[user_id].get('has_seen_homepage', False):
             bot.answer_callback_query(call.id, "⚠️ Already claimed.", show_alert=True)
@@ -4538,6 +4538,9 @@ def handle_inline(call):
         except: pass
             
         bot.answer_callback_query(call.id, get_tl_and_map(f"🎉 Success! You claimed ${fmt_amt(invest_amt)} capital!", lang), show_alert=True)
+            
+        # THE MAGIC TRIGGER: USER CLEARED THE FINAL GATE
+        finalize_user_registration(user_id)
             
         user_current_path[user_id] = 'root'
         user_state[user_id] = 'normal'
@@ -4589,18 +4592,12 @@ def handle_inline(call):
             try: bot.delete_message(call.message.chat.id, call.message.message_id)
             except: pass
             
+            # Check if we need to trap them with the Pop-Up next
             if check_homepage_bonus(call.message.chat.id, user_id):
                 return
                 
-            user_current_path[user_id] = 'root'
-            user_state[user_id] = 'normal'
-            send_path_content(call.message.chat.id, user_id, 'root', is_editing=False, reply_keyboard=get_keyboard(user_id))
-            return
-
-    if call.data == 'cb_payout_popup_alert':
-        popup_msg = global_w_setup.get('payout_popup_msg', 'Payment Success!')
-        bot.answer_callback_query(call.id, get_tl_and_map(popup_msg, lang), show_alert=True)
-        return
+            # If the Pop-up is OFF, they have cleared all gates. Register them!
+            finalize_user_registration(user_
 
     if call.data == 'cb_scan_users':
         if not is_admin: return bot.answer_callback_query(call.id, "Action not permitted.", show_alert=True)
