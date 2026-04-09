@@ -3386,6 +3386,73 @@ def handle_messages(message):
         bot.send_message(message.chat.id, "✅ Setting updated successfully!", reply_markup=get_keyboard(user_id))
         return
 
+    # --- ADMIN DEPOSIT MENU CONTROLS ---
+    if state == 'admin_dep_menu':
+        if text == '🔙 Back to Admin':
+            user_state[user_id] = 'admin_menu'
+            bot.send_message(message.chat.id, "🔐 <b>Admin Panel</b>", parse_mode="HTML", reply_markup=get_keyboard(user_id))
+        else:
+            curr_key = text.strip().upper().replace(' ', '_')
+            if curr_key in deposit_settings:
+                admin_dep_setup[user_id] = curr_key
+                user_state[user_id] = 'admin_dep_settings'
+                clean_name = curr_key.replace('_', ' ')
+                bot.send_message(message.chat.id, f"🏦 <b>Editing Settings for {clean_name}</b>", parse_mode="HTML", reply_markup=get_keyboard(user_id))
+        return
+        
+    if state == 'admin_dep_settings':
+        curr = admin_dep_setup.get(user_id)
+        if text == '🔙 Back to Deposit Menu':
+            user_state[user_id] = 'admin_dep_menu'
+            bot.send_message(message.chat.id, "🏦 <b>Deposit Menu</b>", parse_mode="HTML", reply_markup=get_keyboard(user_id))
+        elif text.startswith('🔄 Mode:'):
+            deposit_settings[curr]['mode'] = 'auto' if deposit_settings[curr]['mode'] == 'manual' else 'manual'
+            bot.send_message(message.chat.id, f"Mode switched to <b>{deposit_settings[curr]['mode'].upper()}</b>", parse_mode="HTML", reply_markup=get_keyboard(user_id))
+        elif text == '📍 Set Static Address':
+            user_state[user_id] = 'dep_setup_addr'
+            bot.send_message(message.chat.id, f"Send the Static Receiving Address for <b>{curr.replace('_', ' ')}</b>:\n\nℹ️ Current: <code>{deposit_settings[curr]['address']}</code>", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+        elif text == '🔑 Set HD Wallet Key':
+            user_state[user_id] = 'dep_setup_key'
+            bot.send_message(message.chat.id, f"Send the Master HD Key/Seed for <b>{curr.replace('_', ' ')}</b> (Auto Mode):\n\nℹ️ Current: <code>{deposit_settings[curr]['hd_key']}</code>", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+        elif text == '💬 Edit Enter Msg':
+            user_state[user_id] = 'dep_setup_enter'
+            bot.send_message(message.chat.id, f"Send the prompt message asking user for amount:\n\nℹ️ Current: <code>{deposit_settings[curr]['msg_enter']}</code>", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+        elif text == '💬 Edit Instruct Msg':
+            user_state[user_id] = 'dep_setup_instruct'
+            bot.send_message(message.chat.id, f"Send instructions containing `%crypto_amount%` and `%address%` macros:\n\nℹ️ Current:\n{deposit_settings[curr]['msg_instruct']}", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+        elif text == '💰 Set Min Deposit':
+            user_state[user_id] = 'dep_setup_min'
+            bot.send_message(message.chat.id, f"Enter Minimum Deposit Amount in USD for <b>{curr.replace('_', ' ')}</b>:\n\nℹ️ Current: {deposit_settings[curr].get('min', 10.0)}", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+        elif text == '💰 Set Max Deposit':
+            user_state[user_id] = 'dep_setup_max'
+            bot.send_message(message.chat.id, f"Enter Maximum Deposit Amount in USD for <b>{curr.replace('_', ' ')}</b>:\n\nℹ️ Current: {deposit_settings[curr].get('max', 10000.0)}", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+        elif text == '💬 Edit Pending Msg':
+            user_state[user_id] = 'dep_setup_pending'
+            bot.send_message(message.chat.id, f"Send the message shown when a user submits deposit proof (Manual Mode). Use macro `%usd_amount%`:\n\nℹ️ Current:\n{deposit_settings[curr].get('msg_pending', '')}", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+        elif text == '💬 Edit Success Msg':
+            user_state[user_id] = 'dep_setup_success'
+            bot.send_message(message.chat.id, f"Send the success message when a deposit is approved. Use macros `%usd_amount%` and `%crypto_amount%`:\n\nℹ️ Current:\n{deposit_settings[curr].get('msg_success', '')}", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+        return
+        
+    if state.startswith('dep_setup_'):
+        curr = admin_dep_setup.get(user_id)
+        if state == 'dep_setup_addr': deposit_settings[curr]['address'] = text
+        elif state == 'dep_setup_key': deposit_settings[curr]['hd_key'] = text
+        elif state == 'dep_setup_enter': deposit_settings[curr]['msg_enter'] = formatted_text
+        elif state == 'dep_setup_instruct': deposit_settings[curr]['msg_instruct'] = formatted_text
+        elif state == 'dep_setup_pending': deposit_settings[curr]['msg_pending'] = formatted_text
+        elif state == 'dep_setup_success': deposit_settings[curr]['msg_success'] = formatted_text
+        elif state == 'dep_setup_min':
+            try: deposit_settings[curr]['min'] = float(text)
+            except ValueError: return bot.send_message(message.chat.id, "⚠️ Invalid amount. Please enter numbers only.")
+        elif state == 'dep_setup_max':
+            try: deposit_settings[curr]['max'] = float(text)
+            except ValueError: return bot.send_message(message.chat.id, "⚠️ Invalid amount. Please enter numbers only.")
+        
+        user_state[user_id] = 'admin_dep_settings'
+        bot.send_message(message.chat.id, "✅ Setting updated successfully!", reply_markup=get_keyboard(user_id))
+        return
+
     # --- GLOBAL WITHDRAWAL SETTINGS ---
     if state == 'admin_w_menu':
         if text == '🔙 Back to Admin':
@@ -3493,6 +3560,166 @@ def handle_messages(message):
         elif state in ['w_setup_enter', 'w_setup_addr', 'w_setup_conf', 'w_setup_proc', 'w_setup_appr', 'w_setup_dec', 'w_setup_ign', 'w_setup_pub', 'w_setup_comm']:
             user_state[user_id] = 'admin_w_menu'
             bot.send_message(message.chat.id, "✅ Settings updated successfully!", reply_markup=get_keyboard(user_id))
+        return
+
+    # --- ADMIN WALLET SETTINGS (RESTORED FIX) ---
+    if state == 'admin_wallet_menu':
+        if text == '🔙 Back to Admin':
+            user_state[user_id] = 'admin_menu'
+            bot.send_message(message.chat.id, "🔐 <b>Admin Panel</b>", parse_mode="HTML", reply_markup=get_keyboard(user_id))
+        elif text == '💬 Edit Main Msg':
+            user_state[user_id] = 'wallet_setup_main'
+            bot.send_message(message.chat.id, f"Enter the main wallet page message (macros: %wallet%, %email%):\n\nCurrent:\n{global_wallet_setup['msg_main']}", reply_markup=get_cancel_action_keyboard())
+        elif text == '💬 Edit Prompt Msg':
+            user_state[user_id] = 'wallet_setup_prompt'
+            bot.send_message(message.chat.id, f"Enter the message asking for address:\n\nCurrent:\n{global_wallet_setup['msg_prompt']}", reply_markup=get_cancel_action_keyboard())
+        elif text == '💬 Edit Success Msg':
+            user_state[user_id] = 'wallet_setup_success'
+            bot.send_message(message.chat.id, f"Enter the success message:\n\nCurrent:\n{global_wallet_setup['msg_success']}", reply_markup=get_cancel_action_keyboard())
+        elif text == '💬 Edit Email Prompt':
+            user_state[user_id] = 'wallet_setup_email_prompt'
+            bot.send_message(message.chat.id, f"Enter the message asking for email:\n\nCurrent:\n{global_wallet_setup['msg_email_prompt']}", reply_markup=get_cancel_action_keyboard())
+        elif text == '🔘 Edit Inline (Set)':
+            user_state[user_id] = 'wallet_setup_inline_set'
+            bot.send_message(message.chat.id, f"Enter the button text for first time setup:\n\nCurrent: {global_wallet_setup['inline_set']}", reply_markup=get_cancel_action_keyboard())
+        elif text == '🔘 Edit Inline (Change)':
+            user_state[user_id] = 'wallet_setup_inline_change'
+            bot.send_message(message.chat.id, f"Enter the button text for changing wallet:\n\nCurrent: {global_wallet_setup['inline_change']}", reply_markup=get_cancel_action_keyboard())
+        elif text.startswith('📧 Toggle Email'):
+            global_wallet_setup['ask_email'] = not global_wallet_setup['ask_email']
+            bot.send_message(message.chat.id, f"Email requirement toggled.", reply_markup=get_keyboard(user_id))
+        return
+
+    if state.startswith('wallet_setup_'):
+        if state == 'wallet_setup_main': global_wallet_setup['msg_main'] = formatted_text
+        elif state == 'wallet_setup_prompt': global_wallet_setup['msg_prompt'] = formatted_text
+        elif state == 'wallet_setup_success': global_wallet_setup['msg_success'] = formatted_text
+        elif state == 'wallet_setup_email_prompt': global_wallet_setup['msg_email_prompt'] = formatted_text
+        elif state == 'wallet_setup_inline_set': global_wallet_setup['inline_set'] = text
+        elif state == 'wallet_setup_inline_change': global_wallet_setup['inline_change'] = text
+        
+        user_state[user_id] = 'admin_wallet_menu'
+        bot.send_message(message.chat.id, "✅ Setting updated successfully!", reply_markup=get_keyboard(user_id))
+        return
+
+    # --- ADMIN BONUS SETTINGS ---
+    if state == 'admin_bonus_menu':
+        if text == '🔙 Back to Admin':
+            user_state[user_id] = 'admin_menu'
+            bot.send_message(message.chat.id, "🔐 <b>Admin Panel</b>", parse_mode="HTML", reply_markup=get_keyboard(user_id))
+        elif text == '💰 Set Amount':
+            user_state[user_id] = 'bonus_setup_amount'
+            bot.send_message(message.chat.id, f"Enter the bonus amount:\n\nCurrent: ${global_bonus_setup['amount']}", reply_markup=get_cancel_action_keyboard())
+        elif text == '⏱ Set Cooldown (hrs)':
+            user_state[user_id] = 'bonus_setup_cooldown'
+            bot.send_message(message.chat.id, f"Enter cooldown time in hours (e.g. 12 or 24):\n\nCurrent: {global_bonus_setup['cooldown_hours']}h", reply_markup=get_cancel_action_keyboard())
+        elif text == '💬 Edit Success Msg':
+            user_state[user_id] = 'bonus_setup_success'
+            bot.send_message(message.chat.id, f"Enter success msg (macro: %bonus_amount%):\n\nCurrent:\n{global_bonus_setup['msg_success']}", reply_markup=get_cancel_action_keyboard())
+        elif text == '💬 Edit Fail Msg':
+            user_state[user_id] = 'bonus_setup_fail'
+            bot.send_message(message.chat.id, f"Enter fail msg (macro: %time_left%):\n\nCurrent:\n{global_bonus_setup['msg_fail']}", reply_markup=get_cancel_action_keyboard())
+        elif text == '💰 Min Auto-Transfer':
+            user_state[user_id] = 'bonus_setup_min_withdraw'
+            bot.send_message(message.chat.id, f"Enter the minimum bonus balance required before it auto-transfers to Withdrawable Balance:\n\nCurrent: ${global_bonus_setup.get('min_withdraw', 50.0)}", reply_markup=get_cancel_action_keyboard())
+        elif text.startswith('📧 Toggle Email'):
+            global_bonus_setup['require_email'] = not global_bonus_setup.get('require_email', True)
+            bot.send_message(message.chat.id, f"Email requirement toggled.", reply_markup=get_keyboard(user_id))
+        elif text == '💬 Edit Email Req Text':
+            user_state[user_id] = 'bonus_setup_email_req'
+            bot.send_message(message.chat.id, f"Enter the message shown when asking a user to link their email for the bonus:\n\nCurrent:\n{global_bonus_setup.get('msg_email_req', '⚠️ Email Required')}", reply_markup=get_cancel_action_keyboard())
+        return
+
+    if state.startswith('bonus_setup_'):
+        if state == 'bonus_setup_amount':
+            try: global_bonus_setup['amount'] = float(text)
+            except: return bot.send_message(message.chat.id, "⚠️ Invalid number.")
+        elif state == 'bonus_setup_cooldown':
+            try: global_bonus_setup['cooldown_hours'] = float(text)
+            except: return bot.send_message(message.chat.id, "⚠️ Invalid number.")
+        elif state == 'bonus_setup_min_withdraw':
+            try: global_bonus_setup['min_withdraw'] = float(text)
+            except: return bot.send_message(message.chat.id, "⚠️ Invalid number.")
+        elif state == 'bonus_setup_success': global_bonus_setup['msg_success'] = formatted_text
+        elif state == 'bonus_setup_fail': global_bonus_setup['msg_fail'] = formatted_text
+        elif state == 'bonus_setup_email_req': global_bonus_setup['msg_email_req'] = formatted_text
+        
+        user_state[user_id] = 'admin_bonus_menu'
+        bot.send_message(message.chat.id, "✅ Setting updated successfully!", reply_markup=get_keyboard(user_id))
+        return
+
+    # --- ADMIN REINVEST SETTINGS ---
+    if state == 'admin_reinvest_menu':
+        if text == '🔙 Back to Admin':
+            user_state[user_id] = 'admin_menu'
+            bot.send_message(message.chat.id, "🔐 <b>Admin Panel</b>", parse_mode="HTML", reply_markup=get_keyboard(user_id))
+        elif text == '💬 Edit Success Msg':
+            user_state[user_id] = 'reinvest_setup_success'
+            bot.send_message(message.chat.id, f"Enter Reinvest Success Message (macros: %amount%, %plan_name%):\n\nCurrent:\n{reinvest_settings['msg_success']}", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+        elif text == '💬 Edit Fail Msg':
+            user_state[user_id] = 'reinvest_setup_fail'
+            bot.send_message(message.chat.id, f"Enter Reinvest Fail Message (macro: %min_amount%):\n\nCurrent:\n{reinvest_settings['msg_fail']}", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+        elif text == '🔘 Edit Deposit Inline':
+            user_state[user_id] = 'reinvest_setup_inline'
+            bot.send_message(message.chat.id, f"Enter the text for the fallback deposit button:\n\nCurrent: {reinvest_settings['inline_deposit_text']}", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+        return
+
+    if state.startswith('reinvest_setup_'):
+        if state == 'reinvest_setup_success': reinvest_settings['msg_success'] = formatted_text
+        elif state == 'reinvest_setup_fail': reinvest_settings['msg_fail'] = formatted_text
+        elif state == 'reinvest_setup_inline': reinvest_settings['inline_deposit_text'] = text
+        
+        user_state[user_id] = 'admin_reinvest_menu'
+        bot.send_message(message.chat.id, "✅ Setting updated successfully!", reply_markup=get_keyboard(user_id))
+        return
+
+    # --- REINVEST SYSTEM AMOUNT INPUT HANDLER ---
+    if state == 'wait_reinvest_amount':
+        try: amount = float(text)
+        except ValueError: return bot.send_message(message.chat.id, get_tl_and_map("⚠️ Invalid amount. Numbers only.", lang))
+
+        valid_plans = {pid: p for pid, p in bot_plans.items() if pid != 'plan0'}
+        if not valid_plans: return bot.send_message(message.chat.id, get_tl_and_map("⚠️ No valid plans available.", lang))
+
+        u_dep = user_db[user_id].get('deposit', 0)
+        u_bal = user_db[user_id].get('balance', 0)
+        total_avail = u_dep + u_bal
+
+        if amount > total_avail:
+            return bot.send_message(message.chat.id, get_tl_and_map(f"⚠️ Insufficient funds. You only have ${fmt_amt(total_avail)} available.", lang))
+
+        matched_plan_id = None
+        matched_plan_data = None
+        for pid, p in valid_plans.items():
+            if p['min'] <= amount <= p['max']:
+                matched_plan_id = pid
+                matched_plan_data = p
+                break
+
+        if not matched_plan_id:
+            min_plan_amount = min(p['min'] for p in valid_plans.values())
+            max_plan_amount = max(p['max'] for p in valid_plans.values())
+            return bot.send_message(message.chat.id, get_tl_and_map(f"⚠️ Amount does not match any plan. Please enter an amount between ${fmt_amt(min_plan_amount)} and ${fmt_amt(max_plan_amount)}.", lang))
+
+        if u_dep >= amount:
+            user_db[user_id]['deposit'] -= amount
+        else:
+            rem = amount - u_dep
+            user_db[user_id]['deposit'] = 0
+            user_db[user_id]['balance'] -= rem
+
+        log_tx(user_id, f"Reinvested {matched_plan_data['name']}", -amount)
+
+        new_plan = {
+            'id': str(uuid.uuid4())[:8], 'macro': matched_plan_id, 'amount': amount,
+            'profit_pct': matched_plan_data['profit'], 'length_hours': matched_plan_data.get('length', 0),
+            'start_time': time.time(), 'last_accrual': time.time(), 'earned': 0.0, 'status': 'active'
+        }
+        user_db[user_id]['active_plans'].append(new_plan)
+
+        succ_msg = reinvest_settings['msg_success'].replace('%amount%', f"{fmt_amt(amount)}").replace('%plan_name%', matched_plan_data['name'])
+        bot.send_message(message.chat.id, get_tl_and_map(replace_macros(succ_msg, user_id, user_current_path[user_id]), lang), parse_mode="HTML", reply_markup=get_keyboard(user_id))
+        user_state[user_id] = 'normal'
         return
 
     # --- ADMIN PLANS MANAGER ---
