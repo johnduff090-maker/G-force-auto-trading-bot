@@ -427,7 +427,8 @@ def init_user_db(message):
             'lang': 'en', 'referred_by': None, 'team_deposits': 0.0,
             'affiliate_earnings': 0.0, 'claimed_levels': [], 'invite_links_map': [],
             # --- NEW ARCHITECTURE: HIDDEN MARKERS ---
-            'sub_verified': False, 'last_sub_check': 0.0, 'has_seen_homepage': False, 'is_referral': False, 'has_claimed_free_plan': False
+            'sub_verified': False, 'last_sub_check': 0.0, 'has_seen_homepage': False, 'is_referral': False, 'has_claimed_free_plan': False,
+            'is_fully_registered': False, 'pending_inviter': None
         }
     else:
         user_db[user_id]['first_name'] = message.from_user.first_name or 'Unknown'
@@ -454,6 +455,8 @@ def init_user_db(message):
         if 'has_seen_homepage' not in user_db[user_id]: user_db[user_id]['has_seen_homepage'] = False
         if 'is_referral' not in user_db[user_id]: user_db[user_id]['is_referral'] = False
         if 'has_claimed_free_plan' not in user_db[user_id]: user_db[user_id]['has_claimed_free_plan'] = False
+        if 'is_fully_registered' not in user_db[user_id]: user_db[user_id]['is_fully_registered'] = False
+        if 'pending_inviter' not in user_db[user_id]: user_db[user_id]['pending_inviter'] = None
     
     return is_new_user
 
