@@ -4609,19 +4609,27 @@ def handle_inline(call):
         bars = frames.get(str(style_opt), frames['1'])
         
         all_passed = True
-        for bar in bars:
-            time.sleep(0.4)
-            try: bot.edit_message_text(get_tl_and_map(f"♻️ <b>VERIFYING SUBSCRIPTIONS...</b>\n{bar}", lang), call.message.chat.id, call.message.message_id, parse_mode="HTML")
-            except: pass
+        channels = subscription_settings.get('channels', [])
+        
+        if not channels:
+            all_passed = False # Failsafe
             
-        for ch in subscription_settings.get('channels', []):
+        for ch in channels:
             try:
-                member = bot.get_chat_member(ch['chat_id'], user_id)
-                if member.status in ['left', 'kicked']:
+                # Force ID to integer safely to ensure API doesn't fail on strings
+                raw_id = ch['chat_id']
+                chat_id_val = int(raw_id) if str(raw_id).lstrip('-').isdigit() else raw_id
+                
+                member = bot.get_chat_member(chat_id_val, user_id)
+                
+                # THE ULTIMATE FIX: Strict Whitelist. If they are not actively in the channel, they fail.
+                if member.status not in ['member', 'administrator', 'creator']:
                     all_passed = False
                     break
             except Exception as e:
-                pass 
+                # If Telegram API throws an error (e.g., User Not Found), they automatically FAIL.
+                all_passed = False
+                break 
                 
         if not all_passed:
             fail_msg = get_tl_and_map(subscription_settings.get('msg_fail', '❌ You haven\'t joined all channels. Try again.'), lang)
