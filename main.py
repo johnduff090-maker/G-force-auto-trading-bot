@@ -2454,6 +2454,18 @@ def handle_messages(message):
         bot.send_message(message.chat.id, "✅ Wall message updated.", reply_markup=get_keyboard(user_id))
         return
         
+    if state == 'wait_sub_fail':
+        subscription_settings['msg_fail'] = formatted_text
+        user_state[user_id] = 'admin_sub_wall'
+        bot.send_message(message.chat.id, "✅ Fail message updated.", reply_markup=get_keyboard(user_id))
+        return
+        
+    if state == 'wait_sub_btn':
+        subscription_settings['btn_check'] = text
+        user_state[user_id] = 'admin_sub_wall'
+        bot.send_message(message.chat.id, "✅ Button text updated.", reply_markup=get_keyboard(user_id))
+        return
+        
     if state == 'wait_sub_check_user':
         try:
             target_uid = int(text)
