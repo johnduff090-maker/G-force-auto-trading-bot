@@ -2371,7 +2371,7 @@ def handle_messages(message):
         if text == '🔙 Back to Admin':
             user_state[user_id] = 'admin_menu'
             bot.send_message(message.chat.id, "🔐 <b>Admin Panel</b>", parse_mode="HTML", reply_markup=get_keyboard(user_id))
-        elif text == 'Toggle Wall On/Off':
+        elif text.startswith('Toggle Wall'):
             subscription_settings['enabled'] = not subscription_settings.get('enabled', False)
             bot.send_message(message.chat.id, "✅ Wall Status Toggled.", reply_markup=get_keyboard(user_id))
         elif text == 'Set Target Mode':
@@ -2386,12 +2386,28 @@ def handle_messages(message):
         elif text == 'Remove Channel':
             subscription_settings['channels'] = []
             bot.send_message(message.chat.id, "🗑 All configured channels have been removed.", reply_markup=get_keyboard(user_id))
+        elif text == '📋 View Channels':
+            channels = subscription_settings.get('channels', [])
+            if not channels:
+                bot.send_message(message.chat.id, "No channels are currently required.", reply_markup=get_keyboard(user_id))
+            else:
+                msg = "📋 <b>Currently Required Channels:</b>\n\n"
+                for i, ch in enumerate(channels, 1):
+                    msg += f"{i}. <b>{ch['name']}</b>\n   URL: {ch['url']}\n   Chat ID: <code>{ch['chat_id']}</code>\n\n"
+                msg += "<i>Note: Ensure the bot is an Admin in all listed channels so it can securely verify members!</i>"
+                bot.send_message(message.chat.id, msg, parse_mode="HTML", reply_markup=get_keyboard(user_id))
         elif text == 'Set Cooldown Check':
             user_state[user_id] = 'wait_sub_time'
             bot.send_message(message.chat.id, "Enter the background retention cooldown in hours (e.g., 24). Enter 0 to disable background sweeps.", reply_markup=get_cancel_action_keyboard())
         elif text == 'Edit Wall Message':
             user_state[user_id] = 'wait_sub_msg'
             bot.send_message(message.chat.id, f"Enter the new text for the subscription wall:\n\nCurrent:\n{subscription_settings.get('msg_wall')}", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+        elif text == 'Edit Fail Msg':
+            user_state[user_id] = 'wait_sub_fail'
+            bot.send_message(message.chat.id, f"Enter the text shown when verification fails:\n\nCurrent:\n{subscription_settings.get('msg_fail', '❌ You have not joined all channels.')}", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+        elif text == 'Edit Button Text':
+            user_state[user_id] = 'wait_sub_btn'
+            bot.send_message(message.chat.id, f"Enter the text for the Verify inline button:\n\nCurrent: {subscription_settings.get('btn_check', '✅ I have joined')}", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
         elif text == '👀 Check User API Sweep':
             user_state[user_id] = 'wait_sub_check_user'
             bot.send_message(message.chat.id, "Enter the Telegram ID of the user you want to manually sweep through the verification logic.", reply_markup=get_cancel_action_keyboard())
