@@ -4633,20 +4633,30 @@ def handle_inline(call):
                 
         if not all_passed:
             fail_msg = get_tl_and_map(subscription_settings.get('msg_fail', '❌ You haven\'t joined all channels. Try again.'), lang)
+            
+            # Fire a hard on-screen popup alert so the user knows they failed
+            bot.answer_callback_query(call.id, fail_msg, show_alert=True)
+            
             markup = InlineKeyboardMarkup()
             for ch in subscription_settings.get('channels', []):
                 markup.row(InlineKeyboardButton(ch['name'], url=ch['url']))
             btn_text = get_tl_and_map(subscription_settings.get('btn_check', '✅ I have joined, check now'), lang)
             markup.row(InlineKeyboardButton(btn_text, callback_data="cb_verify_sub"))
             
-            try: bot.edit_message_text(fail_msg, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=markup)
+            try: bot.edit_message_text(f"⚠️ <b>VERIFICATION FAILED</b>\n\n{fail_msg}", call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=markup)
             except: pass
             return
         else:
+            bot.answer_callback_query(call.id, get_tl_and_map("✅ Verification Successful!", lang))
+            
             user_db[user_id]['sub_verified'] = True
             user_db[user_id]['last_sub_check'] = time.time()
             
-            try: bot.delete_message(call.message.chat.id, call.message.message_id)
+            # --- THE UI GLITCH FIX: Strip the buttons FIRST to force Telegram to update the screen ---
+            try: 
+                bot.edit_message_text("✅ <b>Verification complete! Loading dashboard...</b>", call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=None)
+                time.sleep(0.5) # Give the app a half-second to breathe
+                bot.delete_message(call.message.chat.id, call.message.message_id)
             except: pass
             
             # Check if we need to trap them with the Pop-Up next
@@ -4655,6 +4665,12 @@ def handle_inline(call):
                 
             # If the Pop-up is OFF, they have cleared all gates. Register them!
             finalize_user_registration(user_id)
+            
+            # ENSURE MAIN MENU LOADS
+            user_current_path[user_id] = 'root'
+            user_state[user_id] = 'normal'
+            send_path_content(call.message.chat.id, user_id, 'root', is_editing=False, reply_keyboard=get_keyboard(user_id))
+            return
 
     if call.data == 'cb_scan_users':
         if not is_admin: return bot.answer_callback_query(call.id, "Action not permitted.", show_alert=True)
