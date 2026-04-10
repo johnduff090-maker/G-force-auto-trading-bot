@@ -1508,9 +1508,12 @@ def get_keyboard_raw(user_id):
             
         # --- NEW ARCHITECTURE: ADMIN UI BUILDERS ---
         if state == 'admin_sub_wall':
-            markup.row(KeyboardButton('Toggle Wall On/Off'), KeyboardButton('Set Target Mode'))
+            wall_status = "☑️ On" if subscription_settings.get('enabled') else "⬜️ Off"
+            markup.row(KeyboardButton(f'Toggle Wall ({wall_status})'), KeyboardButton('Set Target Mode'))
             markup.row(KeyboardButton('Add Required Channel'), KeyboardButton('Remove Channel'))
-            markup.row(KeyboardButton('Set Cooldown Check'), KeyboardButton('Edit Wall Message'))
+            markup.row(KeyboardButton('📋 View Channels'))
+            markup.row(KeyboardButton('Edit Wall Message'), KeyboardButton('Edit Fail Msg'))
+            markup.row(KeyboardButton('Edit Button Text'), KeyboardButton('Set Cooldown Check'))
             markup.row(KeyboardButton('👀 Check User API Sweep'), KeyboardButton('🔙 Back to Admin'))
             return markup
             
