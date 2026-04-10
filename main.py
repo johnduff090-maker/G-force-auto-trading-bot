@@ -1802,10 +1802,9 @@ def send_welcome(message):
 
     frames = ["[▯▯▯▯▯▯▯▯▯▯] 0%", "[■■▯▯▯▯▯▯▯▯] 20%", "[■■■■▯▯▯▯▯▯] 40%", "[■■■■■■▯▯▯▯] 60%", "[■■■■■■■■▯▯] 80%", "[■■■■■■■■■■] 100%"]
     try:
-        loading_msg = bot.send_message(message.chat.id, f"♻️ <b>INITIALIZING SYSTEM...</b>\n{frames[0]}", parse_mode="HTML")
-        for bar in frames[1:]:
-            time.sleep(0.3)
-            bot.edit_message_text(f"♻️ <b>INITIALIZING SYSTEM...</b>\n{bar}", chat_id=message.chat.id, message_id=loading_msg.message_id, parse_mode="HTML")
+        loading_msg = bot.send_message(message.chat.id, "♻️ <b>INITIALIZING SYSTEM...</b>\n[▯▯▯▯▯▯▯▯▯▯] 0%", parse_mode="HTML")
+        time.sleep(0.4) # Reduced sleep to free up bot threads
+        bot.edit_message_text("♻️ <b>INITIALIZING SYSTEM...</b>\n[■■■■■■■■■■] 100%", chat_id=message.chat.id, message_id=loading_msg.message_id, parse_mode="HTML")
         time.sleep(0.2)
         bot.delete_message(message.chat.id, loading_msg.message_id)
     except Exception:
