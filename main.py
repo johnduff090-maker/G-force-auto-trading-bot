@@ -496,17 +496,23 @@ threading.Thread(target=subscription_enforcer_loop, daemon=True).start()
 def requires_subscription_wall(user_id, is_new_user):
     """The Master Gateway check. Evaluates Target Modes to determine who hits the wall."""
     if not subscription_settings.get('enabled', False): return False
+    
+    # THE FIX: If the admin turned the wall ON but forgot to add channels, bypass it.
+    if not subscription_settings.get('channels', []): return False 
+    
+    # THE FIX: Admins automatically bypass the wall! (If you tested with an admin account, it lets you in).
     if user_id in ADMIN_IDS: return False
     
     udata = user_db.get(user_id, {})
     if udata.get('sub_verified', False): return False
         
     mode = subscription_settings.get('target_mode', 'all')
-    if mode == 'new' and not is_new_user:
-        user_db[user_id]['sub_verified'] = True # Grandfather in old users
+    
+    is_effectively_new = is_new_user or not udata.get('is_fully_registered', False)
+    
+    if mode == 'new' and not is_effectively_new:
         return False
     if mode == 'referrals' and not udata.get('is_referral', False):
-        user_db[user_id]['sub_verified'] = True
         return False
         
     return True
