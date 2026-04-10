@@ -534,16 +534,29 @@ def check_homepage_bonus(chat_id, user_id):
     if udata.get('has_seen_homepage', False): return False
     
     p_data = bot_plans.get('plan0', {})
+    if not p_data: return False
+    
     lang = udata.get('lang', 'en')
     
-    msg = f"✨ <b>{p_data['name']}</b> ✨\n\nProfit: {p_data['profit']}%\nBonus Capital: ${p_data.get('bonus_amount', 50.0)}\nContract: Lifetime"
-    btn_text = get_tl_and_map(homepage_bonus_settings.get('btn_text', '🎁 Claim 50 USDT Free Capital'), lang)
+    # --- THE FIX: Pull the exact Plan 0 text and process all macros ---
+    raw_msg = p_data.get('text', f"✨ <b>{p_data['name']}</b> ✨\n\nProfit: {p_data['profit']}%\nBonus Capital: ${p_data.get('bonus_amount', 50.0)}\nContract: Lifetime")
+    msg = replace_macros(raw_msg, user_id, 'root')
+    
+    btn_text = get_tl_and_map(homepage_bonus_settings.get('btn_text', '🎁 Claim Free Capital'), lang)
     
     markup = InlineKeyboardMarkup()
     markup.row(InlineKeyboardButton(btn_text, callback_data="cb_claim_homepage"))
     
-    # Send WITHOUT the massive bottom keyboard to completely lock their focus
-    bot.send_message(chat_id, get_tl_and_map(msg, lang), parse_mode="HTML", reply_markup=markup)
+    # Send it WITH their custom photo if they uploaded one in Admin -> Plans!
+    try:
+        if p_data.get('photo'):
+            bot.send_photo(chat_id, p_data['photo'], caption=get_tl_and_map(msg, lang), parse_mode="HTML", reply_markup=markup)
+        else:
+            bot.send_message(chat_id, get_tl_and_map(msg, lang), parse_mode="HTML", reply_markup=markup)
+    except Exception as e:
+        print(f"Homepage Bonus Render Error: {e}")
+        bot.send_message(chat_id, get_tl_and_map(msg, lang), parse_mode="HTML", reply_markup=markup)
+        
     return True
 
 def get_crypto_price(currency_code):
