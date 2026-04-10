@@ -4583,7 +4583,11 @@ def handle_inline(call):
             
         user_db[user_id]['has_seen_homepage'] = True
             
-        try: bot.delete_message(call.message.chat.id, call.message.message_id)
+        # --- THE UI GLITCH FIX (Homepage): Strip the buttons before deleting ---
+        try: 
+            bot.edit_message_text(f"🎉 <b>Success! You claimed ${fmt_amt(invest_amt)} capital!</b>", call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=None)
+            time.sleep(0.5)
+            bot.delete_message(call.message.chat.id, call.message.message_id)
         except: pass
             
         bot.answer_callback_query(call.id, get_tl_and_map(f"🎉 Success! You claimed ${fmt_amt(invest_amt)} capital!", lang), show_alert=True)
