@@ -3469,8 +3469,7 @@ def handle_messages(message):
         elif text == 'Edit Receipt Text':
             user_state[user_id] = 'wait_live_receipt_msg'
             current_msg = deposit_broadcast_settings.get('template')
-            bot.send_message(message.chat.id, f"Enter your new receipt template.\n\n<b>Available Tags:</b>\n{{user_id}}\n{{network}}\n{{amount}}\n{{short_hash}}\n\n<b>Current Template:</b>\n{current_msg}", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
-        return
+            bot.send_message(message.chat.id, f"Enter your new receipt template.\n\n<b>Available Tags:</b>\n{{user_id}}\n{{network_display}}\n{{usd_amount}}\n{{crypto_amount}}\n{{hash_link}}\n\n<b>Current Template:</b>\n{current_msg}", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
         
     if state == 'wait_live_channel_id':
         deposit_broadcast_settings['channel_id'] = text.strip()
