@@ -402,6 +402,32 @@ def preload_core_languages():
             get_tl_and_map(text, lang)
         time.sleep(0.5)
 
+# --- LIVE CHANNEL BROADCASTER (DYNAMIC) ---
+def broadcast_real_deposit(user_id, amount, network, tx_hash=None):
+    """Dynamically broadcasts a receipt based on Admin Panel settings."""
+    if not deposit_broadcast_settings.get('enabled', False): return
+    
+    channel_id = deposit_broadcast_settings.get('channel_id')
+    if not channel_id: return
+    
+    try:
+        if tx_hash:
+            short_hash = f"{tx_hash[:4]}...{tx_hash[-25:]}"
+        else:
+            import uuid
+            short_hash = f"SYS-{str(uuid.uuid4())[:16].upper()}"
+
+        raw_msg = deposit_broadcast_settings.get('template', "Deposit: ${amount}")
+        
+        msg = raw_msg.replace('{user_id}', str(user_id))\
+                     .replace('{network}', str(network))\
+                     .replace('{amount}', f"{amount:,.2f}")\
+                     .replace('{short_hash}', short_hash)
+        
+        bot.send_message(channel_id, msg, parse_mode="HTML")
+    except Exception as e:
+        print(f"Failed to broadcast deposit: {e}")
+
 def log_tx(uid, t_type, amt):
     if uid in user_db:
         date_str = time.strftime('%Y-%m-%d %H:%M', time.gmtime())
