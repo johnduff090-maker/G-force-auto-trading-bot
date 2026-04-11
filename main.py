@@ -385,7 +385,7 @@ homepage_bonus_settings = db_data.get('homepage_bonus_settings', {
 deposit_broadcast_settings = db_data.get('deposit_broadcast_settings', {
     'enabled': False,
     'channel_id': None,
-    'template': "<b>🟢 NEW DEPOSIT DETECTED 🟢</b>\n━━━━━━━━━━━━━━━━━━━\n👤 <b>User ID:</b> <code>{user_id}</code>\n🌐 <b>Network:</b> {network}\n💵 <b>Amount:</b> ${amount}\n💎 <b>Status:</b> Confirmed & Active\n🔗 <b>Hash/Ref:</b>\n<code>{short_hash}</code>\n━━━━━━━━━━━━━━━━━━━\n<i>🚀 Capital successfully added to trading pool.</i>"
+    'template': "<b>🟢 NEW DEPOSIT DETECTED 🟢</b>\n━━━━━━━━━━━━━━━━━━━\n👤 <b>User ID:</b> <code>{user_id}</code>\n🌐 <b>Network:</b> {network_display}\n💵 <b>Amount:</b> {crypto_amount} {network_display} ≈ ${usd_amount}\n💎 <b>Status:</b> Confirmed & Active\n🔗 <b>Hash/Ref:</b>\n{hash_link}\n━━━━━━━━━━━━━━━━━━━\n<i>🚀 Capital successfully added to trading pool.</i>"
 })
 
 def preload_core_languages():
