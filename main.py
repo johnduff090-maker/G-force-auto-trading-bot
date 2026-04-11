@@ -1,5 +1,5 @@
 import telebot
-from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardRemove
 import uuid
 import time
 import os
@@ -1870,6 +1870,12 @@ def finalize_user_registration(user_id):
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
+    # 🛑 1. THE GROUP KILL SWITCH (Destroys stuck keyboards)
+    if message.chat.type != 'private':
+        wipe_keyboard = ReplyKeyboardRemove()
+        bot.send_message(message.chat.id, "🤖 <b>Bot Active.</b> Please DM me to interact.", reply_markup=wipe_keyboard, parse_mode="HTML")
+        return
+
     user_id = message.from_user.id
     
     if user_id in blocked_users:
@@ -1933,6 +1939,10 @@ def send_welcome(message):
 
 @bot.message_handler(content_types=['text', 'photo'])
 def handle_messages(message):
+    # 🛑 2. THE STEALTH SILENCER (Ignores all group chat text instantly)
+    if message.chat.type != 'private':
+        return
+
     user_id = message.from_user.id
     text = message.text if message.text else (message.caption if message.caption else "")
     
