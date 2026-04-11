@@ -1614,7 +1614,15 @@ def get_keyboard_raw(user_id):
         if state == 'admin_dep_menu':
             for c in deposit_settings.keys():
                 markup.row(KeyboardButton(c.replace('_', ' '))) 
+            markup.row(KeyboardButton('📣 Live Deposit Channel'))
             markup.row(KeyboardButton('🔙 Back to Admin'))
+            return markup
+
+        if state == 'admin_live_channel':
+            status = "☑️ On" if deposit_broadcast_settings.get('enabled') else "⬜️ Off"
+            markup.row(KeyboardButton(f'Toggle Broadcast ({status})'))
+            markup.row(KeyboardButton('Set Target Channel'), KeyboardButton('Edit Receipt Text'))
+            markup.row(KeyboardButton('🔙 Back to Deposit Menu'))
             return markup
 
         if state == 'admin_dep_settings':
