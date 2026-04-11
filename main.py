@@ -402,40 +402,105 @@ def preload_core_languages():
             get_tl_and_map(text, lang)
         time.sleep(0.5)
 
-# --- LIVE CHANNEL BROADCASTER (DYNAMIC) ---
-def broadcast_real_deposit(user_id, amount, network, tx_hash=None):
-    """Dynamically broadcasts a receipt based on Admin Panel settings."""
-    if not deposit_broadcast_settings.get('enabled', False): return
-    
-    channel_id = deposit_broadcast_settings.get('channel_id')
-    if not channel_id: return
-    
-    try:
-        if tx_hash:
-            short_hash = f"{tx_hash[:4]}...{tx_hash[-25:]}"
+# --- ADMIN DEPOSIT MENU CONTROLS ---
+    if state == 'admin_dep_menu':
+        if text == '🔙 Back to Admin':
+            user_state[user_id] = 'admin_menu'
+            bot.send_message(message.chat.id, "🔐 <b>Admin Panel</b>", parse_mode="HTML", reply_markup=get_keyboard(user_id))
+        elif text == '📣 Live Deposit Channel':
+            user_state[user_id] = 'admin_live_channel'
+            bot.send_message(message.chat.id, "⚙️ <b>Live Deposit Broadcaster Settings</b>", parse_mode="HTML", reply_markup=get_keyboard(user_id))
         else:
-            import uuid
-            short_hash = f"SYS-{str(uuid.uuid4())[:16].upper()}"
+            curr_key = text.strip().upper().replace(' ', '_')
+            if curr_key in deposit_settings:
+                admin_dep_setup[user_id] = curr_key
+                user_state[user_id] = 'admin_dep_settings'
+                clean_name = curr_key.replace('_', ' ')
+                bot.send_message(message.chat.id, f"🏦 <b>Editing Settings for {clean_name}</b>", parse_mode="HTML", reply_markup=get_keyboard(user_id))
+        return
 
-        raw_msg = deposit_broadcast_settings.get('template', "Deposit: ${amount}")
+    # --- NEW: LIVE CHANNEL BROADCAST ROUTING ---
+    if state == 'admin_live_channel':
+        if text == '🔙 Back to Deposit Menu':
+            user_state[user_id] = 'admin_dep_menu'
+            bot.send_message(message.chat.id, "🏦 <b>Deposit Architecture Menu</b>", parse_mode="HTML", reply_markup=get_keyboard(user_id))
+        elif text.startswith('Toggle Broadcast'):
+            deposit_broadcast_settings['enabled'] = not deposit_broadcast_settings.get('enabled', False)
+            bot.send_message(message.chat.id, "✅ Deposit Broadcaster toggled.", reply_markup=get_keyboard(user_id))
+        elif text == 'Set Target Channel':
+            user_state[user_id] = 'wait_live_channel_id'
+            bot.send_message(message.chat.id, "Enter the Telegram Channel ID (e.g., -1001234567890):", reply_markup=get_cancel_action_keyboard())
+        elif text == 'Edit Receipt Text':
+            user_state[user_id] = 'wait_live_receipt_msg'
+            current_msg = deposit_broadcast_settings.get('template')
+            bot.send_message(message.chat.id, f"Enter your new receipt template.\n\n<b>Available Tags:</b>\n{{user_id}}\n{{network}}\n{{amount}}\n{{short_hash}}\n\n<b>Current Template:</b>\n{current_msg}", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+        return
         
-        msg = raw_msg.replace('{user_id}', str(user_id))\
-                     .replace('{network}', str(network))\
-                     .replace('{amount}', f"{amount:,.2f}")\
-                     .replace('{short_hash}', short_hash)
+    if state == 'wait_live_channel_id':
+        deposit_broadcast_settings['channel_id'] = text.strip()
+        user_state[user_id] = 'admin_live_channel'
+        bot.send_message(message.chat.id, "✅ Channel ID successfully updated. Ensure the bot is an Admin in that channel!", reply_markup=get_keyboard(user_id))
+        return
         
-        bot.send_message(channel_id, msg, parse_mode="HTML")
-    except Exception as e:
-        print(f"Failed to broadcast deposit: {e}")
+    if state == 'wait_live_receipt_msg':
+        deposit_broadcast_settings['template'] = formatted_text
+        user_state[user_id] = 'admin_live_channel'
+        bot.send_message(message.chat.id, "✅ Custom receipt template updated.", reply_markup=get_keyboard(user_id))
+        return
 
-def log_tx(uid, t_type, amt):
-    if uid in user_db:
-        date_str = time.strftime('%Y-%m-%d %H:%M', time.gmtime())
-        if 'transactions' not in user_db[uid]: user_db[uid]['transactions'] = []
-        user_db[uid]['transactions'].append({'date': date_str, 'type': t_type, 'amount': amt})
-
-def get_default_metadata():
-    return {
+    # --- REGULAR DEPOSIT SETTINGS ROUTING ---
+    if state == 'admin_dep_settings':
+        curr = admin_dep_setup.get(user_id)
+        if text == '🔙 Back to Deposit Menu':
+            user_state[user_id] = 'admin_dep_menu'
+            bot.send_message(message.chat.id, "🏦 <b>Deposit Menu</b>", parse_mode="HTML", reply_markup=get_keyboard(user_id))
+        elif text.startswith('🔄 Mode:'):
+            deposit_settings[curr]['mode'] = 'auto' if deposit_settings[curr]['mode'] == 'manual' else 'manual'
+            bot.send_message(message.chat.id, f"Mode switched to <b>{deposit_settings[curr]['mode'].upper()}</b>", parse_mode="HTML", reply_markup=get_keyboard(user_id))
+        elif text == '📍 Set Static Address':
+            user_state[user_id] = 'dep_setup_addr'
+            bot.send_message(message.chat.id, f"Send the Static Receiving Address for <b>{curr.replace('_', ' ')}</b>:\n\nℹ️ Current: <code>{deposit_settings[curr]['address']}</code>", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+        elif text == '🔑 Set HD Wallet Key':
+            user_state[user_id] = 'dep_setup_key'
+            bot.send_message(message.chat.id, f"Send the Master HD Key/Seed for <b>{curr.replace('_', ' ')}</b> (Auto Mode):\n\nℹ️ Current: <code>{deposit_settings[curr]['hd_key']}</code>", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+        elif text == '💬 Edit Enter Msg':
+            user_state[user_id] = 'dep_setup_enter'
+            bot.send_message(message.chat.id, f"Send the prompt message asking user for amount:\n\nℹ️ Current: <code>{deposit_settings[curr]['msg_enter']}</code>", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+        elif text == '💬 Edit Instruct Msg':
+            user_state[user_id] = 'dep_setup_instruct'
+            bot.send_message(message.chat.id, f"Send instructions containing `%crypto_amount%` and `%address%` macros:\n\nℹ️ Current:\n{deposit_settings[curr]['msg_instruct']}", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+        elif text == '💰 Set Min Deposit':
+            user_state[user_id] = 'dep_setup_min'
+            bot.send_message(message.chat.id, f"Enter Minimum Deposit Amount in USD for <b>{curr.replace('_', ' ')}</b>:\n\nℹ️ Current: {deposit_settings[curr].get('min', 10.0)}", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+        elif text == '💰 Set Max Deposit':
+            user_state[user_id] = 'dep_setup_max'
+            bot.send_message(message.chat.id, f"Enter Maximum Deposit Amount in USD for <b>{curr.replace('_', ' ')}</b>:\n\nℹ️ Current: {deposit_settings[curr].get('max', 10000.0)}", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+        elif text == '💬 Edit Pending Msg':
+            user_state[user_id] = 'dep_setup_pending'
+            bot.send_message(message.chat.id, f"Send the message shown when a user submits deposit proof (Manual Mode). Use macro `%usd_amount%`:\n\nℹ️ Current:\n{deposit_settings[curr].get('msg_pending', '')}", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+        elif text == '💬 Edit Success Msg':
+            user_state[user_id] = 'dep_setup_success'
+            bot.send_message(message.chat.id, f"Send the success message when a deposit is approved. Use macros `%usd_amount%` and `%crypto_amount%`:\n\nℹ️ Current:\n{deposit_settings[curr].get('msg_success', '')}", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+        return
+        
+    if state.startswith('dep_setup_'):
+        curr = admin_dep_setup.get(user_id)
+        if state == 'dep_setup_addr': deposit_settings[curr]['address'] = text
+        elif state == 'dep_setup_key': deposit_settings[curr]['hd_key'] = text
+        elif state == 'dep_setup_enter': deposit_settings[curr]['msg_enter'] = formatted_text
+        elif state == 'dep_setup_instruct': deposit_settings[curr]['msg_instruct'] = formatted_text
+        elif state == 'dep_setup_pending': deposit_settings[curr]['msg_pending'] = formatted_text
+        elif state == 'dep_setup_success': deposit_settings[curr]['msg_success'] = formatted_text
+        elif state == 'dep_setup_min':
+            try: deposit_settings[curr]['min'] = float(text)
+            except ValueError: return bot.send_message(message.chat.id, "⚠️ Invalid amount. Please enter numbers only.")
+        elif state == 'dep_setup_max':
+            try: deposit_settings[curr]['max'] = float(text)
+            except ValueError: return bot.send_message(message.chat.id, "⚠️ Invalid amount. Please enter numbers only.")
+        
+        user_state[user_id] = 'admin_dep_settings'
+        bot.send_message(message.chat.id, "✅ Setting updated successfully!", reply_markup=get_keyboard(user_id))
+        return
         'random_message': False, 'admin_only': False, 'invisible': False,
         'command': None, 'move_by_command': False, 'withdrawal': False, 
         'is_wallet': False, 'is_bonus': False, 'is_balance': False,
