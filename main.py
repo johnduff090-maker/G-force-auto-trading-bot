@@ -2050,9 +2050,9 @@ def handle_messages(message):
             user_state[user_id] = 'admin_sub_wall'
             bot.send_message(message.chat.id, "Gateway action cancelled.", reply_markup=get_keyboard(user_id))
             return
-        elif state.startswith('wait_home_'):
-            user_state[user_id] = 'admin_homepage_bonus'
-            bot.send_message(message.chat.id, "Homepage setting cancelled.", reply_markup=get_keyboard(user_id))
+        elif state.startswith('wait_home_') or state.startswith('wait_live_'):
+            user_state[user_id] = 'admin_homepage_bonus' if state.startswith('wait_home_') else 'admin_live_channel'
+            bot.send_message(message.chat.id, "Action cancelled.", reply_markup=get_keyboard(user_id))
             return
         else:
             user_state[user_id] = 'normal'
