@@ -5017,6 +5017,9 @@ def handle_inline(call):
                 
             check_and_trigger_auto_buy(user_id)
             
+            # --- LIVE CHANNEL HOOK ---
+            broadcast_real_deposit(user_id, usd_value, curr.replace('_', ' '), txid_found)
+            
             try: bot.send_message(call.message.chat.id, get_tl_and_map(f"✅ <b>Deposit Successful!</b>\nAmount: {fmt_amt(crypto_amount)} {curr.split('_')[0]}\nCredited: ${fmt_amt(usd_value)}", lang), parse_mode="HTML")
             except: pass
             
