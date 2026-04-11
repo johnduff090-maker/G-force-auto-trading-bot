@@ -206,7 +206,8 @@ def save_database():
         'invite_settings': invite_settings,
         # --- NEW ARCHITECTURE: SAVE MASTER GATEWAY CONFIGS ---
         'subscription_settings': subscription_settings,
-        'homepage_bonus_settings': homepage_bonus_settings
+        'homepage_bonus_settings': homepage_bonus_settings,
+        'deposit_broadcast_settings': deposit_broadcast_settings # <--- ADD THIS LINE
     }
     try:
         conn = psycopg2.connect(DATABASE_URL)
