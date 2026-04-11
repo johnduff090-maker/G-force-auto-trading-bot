@@ -5153,6 +5153,9 @@ def handle_inline(call):
             
             check_and_trigger_auto_buy(target) 
             
+            # --- LIVE CHANNEL HOOK ---
+            broadcast_real_deposit(target, amt, curr.replace('_', ' '), None) 
+            
         return bot.answer_callback_query(call.id, "Approved successfully.")
 
     elif call.data.startswith('cb_deprej_'):
