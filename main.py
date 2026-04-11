@@ -403,7 +403,7 @@ def preload_core_languages():
         time.sleep(0.5)
 
 # --- LIVE CHANNEL BROADCASTER (DYNAMIC) ---
-def broadcast_real_deposit(user_id, amount, network, tx_hash=None):
+def broadcast_real_deposit(user_id, usd_amount, crypto_amount, network_raw, tx_hash=None):
     """Dynamically broadcasts a receipt based on Admin Panel settings."""
     if not deposit_broadcast_settings.get('enabled', False): return
     
@@ -411,20 +411,49 @@ def broadcast_real_deposit(user_id, amount, network, tx_hash=None):
     if not channel_id: return
     
     try:
+        network_display = network_raw.replace('_', ' ')
+        
         if tx_hash:
-            short_hash = f"{tx_hash[:4]}...{tx_hash[-25:]}"
+            # Create a clean, short hash
+            short_hash = f"{tx_hash[:4]}...{tx_hash[-8:]}"
+            
+            # Determine the correct Blockchain Explorer based on the currency network
+            if network_raw in ['TRX', 'USDT_TRC20']:
+                explorer_url = f"https://tronscan.org/#/transaction/{tx_hash}"
+            elif network_raw == 'USDT_BEP20':
+                explorer_url = f"https://bscscan.com/tx/{tx_hash}"
+            elif network_raw == 'USDT_ERC20':
+                explorer_url = f"https://etherscan.io/tx/{tx_hash}"
+            elif network_raw == 'BTC':
+                explorer_url = f"https://mempool.space/tx/{tx_hash}"
+            else:
+                explorer_url = f"https://blockchair.com/search?q={tx_hash}"
+                
+            # Make it a clickable HTML link
+            hash_link = f"<a href='{explorer_url}'>{short_hash}</a>"
         else:
             import uuid
             short_hash = f"SYS-{str(uuid.uuid4())[:16].upper()}"
+            hash_link = f"<code>{short_hash}</code>"
 
-        raw_msg = deposit_broadcast_settings.get('template', "Deposit: ${amount}")
+        raw_msg = deposit_broadcast_settings.get('template', "Deposit: ${usd_amount}")
+        
+        # Backward compatibility: Auto-upgrade the old template if it exists in the database
+        if "{amount}" in raw_msg and "{crypto_amount}" not in raw_msg:
+             raw_msg = raw_msg.replace("💵 <b>Amount:</b> ${amount}", "💵 <b>Amount:</b> {crypto_amount} {network_display} ≈ ${usd_amount}")
+             raw_msg = raw_msg.replace("<code>{short_hash}</code>", "{hash_link}")
+             raw_msg = raw_msg.replace("{network}", "{network_display}")
         
         msg = raw_msg.replace('{user_id}', str(user_id))\
-                     .replace('{network}', str(network))\
-                     .replace('{amount}', f"{amount:,.2f}")\
-                     .replace('{short_hash}', short_hash)
+                     .replace('{network_display}', network_display)\
+                     .replace('{network}', network_display)\
+                     .replace('{usd_amount}', f"{usd_amount:,.2f}")\
+                     .replace('{crypto_amount}', f"{fmt_amt(crypto_amount)}")\
+                     .replace('{short_hash}', short_hash)\
+                     .replace('{hash_link}', hash_link)
         
-        bot.send_message(channel_id, msg, parse_mode="HTML")
+        # We add disable_web_page_preview=True so the channel isn't flooded by huge link previews
+        bot.send_message(channel_id, msg, parse_mode="HTML", disable_web_page_preview=True)
     except Exception as e:
         print(f"Failed to broadcast deposit: {e}")
 
