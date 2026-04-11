@@ -501,9 +501,6 @@ def preload_core_languages():
         user_state[user_id] = 'admin_dep_settings'
         bot.send_message(message.chat.id, "✅ Setting updated successfully!", reply_markup=get_keyboard(user_id))
         return
-
-def get_default_metadata():
-    return {
         'random_message': False, 'admin_only': False, 'invisible': False,
         'command': None, 'move_by_command': False, 'withdrawal': False, 
         'is_wallet': False, 'is_bonus': False, 'is_balance': False,
