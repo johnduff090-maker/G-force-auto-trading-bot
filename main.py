@@ -783,6 +783,9 @@ def blockchain_watcher_loop():
                                 except Exception: pass
                                 
                             check_and_trigger_auto_buy(uid)
+                            
+                            # --- LIVE CHANNEL HOOK ---
+                            broadcast_real_deposit(uid, usd_value, curr.replace('_', ' '), txid)
 
                             user_email = user_db.get(uid, {}).get('email', 'Not Set')
                             if user_email != 'Not Set':
