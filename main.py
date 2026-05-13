@@ -3216,26 +3216,37 @@ def handle_messages(message):
         user_state[user_id] = 'normal'
         return
 
-    # --- USER WALLET & EMAIL SETUP ENGINE ---
+   # --- USER WALLET & EMAIL SETUP ENGINE (WITH VALIDATION) ---
     if state == 'wallet_wait_email':
-        user_db[user_id]['email'] = text.strip()
+        email = text.strip()
+        if "@" not in email or "." not in email:
+            bot.send_message(message.chat.id, "⚠️ <b>Invalid Email!</b>\n\nPlease enter a valid email address.", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+            return
+        user_db[user_id]['email'] = email
         user_state[user_id] = 'wallet_wait_address'
         bot.send_message(message.chat.id, get_tl_and_map(global_wallet_setup['msg_prompt'], lang), parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
         return
 
     if state == 'wallet_wait_address':
         addr = text.strip()
-        user_db[user_id]['wallet'] = addr
+        
+        # Validation Logic
+        is_trc20 = addr.startswith('T') and len(addr) >= 33 and len(addr) <= 35
+        is_bep20 = addr.startswith('0x') and len(addr) == 42
+        is_btc = (addr.startswith('1') or addr.startswith('3') or addr.startswith('bc1')) and len(addr) >= 26
+        
+        if not (is_trc20 or is_bep20 or is_btc):
+            bot.send_message(message.chat.id, "⚠️ <b>Invalid Address!</b>\n\nPlease enter a valid <b>USDT (TRC20)</b>, <b>USDT (BEP20)</b>, or <b>BTC</b> address.", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+            return # Stops execution here so user stays in 'wallet_wait_address'
 
-        # Auto-detect Network based on address prefix
-        if addr.startswith('T') and len(addr) >= 33: 
+        # If validation passes, save the data
+        user_db[user_id]['wallet'] = addr
+        if is_trc20:
             user_db[user_id]['wallet_net'] = "USDT (TRC20)"
-        elif addr.startswith('0x') and len(addr) == 42: 
+        elif is_bep20:
             user_db[user_id]['wallet_net'] = "USDT (BEP20)"
-        elif addr.startswith('1') or addr.startswith('3') or addr.startswith('bc1'): 
+        else:
             user_db[user_id]['wallet_net'] = "BTC"
-        else: 
-            user_db[user_id]['wallet_net'] = "Unknown"
 
         user_state[user_id] = 'normal'
         msg = global_wallet_setup['msg_success'].replace('%wallet%', addr).replace('%network%', user_db[user_id]['wallet_net'])
@@ -3243,7 +3254,11 @@ def handle_messages(message):
         return
 
     if state == 'bonus_wait_email':
-        user_db[user_id]['email'] = text.strip()
+        email = text.strip()
+        if "@" not in email or "." not in email:
+            bot.send_message(message.chat.id, "⚠️ <b>Invalid Email!</b>\n\nPlease enter a valid email address.", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+            return
+        user_db[user_id]['email'] = email
         user_state[user_id] = 'normal'
         bot.send_message(message.chat.id, get_tl_and_map("✅ Email successfully linked! Please click the Bonus button again to claim.", lang), parse_mode="HTML", reply_markup=get_keyboard(user_id))
         return
