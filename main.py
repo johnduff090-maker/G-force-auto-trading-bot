@@ -3216,39 +3216,39 @@ def handle_messages(message):
         user_state[user_id] = 'normal'
         return
 
-    # --- ADMIN LOADING BAR SETTINGS ---
-    if state == 'admin_loading_bar':
-        if text == '🔙 Back to Admin':
-            user_state[user_id] = 'admin_menu'
-            bot.send_message(message.chat.id, "🔐 <b>Admin Panel</b>", parse_mode="HTML", reply_markup=get_keyboard(user_id))
-        elif text == '⏱ Set Default Time':
-            user_state[user_id] = 'admin_loading_time'
-            current_time = global_ui_settings.get('loading_bar_time', 3.0)
-            bot.send_message(message.chat.id, f"Enter default loading time in seconds (e.g. 3, 5, 2.5):\n\nCurrent: {current_time}s", reply_markup=get_cancel_action_keyboard())
-        elif text.startswith('Style 1'):
-            global_ui_settings['loading_bar_style'] = '1'
-            bot.send_message(message.chat.id, "✅ Loading Bar style changed to Style 1.", reply_markup=get_keyboard(user_id))
-        elif text.startswith('Style 2'):
-            global_ui_settings['loading_bar_style'] = '2'
-            bot.send_message(message.chat.id, "✅ Loading Bar style changed to Style 2.", reply_markup=get_keyboard(user_id))
-        elif text.startswith('Style 3'):
-            global_ui_settings['loading_bar_style'] = '3'
-            bot.send_message(message.chat.id, "✅ Loading Bar style changed to Style 3.", reply_markup=get_keyboard(user_id))
+    # --- USER WALLET & EMAIL SETUP ENGINE ---
+    if state == 'wallet_wait_email':
+        user_db[user_id]['email'] = text.strip()
+        user_state[user_id] = 'wallet_wait_address'
+        bot.send_message(message.chat.id, get_tl_and_map(global_wallet_setup['msg_prompt'], lang), parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
         return
-        
-    if state == 'admin_loading_time':
-        try:
-            new_time = float(text)
-            if new_time <= 0: raise ValueError
-            global_ui_settings['loading_bar_time'] = new_time
-            user_state[user_id] = 'admin_loading_bar'
-            bot.send_message(message.chat.id, f"✅ Default loading time set to {new_time}s.", reply_markup=get_keyboard(user_id))
-        except ValueError:
-            bot.send_message(message.chat.id, "⚠️ Invalid time. Please enter a positive number (e.g. 3 or 5.5).")
+
+    if state == 'wallet_wait_address':
+        addr = text.strip()
+        user_db[user_id]['wallet'] = addr
+
+        # Auto-detect Network based on address prefix
+        if addr.startswith('T') and len(addr) >= 33: 
+            user_db[user_id]['wallet_net'] = "USDT (TRC20)"
+        elif addr.startswith('0x') and len(addr) == 42: 
+            user_db[user_id]['wallet_net'] = "USDT (BEP20)"
+        elif addr.startswith('1') or addr.startswith('3') or addr.startswith('bc1'): 
+            user_db[user_id]['wallet_net'] = "BTC"
+        else: 
+            user_db[user_id]['wallet_net'] = "Unknown"
+
+        user_state[user_id] = 'normal'
+        msg = global_wallet_setup['msg_success'].replace('%wallet%', addr).replace('%network%', user_db[user_id]['wallet_net'])
+        bot.send_message(message.chat.id, get_tl_and_map(replace_macros(msg, user_id, current_path), lang), parse_mode="HTML", reply_markup=get_keyboard(user_id))
+        return
+
+    if state == 'bonus_wait_email':
+        user_db[user_id]['email'] = text.strip()
+        user_state[user_id] = 'normal'
+        bot.send_message(message.chat.id, get_tl_and_map("✅ Email successfully linked! Please click the Bonus button again to claim.", lang), parse_mode="HTML", reply_markup=get_keyboard(user_id))
         return
 
     # --- PROFIT CALCULATOR ENGINE ---
-    if state == 'wait_calc_amount':
         try: amount = float(text)
         except ValueError: return bot.send_message(message.chat.id, get_tl_and_map("⚠️ Invalid amount. Numbers only.", lang))
         
