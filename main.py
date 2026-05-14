@@ -1444,6 +1444,14 @@ def get_wizard_keyboard(current_val, options=None, allow_empty=False):
     markup.row(KeyboardButton('🚫 Cancel Action'))
     return markup
 
+def get_withdrawal_conf_inline(lang):
+    markup = InlineKeyboardMarkup()
+    markup.row(
+        InlineKeyboardButton(get_tl_and_map("✅ Confirm", lang), callback_data='cb_w_yes'),
+        InlineKeyboardButton(get_tl_and_map("❌ Cancel", lang), callback_data='cb_w_no')
+    )
+    return markup
+
 def get_settings_keyboard(full_path):
     markup = ReplyKeyboardMarkup(resize_keyboard=True)
     meta = btn_metadata.get(full_path, get_default_metadata())
