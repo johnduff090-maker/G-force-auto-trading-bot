@@ -3274,31 +3274,41 @@ def handle_messages(message):
         return
 
     # --- PROFIT CALCULATOR ENGINE ---
-        try: amount = float(text)
-        except ValueError: return bot.send_message(message.chat.id, get_tl_and_map("⚠️ Invalid amount. Numbers only.", lang))
-        
+    if state == 'wait_calc_amount':
+        # Clean user input to prevent crashing on $, commas, or text
+        clean_text = text.replace('$', '').replace(',', '').replace('USD', '').replace('usd', '').strip()
+        try: 
+            amount = float(clean_text)
+        except ValueError: 
+            return bot.send_message(message.chat.id, get_tl_and_map("⚠️ Invalid amount. Please enter numbers only (e.g. 100).", lang))
+
         msg = f"🧮 <b>Calculator Results for ${fmt_amt(amount)}</b>\n\n"
         found = False
         markup = InlineKeyboardMarkup()
+        
         for p_id, p_data in bot_plans.items():
-            if p_id == 'plan0': continue 
+            if p_id == 'plan0': continue
+            
             if p_data['min'] <= amount <= p_data['max']:
                 found = True
                 hourly = amount * (p_data['profit'] / 100.0)
                 daily = hourly * 24
+                
                 msg += f"🔹 <b>{p_data['name']}</b>\n"
+                msg += f"Profit Rate: {p_data['profit']}% / Hour\n"
                 msg += f"Hourly Profit: ${fmt_amt(hourly)}\nDaily Profit: ${fmt_amt(daily)}\n"
+                
                 if p_data['length'] > 0:
                     total = hourly * p_data['length']
                     msg += f"Total Return ({p_data['length']}h): ${fmt_amt(total)}\n\n"
                 else:
                     msg += f"Total Return: Lifetime\n\n"
-                
+
                 markup.row(InlineKeyboardButton(get_tl_and_map(f"🛒 Buy {p_data['name']}", lang), callback_data=f"cb_calcbuy_{p_id}_{amount}"))
-                
+
         if not found:
-            msg += "No plans available for this exact amount."
-            
+            msg += "❌ No plans available for this exact amount. Please check the minimum and maximum limits."
+
         bot.send_message(message.chat.id, get_tl_and_map(msg, lang), parse_mode="HTML", reply_markup=markup if found else get_keyboard(user_id))
         user_state[user_id] = 'normal'
         return
