@@ -5397,26 +5397,19 @@ def handle_inline(call):
         return bot.answer_callback_query(call.id)
         
     elif call.data.startswith('cb_dep_'):
-        # --- NEW FIX: Safely extract the payload without splitting by underscore ---
-        payload = call.data.replace('cb_dep_', '')
-        curr = None
-        
-        # Check if the payload is a direct currency match (e.g. TRX or USDT_TRC20)
-        if payload in deposit_settings:
-            curr = payload
+        btn_id = call.data.split('_')[2]
+        if len(call.data.split('_')) > 2 and call.data.split('_')[2] in deposit_settings:
+             curr = call.data.replace('cb_dep_', '')
         else:
-            # Fallback: treat the payload as an inline button ID
             for path, posts in menu_posts.items():
                 for p in posts:
                     for b in p.get('custom_inlines', []):
-                        if b['id'] == payload:
+                        if b['id'] == btn_id:
                             curr = b['data'].strip().upper().replace(" ", "_")
-                            break
         
-        if not curr or curr not in deposit_settings:
+        if curr not in deposit_settings:
             return bot.answer_callback_query(call.id, get_tl_and_map("Error: Currency not configured.", lang), show_alert=True)
             
-        # --- The rest stays the same! ---
         bot.answer_callback_query(call.id)
         if user_id not in user_action_data: user_action_data[user_id] = {}
         user_action_data[user_id]['currency'] = curr
