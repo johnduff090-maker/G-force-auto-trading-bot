@@ -5047,13 +5047,30 @@ def handle_inline(call):
         return
         
     elif call.data == 'cb_reinv_dep_menu':
-        try: bot.delete_message(call.message.chat.id, call.message.message_id)
-        except: pass
-        dep_markup = InlineKeyboardMarkup()
-        for c in deposit_settings:
-            dep_markup.add(InlineKeyboardButton(c.replace('_', ' '), callback_data=f"cb_dep_{c}"))
-        bot.send_message(call.message.chat.id, get_tl_and_map("Select a currency to deposit:", lang), reply_markup=dep_markup)
+        try: 
+            bot.delete_message(call.message.chat.id, call.message.message_id)
+        except: 
+            pass
         bot.answer_callback_query(call.id)
+        
+        # This simulates the user clicking your main "Deposit balance" button 
+        # or typing the command, taking them directly to your standard deposit page.
+        redirect_text = 'Deposit balance' 
+        
+        # Create a fake message object to trigger your existing handler
+        from telebot import types
+        fake_msg = types.Message(message_id=call.message.message_id, 
+                                 from_user=call.from_user, 
+                                 date=int(time.time()), 
+                                 chat=call.message.chat, 
+                                 content_type='text', 
+                                 options=[], 
+                                 json_string=None)
+        fake_msg.text = redirect_text
+        
+        # Call your main message handler (usually named handle_messages or main_handler)
+        # Note: Ensure the function name below matches your bot's message handler name.
+        handle_messages(fake_msg) 
         return
 
     if call.data.startswith('cb_unblock_'):
