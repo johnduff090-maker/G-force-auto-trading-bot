@@ -5052,49 +5052,24 @@ def handle_inline(call):
         except: 
             pass
         bot.answer_callback_query(call.id)
-        
-        # This simulates the user clicking your main "Deposit balance" button 
-        # or typing the command, taking them directly to your standard deposit page.
-        redirect_text = 'Deposit balance' 
-        
-        # Create a fake message object to trigger your existing handler
-        from telebot import types
-        fake_msg = types.Message(message_id=call.message.message_id, 
-                                 from_user=call.from_user, 
-                                 date=int(time.time()), 
-                                 chat=call.message.chat, 
-                                 content_type='text', 
-                                 options=[], 
-                                 json_string=None)
-        fake_msg.text = redirect_text
-        
-        # Call your main message handler (usually named handle_messages or main_handler)
-        # Note: Ensure the function name below matches your bot's message handler name.
-        handle_messages(fake_msg) 
-        return
 
-    if call.data.startswith('cb_unblock_'):
-        if not is_admin: return bot.answer_callback_query(call.id, "Action not permitted.", show_alert=True)
-        target_id = int(call.data.replace('cb_unblock_', ''))
+        # This simulates the user typing /deposit, which takes them out of the reinvestment flow
+        from telebot import types
+        import time
         
-        if target_id in blocked_users:
-            blocked_users.remove(target_id)
-            bot.answer_callback_query(call.id, f"✅ User {target_id} successfully unblocked.", show_alert=True)
-            
-            target_lang = user_db.get(target_id, {}).get('lang', 'en')
-            try: bot.send_message(target_id, get_tl_and_map(block_settings['msg_unblock'], target_lang), parse_mode="HTML")
-            except: pass
-            
-            if not blocked_users:
-                bot.edit_message_text("All users are now unblocked.", call.message.chat.id, call.message.message_id)
-            else:
-                markup = InlineKeyboardMarkup()
-                for buid in blocked_users:
-                    uname = user_db.get(buid, {}).get('first_name', 'Unknown')
-                    markup.row(InlineKeyboardButton(f"✅ Unblock {uname} ({buid})", callback_data=f"cb_unblock_{buid}"))
-                bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=markup)
-        else:
-            bot.answer_callback_query(call.id, "User is not currently blocked.", show_alert=True)
+        redirect_msg = types.Message(
+            message_id=call.message.message_id,
+            from_user=call.from_user,
+            date=int(time.time()),
+            chat=call.message.chat,
+            content_type='text',
+            options=[],
+            json_string=None
+        )
+        redirect_msg.text = '/deposit' 
+        
+        # Trigger your main message handler with the fake /deposit message
+        handle_messages(redirect_msg)
         return
 
     if call.data.startswith('cb_wad_'):
