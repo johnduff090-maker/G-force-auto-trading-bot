@@ -2044,7 +2044,7 @@ def handle_messages(message):
             user_action_data[user_id]['withdraw_amount'] = amount
             user_state[user_id] = 'withdraw_wait_wallet'
             
-            # Translate the next prompt
+            # Translate the next prompt (Instant via CORE_TL_DATA)
             addr_prompt = global_w_setup.get('w_msg_addr', 'Please enter your withdrawal address:')
             return bot.send_message(message.chat.id, get_tl_and_map(addr_prompt, lang), parse_mode="HTML")
 
