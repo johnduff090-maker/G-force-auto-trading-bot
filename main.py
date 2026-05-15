@@ -345,8 +345,7 @@ global_messages_setup = db_data.get('global_messages_setup', {
 reinvest_settings = db_data.get('reinvest_settings', {
     'msg_success': '✅ <b>Reinvest Successful!</b>\nYou have successfully reinvested <b>$%amount%</b> into <b>%plan_name%</b>.',
     'msg_fail': '❌ You can not invest right now: You need at least %min_amount% USDT to invest!',
-    'inline_deposit_text': '🏦 Deposit Now',
-    'inline_deposit_command': '/deposit' # <--- ADD THIS DEFAULT
+    'inline_deposit_text': '🏦 Deposit Now'
 })
 
 invite_settings = db_data.get('invite_settings', {
@@ -5048,30 +5047,37 @@ def handle_inline(call):
         return
         
     elif call.data == 'cb_reinv_dep_menu':
-        try: 
-            bot.delete_message(call.message.chat.id, call.message.message_id)
-        except Exception: 
-            pass
+        try: bot.delete_message(call.message.chat.id, call.message.message_id)
+        except: pass
+        dep_markup = InlineKeyboardMarkup()
+        for c in deposit_settings:
+            dep_markup.add(InlineKeyboardButton(c.replace('_', ' '), callback_data=f"cb_dep_{c}"))
+        bot.send_message(call.message.chat.id, get_tl_and_map("Select a currency to deposit:", lang), reply_markup=dep_markup)
         bot.answer_callback_query(call.id)
+        return
+
+    if call.data.startswith('cb_unblock_'):
+        if not is_admin: return bot.answer_callback_query(call.id, "Action not permitted.", show_alert=True)
+        target_id = int(call.data.replace('cb_unblock_', ''))
         
-        # --- RIP OUT & REDIRECT ---
-        # We create a fake message containing '/deposit' to trigger your main command handler
-        from telebot import types
-        import time
-        
-        redirect_msg = types.Message(
-            message_id=call.message.message_id, 
-            from_user=call.from_user, 
-            date=int(time.time()), 
-            chat=call.message.chat, 
-            content_type='text', 
-            options=[], 
-            json_string=None
-        )
-        redirect_msg.text = '/deposit' 
-        
-        # This sends the user directly to the start of the standard deposit flow
-        handle_messages(redirect_msg) 
+        if target_id in blocked_users:
+            blocked_users.remove(target_id)
+            bot.answer_callback_query(call.id, f"✅ User {target_id} successfully unblocked.", show_alert=True)
+            
+            target_lang = user_db.get(target_id, {}).get('lang', 'en')
+            try: bot.send_message(target_id, get_tl_and_map(block_settings['msg_unblock'], target_lang), parse_mode="HTML")
+            except: pass
+            
+            if not blocked_users:
+                bot.edit_message_text("All users are now unblocked.", call.message.chat.id, call.message.message_id)
+            else:
+                markup = InlineKeyboardMarkup()
+                for buid in blocked_users:
+                    uname = user_db.get(buid, {}).get('first_name', 'Unknown')
+                    markup.row(InlineKeyboardButton(f"✅ Unblock {uname} ({buid})", callback_data=f"cb_unblock_{buid}"))
+                bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=markup)
+        else:
+            bot.answer_callback_query(call.id, "User is not currently blocked.", show_alert=True)
         return
 
     if call.data.startswith('cb_wad_'):
@@ -5391,19 +5397,16 @@ def handle_inline(call):
         return bot.answer_callback_query(call.id)
         
     elif call.data.startswith('cb_dep_'):
-        # FIX: Replace 'cb_dep_' with nothing to keep full names like 'USDT_TRC20'
-        curr = call.data.replace('cb_dep_', '')
-        
-        # Fallback check for broadcast/custom button IDs if direct match fails
-        if curr not in deposit_settings:
-            btn_id = call.data.split('_')[2] if len(call.data.split('_')) > 2 else None
+        btn_id = call.data.split('_')[2]
+        if len(call.data.split('_')) > 2 and call.data.split('_')[2] in deposit_settings:
+             curr = call.data.replace('cb_dep_', '')
+        else:
             for path, posts in menu_posts.items():
                 for p in posts:
                     for b in p.get('custom_inlines', []):
                         if b['id'] == btn_id:
                             curr = b['data'].strip().upper().replace(" ", "_")
-
-        # Validation check
+        
         if curr not in deposit_settings:
             return bot.answer_callback_query(call.id, get_tl_and_map("Error: Currency not configured.", lang), show_alert=True)
             
@@ -5412,14 +5415,10 @@ def handle_inline(call):
         user_action_data[user_id]['currency'] = curr
         user_state[user_id] = 'dep_wait_amount'
         
-        try: 
-            bot.delete_message(call.message.chat.id, call.message.message_id)
-        except Exception: 
-            pass
+        try: bot.delete_message(call.message.chat.id, call.message.message_id)
+        except Exception: pass
         
-        # Move user to the 'Enter Amount' stage of the standard deposit flow
-        bot.send_message(call.message.chat.id, get_tl_and_map(deposit_settings[curr]['msg_enter'], lang), 
-                         parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+        bot.send_message(call.message.chat.id, get_tl_and_map(deposit_settings[curr]['msg_enter'], lang), parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
         return
 
     if call.data.startswith('cb_p_'):
