@@ -2033,7 +2033,7 @@ def handle_messages(message):
 
             # Check limits
             if amount < w_min or amount > w_max:
-                err_msg = f"⚠️ Amount must be between ${w_min} and ${w_max}."
+                err_msg = f"⚠️ Amount must be between ${fmt_amt(w_min)} and ${fmt_amt(w_max)}."
                 return bot.send_message(message.chat.id, get_tl_and_map(err_msg, lang), parse_mode="HTML")
             
             # Check balance
@@ -2065,26 +2065,13 @@ def handle_messages(message):
         user_action_data[user_id]['withdraw_wallet'] = text
         user_state[user_id] = 'normal' 
         
-        # Translate template, then replace tags
-        raw_tpl = global_w_setup.get('w_msg_conf', 'Confirm withdrawal of %withdraw% to %address%')
-        translated_tpl = get_tl_and_map(raw_tpl, lang)
-        
-        final_msg = translated_tpl.replace('%withdraw%', str(user_action_data[user_id]['withdraw_amount']))
-        final_msg = final_msg.replace('%address%', text)
-        
-        return bot.send_message(message.chat.id, final_msg, parse_mode="HTML")
-
-    if state == 'withdraw_wait_wallet':
-        user_action_data[user_id]['withdraw_wallet'] = text
-        user_state[user_id] = 'normal' 
-        
         # FIX: Translate the TEMPLATE first, then replace the placeholders
         # This prevents the translator from getting confused by the wallet address
         raw_conf_tpl = global_w_setup.get('w_msg_conf', 'Confirm withdrawal of %withdraw% to %address%')
         translated_conf = get_tl_and_map(raw_conf_tpl, lang)
         
-        # Now replace the %tags% with the actual data
-        final_conf = translated_conf.replace('%withdraw%', f"${fmt_amt(user_action_data[user_id]['withdraw_amount'])}")
+        # Now replace the %tags% with the actual formatted data
+        final_conf = translated_conf.replace('%withdraw%', f"<b>${fmt_amt(user_action_data[user_id]['withdraw_amount'])}</b>")
         final_conf = final_conf.replace('%address%', f"<code>{text}</code>")
         
         # If your template uses %network%, add it here
