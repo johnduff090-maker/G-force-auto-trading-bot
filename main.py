@@ -5389,16 +5389,19 @@ def handle_inline(call):
         return bot.answer_callback_query(call.id)
         
     elif call.data.startswith('cb_dep_'):
-        btn_id = call.data.split('_')[2]
-        if len(call.data.split('_')) > 2 and call.data.split('_')[2] in deposit_settings:
-             curr = call.data.replace('cb_dep_', '')
-        else:
+        # FIX: Replace 'cb_dep_' with nothing to keep full names like 'USDT_TRC20'
+        curr = call.data.replace('cb_dep_', '')
+        
+        # If the direct match fails, we check for broadcast/custom button IDs
+        if curr not in deposit_settings:
+            btn_id = call.data.split('_')[2] if len(call.data.split('_')) > 2 else None
             for path, posts in menu_posts.items():
                 for p in posts:
                     for b in p.get('custom_inlines', []):
                         if b['id'] == btn_id:
                             curr = b['data'].strip().upper().replace(" ", "_")
-        
+
+        # Check if the final currency exists in settings
         if curr not in deposit_settings:
             return bot.answer_callback_query(call.id, get_tl_and_map("Error: Currency not configured.", lang), show_alert=True)
             
@@ -5407,10 +5410,14 @@ def handle_inline(call):
         user_action_data[user_id]['currency'] = curr
         user_state[user_id] = 'dep_wait_amount'
         
-        try: bot.delete_message(call.message.chat.id, call.message.message_id)
-        except Exception: pass
+        try: 
+            bot.delete_message(call.message.chat.id, call.message.message_id)
+        except Exception: 
+            pass
         
-        bot.send_message(call.message.chat.id, get_tl_and_map(deposit_settings[curr]['msg_enter'], lang), parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+        # Redirect to the 'Enter Amount' phase
+        bot.send_message(call.message.chat.id, get_tl_and_map(deposit_settings[curr]['msg_enter'], lang), 
+                         parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
         return
 
     if call.data.startswith('cb_p_'):
