@@ -34,58 +34,38 @@ except ImportError:
 TL_CACHE = {}
 REVERSE_TL_MAP = {}
 
-# --- GLOBAL SPEED CACHE (Instant Translations for All Languages) ---
-# This dictionary contains pre-translated phrases to prevent timeouts/glitches.
+# --- GLOBAL SPEED CACHE (Instant Translations for All 13 Languages) ---
+# This dictionary prevents timeouts by hardcoding core withdrawal phrases.
 CORE_TL_DATA = {
     'Please enter the amount you wish to withdraw:': {
-        'pt': 'Por favor, insira o valor que deseja retirar:',
-        'es': 'Por favor, ingrese la cantidad que desea retirar:',
-        'fr': 'Veuillez saisir le montant que vous souhaitez retirer :',
-        'de': 'Bitte geben Sie den Betrag ein, den Sie abheben möchten:',
-        'it': 'Inserisci l\'importo che desideri prelevare:',
-        'ru': 'Пожалуйста, введите сумму, которую вы хотите снять:',
-        'ar': 'يرجى إدخال المبلغ الذي ترغب في سحبه:',
-        'zh': '请输入您要提取的金额：'
+        'zh': '请输入您要提取的金额：', 'es': 'Por favor, ingrese la cantidad a retirar:', 'hi': 'कृपया वह राशि दर्ज करें जिसे आप निकालना चाहते हैं:',
+        'ar': 'يرجى إدخال المبلغ الذي ترغب في سحبه:', 'pt': 'Por favor, insira o valor que deseja retirar:', 'ru': 'Введите сумму, которую хотите снять:',
+        'ja': '引き出し額を入力してください：', 'fr': 'Veuillez saisir le montant à retirer :', 'de': 'Bitte geben Sie den Abhebungsbetrag ein:',
+        'vi': 'Vui lòng nhập số tiền bạn muốn rút:', 'tr': 'Lütfen çekmek istediğiniz tutarı giriniz:', 'ko': '출금하실 금액을 입력해 주세요:', 'it': 'Inserisci l\'importo che desideri prelevare:'
     },
     'Please enter your withdrawal address:': {
-        'pt': 'Por favor, insira o seu endereço de levantamento:',
-        'es': 'Por favor, ingrese su dirección de retiro:',
-        'fr': 'Veuillez saisir votre adresse de retrait :',
-        'de': 'Bitte geben Sie Ihre Auszahlungsadresse ein:',
-        'it': 'Inserisci il tuo indirizzo di prelievo:',
-        'ru': 'Пожалуйста, введите ваш адрес для вывода:',
-        'ar': 'يرجى إدخال عنوان السحب الخاص بك:',
-        'zh': '请输入您的提现地址：'
+        'zh': '请输入您的提现地址：', 'es': 'Por favor, ingrese su dirección de retiro:', 'hi': 'कृपया अपना निकासी पता दर्ज करें:',
+        'ar': 'يرجى إدخال عنوان السحب الخاص بك:', 'pt': 'Por favor, insira o seu endereço de levantamento:', 'ru': 'Введите ваш адрес для вывода:',
+        'ja': '引き出し先アドレスを入力してください：', 'fr': 'Veuillez saisir votre adresse de retrait :', 'de': 'Geben Sie Ihre Auszahlungsadresse ein:',
+        'vi': 'Vui lòng nhập địa chỉ rút tiền của bạn:', 'tr': 'Lütfen çekim adresinizi giriniz:', 'ko': '출금 주소를 입력해 주세요:', 'it': 'Inserisci il tuo indirizzo di prelievo:'
     },
     '⚠️ Invalid amount. Numbers only.': {
-        'pt': '⚠️ Valor inválido. Apenas números.',
-        'es': '⚠️ Cantidad inválida. Solo números.',
-        'fr': '⚠️ Montant invalide. Chiffres uniquement.',
-        'de': '⚠️ Ungültiger Betrag. Nur Zahlen.',
-        'it': '⚠️ Importo non valido. Solo numeri.',
-        'ru': '⚠️ Неверная сумма. Только цифры.',
-        'ar': '⚠️ مبلغ غير صحيح. أرقام فقط.',
-        'zh': '⚠️ 金额无效。仅限数字。'
+        'zh': '⚠️ 金额无效。仅限数字。', 'es': '⚠️ Cantidad inválida. Solo números.', 'hi': '⚠️ अमान्य राशि। केवल नंबर।',
+        'ar': '⚠️ مبلغ غير صحيح. أرقام فقط.', 'pt': '⚠️ Valor inválido. Apenas números.', 'ru': '⚠️ Неверная сумма. Только цифры.',
+        'ja': '⚠️ 無効な金額です。数字のみ。', 'fr': '⚠️ Montant invalide. Chiffres uniquement.', 'de': '⚠️ Ungültiger Betrag. Nur Zahlen.',
+        'vi': '⚠️ Số tiền không hợp lệ. Chỉ nhập số.', 'tr': '⚠️ Geçersiz tutar. Sadece sayılar.', 'ko': '⚠️ 유효하지 않은 금액입니다. 숫자만 입력 가능합니다.', 'it': '⚠️ Importo non valido. Solo numeri.'
     },
     '⚠️ Insufficient balance.': {
-        'pt': '⚠️ Saldo insuficiente.',
-        'es': '⚠️ Saldo insuficiente.',
-        'fr': '⚠️ Solde insuffisant.',
-        'de': '⚠️ Unzureichendes Guthaben.',
-        'it': '⚠️ Saldo insufficiente.',
-        'ru': '⚠️ Недостаточный баланс.',
-        'ar': '⚠️ رصيد غير كافٍ.',
-        'zh': '⚠️ 余额不足。'
+        'zh': '⚠️ 余额不足。', 'es': '⚠️ Saldo insuficiente.', 'hi': '⚠️ अपर्याप्त शेष राशि।',
+        'ar': '⚠️ رصيد غير كافٍ.', 'pt': '⚠️ Saldo insuficiente.', 'ru': '⚠️ Недостаточный баланс.',
+        'ja': '⚠️ 残高不足です。', 'fr': '⚠️ Solde insuffisant.', 'de': '⚠️ Unzureichendes Guthaben.',
+        'vi': '⚠️ Số dư không đủ.', 'tr': '⚠️ Yetersiz bakiye.', 'ko': '⚠️ 잔액이 부족합니다.', 'it': '⚠️ Saldo insufficiente.'
     },
     'Confirm withdrawal of %withdraw% to %address%': {
-        'pt': 'Confirmar levantamento de %withdraw% para %address%',
-        'es': 'Confirmar retiro de %withdraw% a %address%',
-        'fr': 'Confirmer le retrait de %withdraw% vers %address%',
-        'de': 'Auszahlung von %withdraw% an %address% bestätigen',
-        'it': 'Conferma il prelievo di %withdraw% su %address%',
-        'ru': 'Подтвердите вывод %withdraw% на %address%',
-        'ar': 'تأكيد سحب %withdraw% إلى %address%',
-        'zh': '确认将 %withdraw% 提取至 %address%'
+        'zh': '确认将 %withdraw% 提取至 %address%', 'es': 'Confirmar retiro de %withdraw% a %address%', 'hi': '%address% को %withdraw% की निकासी की पुष्टि करें',
+        'ar': 'تأكيد سحب %withdraw% إلى %address%', 'pt': 'Confirmar levantamento de %withdraw% para %address%', 'ru': 'Подтвердите вывод %withdraw% на %address%',
+        'ja': '%address% への %withdraw% の出金を確認する', 'fr': 'Confirmer le retrait de %withdraw% vers %address%', 'de': 'Auszahlung von %withdraw% an %address% bestätigen',
+        'vi': 'Xác nhận rút %withdraw% về %address%', 'tr': '%withdraw% tutarının %address% adresine çekimini onayla', 'ko': '%withdraw%을(를) %address%(으)로 출금 확인', 'it': 'Conferma il prelievo di %withdraw% su %address%'
     }
 }
 
