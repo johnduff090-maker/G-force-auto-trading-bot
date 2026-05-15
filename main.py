@@ -1976,31 +1976,42 @@ def handle_messages(message):
             w_max = global_w_setup.get('w_max', 10000.0)
             
             if amount < w_min or amount > w_max:
-                limit_err = f"⚠️ Amount must be between ${fmt_amt(w_min)} and ${fmt_amt(w_max)}."
-                return bot.send_message(message.chat.id, get_tl_and_map(limit_err, lang), parse_mode="HTML")
+                # We translate the base message and then add the formatted numbers
+                err_base = get_tl_and_map("⚠️ Amount must be between", lang)
+                limit_err = f"{err_base} <b>${fmt_amt(w_min)}</b> and <b>${fmt_amt(w_max)}</b>."
+                return bot.send_message(message.chat.id, limit_err, parse_mode="HTML")
             
             if amount > user_db[user_id].get('balance', 0):
                 return bot.send_message(message.chat.id, get_tl_and_map("⚠️ Insufficient balance.", lang))
 
             user_action_data[user_id]['withdraw_amount'] = amount
             user_state[user_id] = 'withdraw_wait_wallet'
-            return bot.send_message(message.chat.id, get_tl_and_map(global_w_setup['w_msg_addr'], lang), parse_mode="HTML")
+            
+            # Pull and translate the 'Enter Address' prompt
+            addr_prompt = global_w_setup.get('w_msg_addr', 'Please enter your withdrawal address:')
+            return bot.send_message(message.chat.id, get_tl_and_map(addr_prompt, lang), parse_mode="HTML")
         except ValueError:
             return bot.send_message(message.chat.id, get_tl_and_map("⚠️ Invalid amount. Numbers only.", lang))
 
     if state == 'withdraw_wait_wallet':
-        # This handles the wallet address input regardless of language
         user_action_data[user_id]['withdraw_wallet'] = text
-        # Move to confirmation step
-        user_state[user_id] = 'normal' # Or your specific confirmation state
+        user_state[user_id] = 'normal' 
         
-        # Format the confirmation message with user data
-        conf_msg = global_w_setup.get('w_msg_conf', 'Confirm withdrawal of %withdraw% to %address%')
-        conf_msg = conf_msg.replace('%withdraw%', str(user_action_data[user_id]['withdraw_amount']))
-        conf_msg = conf_msg.replace('%address%', text)
+        # FIX: Translate the TEMPLATE first, then replace the placeholders
+        # This prevents the translator from getting confused by the wallet address
+        raw_conf_tpl = global_w_setup.get('w_msg_conf', 'Confirm withdrawal of %withdraw% to %address%')
+        translated_conf = get_tl_and_map(raw_conf_tpl, lang)
         
-        # Here you would typically send the confirmation keyboard
-        return bot.send_message(message.chat.id, get_tl_and_map(conf_msg, lang), parse_mode="HTML")
+        # Now replace the %tags% with the actual data
+        final_conf = translated_conf.replace('%withdraw%', f"${fmt_amt(user_action_data[user_id]['withdraw_amount'])}")
+        final_conf = final_conf.replace('%address%', f"<code>{text}</code>")
+        
+        # If your template uses %network%, add it here
+        method = user_action_data[user_id].get('withdraw_method', 'USDT')
+        final_conf = final_conf.replace('%network%', method)
+        
+        # Send the translated and formatted confirmation
+        return bot.send_message(message.chat.id, final_conf, parse_mode="HTML")
 
     # --- 4. YOUR EXISTING BUTTON TEXT LOGIC ---
     # The rest of your code (if text == "Withdraw", etc.) continues here...
