@@ -5038,34 +5038,20 @@ def handle_inline(call):
             try: bot.delete_message(call.message.chat.id, call.message.message_id)
             except Exception: pass
             bot.send_message(call.message.chat.id, get_tl_and_map(deposit_settings[curr]['msg_enter'], lang), parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
-                return bot.answer_callback_query(call.id)
-
+        return bot.answer_callback_query(call.id)
+        
     elif call.data.startswith('cb_question_bc_'):
         bot.answer_callback_query(call.id)
         user_state[user_id] = 'wait_support_msg'
         bot.send_message(call.message.chat.id, get_tl_and_map("💬 <b>Support Desk</b>\n\nPlease type your message below. An administrator will reply as soon as possible.", lang), parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
         return
-
-    elif call.data.startswith('cb_rinvd_'):
-        curr = call.data.replace('cb_rinvd_', '')
-        if curr not in deposit_settings:
-            return bot.answer_callback_query(call.id, "Error: Currency not found.", show_alert=True)
-        bot.answer_callback_query(call.id)
-        if user_id not in user_action_data:
-            user_action_data[user_id] = {}
-        user_action_data[user_id]['currency'] = curr
-        user_state[user_id] = 'dep_wait_amount'
-        try: bot.delete_message(call.message.chat.id, call.message.message_id)
-        except: pass
-        bot.send_message(call.message.chat.id, get_tl_and_map(deposit_settings[curr]['msg_enter'], lang), parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
-        return
-
+        
     elif call.data == 'cb_reinv_dep_menu':
         try: bot.delete_message(call.message.chat.id, call.message.message_id)
         except: pass
         dep_markup = InlineKeyboardMarkup()
         for c in deposit_settings:
-            dep_markup.add(InlineKeyboardButton(c.replace('_', ' '), callback_data=f"cb_rinvd_{c}"))
+            dep_markup.add(InlineKeyboardButton(c.replace('_', ' '), callback_data=f"cb_dep_{c}"))
         bot.send_message(call.message.chat.id, get_tl_and_map("Select a currency to deposit:", lang), reply_markup=dep_markup)
         bot.answer_callback_query(call.id)
         return
@@ -5393,26 +5379,35 @@ def handle_inline(call):
                 for b in p.get('custom_inlines', []):
                     if b['id'] == btn_id:
                         return bot.answer_callback_query(call.id, get_tl_and_map(b['data'], lang), show_alert=True)
-                return bot.answer_callback_query(call.id)
-
-    elif call.data.startswith('cb_dep_'):
-        possible_curr = call.data[len('cb_dep_'):]
+        return bot.answer_callback_query(call.id)
         
-        if possible_curr in deposit_settings:
-            curr = possible_curr
+    elif call.data.startswith('cb_cmd_'):
+        btn_id = call.data.split('_')[2]
+        for path, posts in menu_posts.items():
+            for p in posts:
+                for b in p.get('custom_inlines', []):
+                    if b['id'] == btn_id:
+                        try: bot.delete_message(call.message.chat.id, call.message.message_id)
+                        except Exception: pass
+                        msg = call.message
+                        msg.from_user = call.from_user
+                        msg.text = b['data']
+                        handle_messages(msg)
+                        return bot.answer_callback_query(call.id)
+        return bot.answer_callback_query(call.id)
+        
+    elif call.data.startswith('cb_dep_'):
+        btn_id = call.data.split('_')[2]
+        if len(call.data.split('_')) > 2 and call.data.split('_')[2] in deposit_settings:
+             curr = call.data.replace('cb_dep_', '')
         else:
-            curr = None
-            btn_id = call.data.split('_')[2]
             for path, posts in menu_posts.items():
                 for p in posts:
                     for b in p.get('custom_inlines', []):
                         if b['id'] == btn_id:
                             curr = b['data'].strip().upper().replace(" ", "_")
-                            break
-                    if curr: break
-                if curr: break
         
-        if not curr or curr not in deposit_settings:
+        if curr not in deposit_settings:
             return bot.answer_callback_query(call.id, get_tl_and_map("Error: Currency not configured.", lang), show_alert=True)
             
         bot.answer_callback_query(call.id)
