@@ -5046,6 +5046,20 @@ def handle_inline(call):
         bot.send_message(call.message.chat.id, get_tl_and_map("💬 <b>Support Desk</b>\n\nPlease type your message below. An administrator will reply as soon as possible.", lang), parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
         return
         
+    if call.data.startswith('cb_rinvd_'):
+    curr = call.data.replace('cb_rinvd_', '')
+    if curr not in deposit_settings:
+        return bot.answer_callback_query(call.id, "Error: Currency not found.", show_alert=True)
+    bot.answer_callback_query(call.id)
+    if user_id not in user_action_data:
+        user_action_data[user_id] = {}
+    user_action_data[user_id]['currency'] = curr
+    user_state[user_id] = 'dep_wait_amount'
+    try: bot.delete_message(call.message.chat.id, call.message.message_id)
+    except: pass
+    bot.send_message(call.message.chat.id, get_tl_and_map(deposit_settings[curr]['msg_enter'], lang), parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+    return
+        
     elif call.data == 'cb_reinv_dep_menu':
     try: bot.delete_message(call.message.chat.id, call.message.message_id)
     except: pass
