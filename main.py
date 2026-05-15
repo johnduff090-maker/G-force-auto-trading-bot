@@ -34,21 +34,88 @@ except ImportError:
 TL_CACHE = {}
 REVERSE_TL_MAP = {}
 
+# --- GLOBAL SPEED CACHE (Instant Translations for All Languages) ---
+# This dictionary contains pre-translated phrases to prevent timeouts/glitches.
+CORE_TL_DATA = {
+    'Please enter the amount you wish to withdraw:': {
+        'pt': 'Por favor, insira o valor que deseja retirar:',
+        'es': 'Por favor, ingrese la cantidad que desea retirar:',
+        'fr': 'Veuillez saisir le montant que vous souhaitez retirer :',
+        'de': 'Bitte geben Sie den Betrag ein, den Sie abheben möchten:',
+        'it': 'Inserisci l\'importo che desideri prelevare:',
+        'ru': 'Пожалуйста, введите сумму, которую вы хотите снять:',
+        'ar': 'يرجى إدخال المبلغ الذي ترغب في سحبه:',
+        'zh': '请输入您要提取的金额：'
+    },
+    'Please enter your withdrawal address:': {
+        'pt': 'Por favor, insira o seu endereço de levantamento:',
+        'es': 'Por favor, ingrese su dirección de retiro:',
+        'fr': 'Veuillez saisir votre adresse de retrait :',
+        'de': 'Bitte geben Sie Ihre Auszahlungsadresse ein:',
+        'it': 'Inserisci il tuo indirizzo di prelievo:',
+        'ru': 'Пожалуйста, введите ваш адрес для вывода:',
+        'ar': 'يرجى إدخال عنوان السحب الخاص بك:',
+        'zh': '请输入您的提现地址：'
+    },
+    '⚠️ Invalid amount. Numbers only.': {
+        'pt': '⚠️ Valor inválido. Apenas números.',
+        'es': '⚠️ Cantidad inválida. Solo números.',
+        'fr': '⚠️ Montant invalide. Chiffres uniquement.',
+        'de': '⚠️ Ungültiger Betrag. Nur Zahlen.',
+        'it': '⚠️ Importo non valido. Solo numeri.',
+        'ru': '⚠️ Неверная сумма. Только цифры.',
+        'ar': '⚠️ مبلغ غير صحيح. أرقام فقط.',
+        'zh': '⚠️ 金额无效。仅限数字。'
+    },
+    '⚠️ Insufficient balance.': {
+        'pt': '⚠️ Saldo insuficiente.',
+        'es': '⚠️ Saldo insuficiente.',
+        'fr': '⚠️ Solde insuffisant.',
+        'de': '⚠️ Unzureichendes Guthaben.',
+        'it': '⚠️ Saldo insufficiente.',
+        'ru': '⚠️ Недостаточный баланс.',
+        'ar': '⚠️ رصيد غير كافٍ.',
+        'zh': '⚠️ 余额不足。'
+    },
+    'Confirm withdrawal of %withdraw% to %address%': {
+        'pt': 'Confirmar levantamento de %withdraw% para %address%',
+        'es': 'Confirmar retiro de %withdraw% a %address%',
+        'fr': 'Confirmer le retrait de %withdraw% vers %address%',
+        'de': 'Auszahlung von %withdraw% an %address% bestätigen',
+        'it': 'Conferma il prelievo di %withdraw% su %address%',
+        'ru': 'Подтвердите вывод %withdraw% на %address%',
+        'ar': 'تأكيد سحب %withdraw% إلى %address%',
+        'zh': '确认将 %withdraw% 提取至 %address%'
+    }
+}
+
 def get_tl_and_map(text, target_lang):
     if not text or target_lang == 'en': return text
-    cache_key = ('en', target_lang, text)
     
-    if cache_key in TL_CACHE:
-        tl_text = TL_CACHE[cache_key]
-    else:
-        try:
-            tl_text = GoogleTranslator(source='en', target=target_lang).translate(text)
-            TL_CACHE[cache_key] = tl_text
-        except:
-            tl_text = text
+    tl_text = None
+    
+    # 1. Check the Instant Global Speed Cache first
+    if text in CORE_TL_DATA and target_lang in CORE_TL_DATA[text]:
+        tl_text = CORE_TL_DATA[text][target_lang]
+    
+    # 2. If not in Speed Cache, check the standard memory cache (TL_CACHE)
+    if not tl_text:
+        cache_key = ('en', target_lang, text)
+        if cache_key in TL_CACHE:
+            tl_text = TL_CACHE[cache_key]
+        else:
+            # 3. As a last resort, call Google Translate
+            try:
+                tl_text = GoogleTranslator(source='en', target=target_lang).translate(text)
+                TL_CACHE[cache_key] = tl_text
+            except:
+                # If Google times out, return English so the bot doesn't glitch
+                tl_text = text
 
+    # Update REVERSE_TL_MAP so the bot recognizes buttons in this language
     if target_lang not in REVERSE_TL_MAP: REVERSE_TL_MAP[target_lang] = {}
     REVERSE_TL_MAP[target_lang][tl_text] = text
+    
     return tl_text
 
 # --- 1. SECURITY VAULT (Environment Variables) ---
