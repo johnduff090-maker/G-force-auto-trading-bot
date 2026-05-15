@@ -1964,34 +1964,68 @@ def handle_messages(message):
     
     is_new = init_user_db(message)
 
-    # --- UNIVERSAL WITHDRAWAL STATE ENGINE (Multi-Language Fix) ---
+    # --- UNIVERSAL WITHDRAWAL STATE ENGINE (Bulletproof Version) ---
     state = user_state.get(user_id, 'normal')
     lang = user_db.get(user_id, {}).get('lang', 'en')
 
     if state == 'withdraw_wait_amount':
+        # 🛡️ SAFETY 1: Ensure user data exists to prevent the "glitch"
+        if user_id not in user_action_data:
+            user_action_data[user_id] = {}
+        
+        # Clean the input
         clean_text = text.replace('$', '').replace(',', '').strip()
+        
         try:
             amount = float(clean_text)
+            
+            # 🛡️ SAFETY 2: Fallback values if global_w_setup is missing something
             w_min = global_w_setup.get('w_min', 10.0)
             w_max = global_w_setup.get('w_max', 10000.0)
-            
+            u_bal = user_db.get(user_id, {}).get('balance', 0.0)
+
+            # Check limits
             if amount < w_min or amount > w_max:
-                # We translate the base message and then add the formatted numbers
-                err_base = get_tl_and_map("⚠️ Amount must be between", lang)
-                limit_err = f"{err_base} <b>${fmt_amt(w_min)}</b> and <b>${fmt_amt(w_max)}</b>."
-                return bot.send_message(message.chat.id, limit_err, parse_mode="HTML")
+                err_msg = f"⚠️ Amount must be between ${w_min} and ${w_max}."
+                return bot.send_message(message.chat.id, get_tl_and_map(err_msg, lang), parse_mode="HTML")
             
-            if amount > user_db[user_id].get('balance', 0):
+            # Check balance
+            if amount > u_bal:
                 return bot.send_message(message.chat.id, get_tl_and_map("⚠️ Insufficient balance.", lang))
 
+            # ✅ SUCCESS: Save and move to the next step
             user_action_data[user_id]['withdraw_amount'] = amount
             user_state[user_id] = 'withdraw_wait_wallet'
             
-            # Pull and translate the 'Enter Address' prompt
+            # Translate the next prompt
             addr_prompt = global_w_setup.get('w_msg_addr', 'Please enter your withdrawal address:')
             return bot.send_message(message.chat.id, get_tl_and_map(addr_prompt, lang), parse_mode="HTML")
+
         except ValueError:
+            # If they typed something that isn't a number
             return bot.send_message(message.chat.id, get_tl_and_map("⚠️ Invalid amount. Numbers only.", lang))
+        except Exception as e:
+            # 🛡️ SAFETY 3: Catch any other error so the bot doesn't "glitch"
+            print(f"Withdrawal Error: {e}")
+            return bot.send_message(message.chat.id, "⚠️ An error occurred. Please try clicking Withdraw again.")
+
+    if state == 'withdraw_wait_wallet':
+        # 🛡️ SAFETY 4: Ensure the amount was actually saved
+        if user_id not in user_action_data or 'withdraw_amount' not in user_action_data[user_id]:
+            user_state[user_id] = 'normal'
+            return bot.send_message(message.chat.id, "⚠️ Session lost. Please start the withdrawal again.")
+
+        user_action_data[user_id]['withdraw_wallet'] = text
+        user_state[user_id] = 'normal' 
+        
+        # Translate template, then replace tags
+        raw_tpl = global_w_setup.get('w_msg_conf', 'Confirm withdrawal of %withdraw% to %address%')
+        translated_tpl = get_tl_and_map(raw_tpl, lang)
+        
+        final_msg = translated_tpl.replace('%withdraw%', str(user_action_data[user_id]['withdraw_amount']))
+        final_msg = final_msg.replace('%address%', text)
+        
+        return bot.send_message(message.chat.id, final_msg, parse_mode="HTML")
 
     if state == 'withdraw_wait_wallet':
         user_action_data[user_id]['withdraw_wallet'] = text
