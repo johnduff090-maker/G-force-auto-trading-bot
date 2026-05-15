@@ -5049,27 +5049,28 @@ def handle_inline(call):
     elif call.data == 'cb_reinv_dep_menu':
         try: 
             bot.delete_message(call.message.chat.id, call.message.message_id)
-        except: 
+        except Exception: 
             pass
         bot.answer_callback_query(call.id)
-
-        # This simulates the user typing /deposit, which takes them out of the reinvestment flow
+        
+        # --- RIP OUT & REDIRECT ---
+        # We create a fake message containing '/deposit' to trigger your main command handler
         from telebot import types
         import time
         
         redirect_msg = types.Message(
-            message_id=call.message.message_id,
-            from_user=call.from_user,
-            date=int(time.time()),
-            chat=call.message.chat,
-            content_type='text',
-            options=[],
+            message_id=call.message.message_id, 
+            from_user=call.from_user, 
+            date=int(time.time()), 
+            chat=call.message.chat, 
+            content_type='text', 
+            options=[], 
             json_string=None
         )
         redirect_msg.text = '/deposit' 
         
-        # Trigger your main message handler with the fake /deposit message
-        handle_messages(redirect_msg)
+        # This sends the user directly to the start of the standard deposit flow
+        handle_messages(redirect_msg) 
         return
 
     if call.data.startswith('cb_wad_'):
