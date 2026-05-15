@@ -1964,6 +1964,44 @@ def handle_messages(message):
     
     is_new = init_user_db(message)
 
+    # --- UNIVERSAL WITHDRAWAL STATE ENGINE (Multi-Language Fix) ---
+    state = user_state.get(user_id, 'normal')
+    lang = user_db.get(user_id, {}).get('lang', 'en')
+
+    if state == 'withdraw_wait_amount':
+        clean_text = text.replace('$', '').replace(',', '').strip()
+        try:
+            amount = float(clean_text)
+            w_min = global_w_setup.get('w_min', 10.0)
+            w_max = global_w_setup.get('w_max', 10000.0)
+            
+            if amount < w_min or amount > w_max:
+                limit_err = f"⚠️ Amount must be between ${fmt_amt(w_min)} and ${fmt_amt(w_max)}."
+                return bot.send_message(message.chat.id, get_tl_and_map(limit_err, lang), parse_mode="HTML")
+            
+            if amount > user_db[user_id].get('balance', 0):
+                return bot.send_message(message.chat.id, get_tl_and_map("⚠️ Insufficient balance.", lang))
+
+            user_action_data[user_id]['withdraw_amount'] = amount
+            user_state[user_id] = 'withdraw_wait_wallet'
+            return bot.send_message(message.chat.id, get_tl_and_map(global_w_setup['w_msg_addr'], lang), parse_mode="HTML")
+        except ValueError:
+            return bot.send_message(message.chat.id, get_tl_and_map("⚠️ Invalid amount. Numbers only.", lang))
+
+    if state == 'withdraw_wait_wallet':
+        # This handles the wallet address input regardless of language
+        user_action_data[user_id]['withdraw_wallet'] = text
+        # Move to confirmation step
+        user_state[user_id] = 'normal' # Or your specific confirmation state
+        
+        # Format the confirmation message with user data
+        conf_msg = global_w_setup.get('w_msg_conf', 'Confirm withdrawal of %withdraw% to %address%')
+        conf_msg = conf_msg.replace('%withdraw%', str(user_action_data[user_id]['withdraw_amount']))
+        conf_msg = conf_msg.replace('%address%', text)
+        
+        # Here you would typically send the confirmation keyboard
+        return bot.send_message(message.chat.id, get_tl_and_map(conf_msg, lang), parse_mode="HTML")
+
     # --- NEW ARCHITECTURE: MASTER INTERCEPTOR (ENFORCES GATEWAY ON ALL TEXT COMMANDS) ---
     if requires_subscription_wall(user_id, is_new):
         try: bot.delete_message(message.chat.id, message.message_id) # Erase what they tried to do
