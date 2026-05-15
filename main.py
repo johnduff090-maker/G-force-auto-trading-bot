@@ -5410,38 +5410,36 @@ def handle_inline(call):
                         return bot.answer_callback_query(call.id)
         return bot.answer_callback_query(call.id)
         
-    elif call.data.startswith('cb_dep_'):
-    # Extract currency by removing the prefix - handles multi-underscore names like USDT_TRC20
-    possible_curr = call.data[len('cb_dep_'):]
-    
-    if possible_curr in deposit_settings:
-        curr = possible_curr
-    else:
-        # Fall back to searching inline button metadata by btn_id
-        curr = None
-        btn_id = call.data.split('_')[2]
-        for path, posts in menu_posts.items():
-            for p in posts:
-                for b in p.get('custom_inlines', []):
-                    if b['id'] == btn_id:
-                        curr = b['data'].strip().upper().replace(" ", "_")
-                        break
-                if curr: break
-            if curr: break
-    
-    if not curr or curr not in deposit_settings:
-        return bot.answer_callback_query(call.id, get_tl_and_map("Error: Currency not configured.", lang), show_alert=True)
+        elif call.data.startswith('cb_dep_'):
+        possible_curr = call.data[len('cb_dep_'):]
         
-    bot.answer_callback_query(call.id)
-    if user_id not in user_action_data: user_action_data[user_id] = {}
-    user_action_data[user_id]['currency'] = curr
-    user_state[user_id] = 'dep_wait_amount'
-    
-    try: bot.delete_message(call.message.chat.id, call.message.message_id)
-    except Exception: pass
-    
-    bot.send_message(call.message.chat.id, get_tl_and_map(deposit_settings[curr]['msg_enter'], lang), parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
-    return
+        if possible_curr in deposit_settings:
+            curr = possible_curr
+        else:
+            curr = None
+            btn_id = call.data.split('_')[2]
+            for path, posts in menu_posts.items():
+                for p in posts:
+                    for b in p.get('custom_inlines', []):
+                        if b['id'] == btn_id:
+                            curr = b['data'].strip().upper().replace(" ", "_")
+                            break
+                    if curr: break
+                if curr: break
+        
+        if not curr or curr not in deposit_settings:
+            return bot.answer_callback_query(call.id, get_tl_and_map("Error: Currency not configured.", lang), show_alert=True)
+            
+        bot.answer_callback_query(call.id)
+        if user_id not in user_action_data: user_action_data[user_id] = {}
+        user_action_data[user_id]['currency'] = curr
+        user_state[user_id] = 'dep_wait_amount'
+        
+        try: bot.delete_message(call.message.chat.id, call.message.message_id)
+        except Exception: pass
+        
+        bot.send_message(call.message.chat.id, get_tl_and_map(deposit_settings[curr]['msg_enter'], lang), parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+        return
 
     if call.data.startswith('cb_p_'):
         if not is_admin: return bot.answer_callback_query(call.id, "Action not permitted.", show_alert=True)
