@@ -4638,6 +4638,11 @@ def handle_inline(call):
         bot.answer_callback_query(call.id, get_tl_and_map("🚫 You are currently blocked.", lang), show_alert=True)
         return
 
+    # --- PAYOUT POPUP RECEIPT LOGIC ---
+    if call.data == 'cb_payout_popup_alert':
+        popup_msg = global_w_setup.get('payout_popup_msg', 'Payment Success!')
+        return bot.answer_callback_query(call.id, get_tl_and_map(popup_msg, lang), show_alert=True)
+
     # --- NEW ARCHITECTURE: THE INTERCEPTOR (INLINE GATEWAY) ---
     if requires_subscription_wall(user_id, False) and call.data != 'cb_verify_sub':
         bot.answer_callback_query(call.id, get_tl_and_map("🚨 Please verify your subscription first.", lang), show_alert=True)
