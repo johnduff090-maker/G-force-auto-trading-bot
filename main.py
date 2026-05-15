@@ -5047,14 +5047,14 @@ def handle_inline(call):
         return
         
     elif call.data == 'cb_reinv_dep_menu':
-        try: bot.delete_message(call.message.chat.id, call.message.message_id)
-        except: pass
-        dep_markup = InlineKeyboardMarkup()
-        for c in deposit_settings:
-            dep_markup.add(InlineKeyboardButton(c.replace('_', ' '), callback_data=f"cb_dep_{c}"))
-        bot.send_message(call.message.chat.id, get_tl_and_map("Select a currency to deposit:", lang), reply_markup=dep_markup)
-        bot.answer_callback_query(call.id)
-        return
+    try: bot.delete_message(call.message.chat.id, call.message.message_id)
+    except: pass
+    dep_markup = InlineKeyboardMarkup()
+    for c in deposit_settings:
+        dep_markup.add(InlineKeyboardButton(c.replace('_', ' '), callback_data=f"cb_rinvd_{c}"))
+    bot.send_message(call.message.chat.id, get_tl_and_map("Select a currency to deposit:", lang), reply_markup=dep_markup)
+    bot.answer_callback_query(call.id)
+    return
 
     if call.data.startswith('cb_unblock_'):
         if not is_admin: return bot.answer_callback_query(call.id, "Action not permitted.", show_alert=True)
