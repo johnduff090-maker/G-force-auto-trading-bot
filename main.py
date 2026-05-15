@@ -72,27 +72,6 @@ CORE_TL_DATA = {
 def get_tl_and_map(text, target_lang):
     if not text or target_lang == 'en': return text
     
-    # --- EMERGENCY CODE FIXER ---
-    # This ensures "Portuguese" becomes "pt", "Spanish" becomes "es", etc.
-    lang_map = {
-        'portuguese': 'pt', 'portugese': 'pt',
-        'spanish': 'es',
-        'hindi': 'hi',
-        'chinese': 'zh',
-        'russian': 'ru',
-        'french': 'fr',
-        'german': 'de',
-        'japanese': 'ja',
-        'vietnamese': 'vi',
-        'turkish': 'tr',
-        'korean': 'ko',
-        'italian': 'it'
-    }
-    
-    # Standardize the input (lowercase and remove spaces)
-    target_lang = str(target_lang).lower().strip()
-    target_lang = lang_map.get(target_lang, target_lang)
-    
     tl_text = None
     
     # 1. Check the Instant Global Speed Cache first
@@ -107,7 +86,6 @@ def get_tl_and_map(text, target_lang):
         else:
             # 3. As a last resort, call Google Translate
             try:
-                # Add a small timeout logic if possible, or just rely on the cache
                 tl_text = GoogleTranslator(source='en', target=target_lang).translate(text)
                 TL_CACHE[cache_key] = tl_text
             except:
