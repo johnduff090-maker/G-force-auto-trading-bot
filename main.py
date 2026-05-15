@@ -73,48 +73,38 @@ def get_tl_and_map(text, target_lang):
     if not text or target_lang == 'en': return text
     
     # --- EMERGENCY CODE FIXER ---
-    # This ensures "Portuguese" becomes "pt", "Spanish" becomes "es", etc.
+    # Ensures "Portuguese" -> "pt", "Spanish" -> "es", "Hindi" -> "hi"
     lang_map = {
         'portuguese': 'pt', 'portugese': 'pt',
-        'spanish': 'es',
-        'hindi': 'hi',
-        'chinese': 'zh',
-        'russian': 'ru',
-        'french': 'fr',
-        'german': 'de',
-        'japanese': 'ja',
-        'vietnamese': 'vi',
-        'turkish': 'tr',
-        'korean': 'ko',
-        'italian': 'it'
+        'spanish': 'es', 'hindi': 'hi',
+        'french': 'fr', 'german': 'de', 'russian': 'ru',
+        'chinese': 'zh', 'japanese': 'ja', 'korean': 'ko',
+        'vietnamese': 'vi', 'turkish': 'tr', 'italian': 'it'
     }
     
-    # Standardize the input (lowercase and remove spaces)
     target_lang = str(target_lang).lower().strip()
     target_lang = lang_map.get(target_lang, target_lang)
     
     tl_text = None
     
-    # 1. Check the Instant Global Speed Cache first
+    # 1. Check the Instant Global Speed Cache (CORE_TL_DATA)
     if text in CORE_TL_DATA and target_lang in CORE_TL_DATA[text]:
         tl_text = CORE_TL_DATA[text][target_lang]
     
-    # 2. If not in Speed Cache, check the standard memory cache (TL_CACHE)
+    # 2. If not in Speed Cache, check memory
     if not tl_text:
         cache_key = ('en', target_lang, text)
         if cache_key in TL_CACHE:
             tl_text = TL_CACHE[cache_key]
         else:
-            # 3. As a last resort, call Google Translate
+            # 3. Last resort call Google
             try:
-                # Add a small timeout logic if possible, or just rely on the cache
                 tl_text = GoogleTranslator(source='en', target=target_lang).translate(text)
                 TL_CACHE[cache_key] = tl_text
             except:
-                # If Google times out, return English so the bot doesn't glitch
                 tl_text = text
 
-    # Update REVERSE_TL_MAP so the bot recognizes buttons in this language
+    # Update REVERSE_TL_MAP
     if target_lang not in REVERSE_TL_MAP: REVERSE_TL_MAP[target_lang] = {}
     REVERSE_TL_MAP[target_lang][tl_text] = text
     
@@ -1995,44 +1985,6 @@ def send_welcome(message):
         user_db[user_id]['pending_inviter'] = inviter_id
         user_db[user_id]['is_referral'] = True # Critical for "Referrals Only" gateway mode
 
-    # --- NEW ARCHITECTURE: MASTER INTERCEPTOR (TRAPS USER AT SUB WALL) ---
-    if requires_subscription_wall(user_id, is_new):
-        deploy_subscription_wall(message.chat.id, user_id)
-        return
-
-    # --- NEW ARCHITECTURE: HOMEPAGE POPUP BRIDGE (TRAPS USER AT BONUS) ---
-    if check_homepage_bonus(message.chat.id, user_id):
-        return
-
-    # IF BOTH WALLS ARE OFF, FINALIZE REGISTRATION IMMEDIATELY
-    finalize_user_registration(user_id)
-
-    user_current_path[user_id] = 'root'
-    user_state[user_id] = 'normal'
-    user_selected_button[user_id] = None
-    
-    send_path_content(message.chat.id, user_id, 'root', is_editing=False, reply_keyboard=get_keyboard(user_id))
-
-
-@bot.message_handler(content_types=['text', 'photo'])
-def handle_messages(message):
-    # 🛑 2. THE STEALTH SILENCER (Ignores all group chat text instantly)
-    if message.chat.type != 'private':
-        return
-
-    user_id = message.from_user.id
-    text = message.text if message.text else (message.caption if message.caption else "")
-    
-    if user_id in blocked_users:
-        lang = user_db.get(user_id, {}).get('lang', 'en')
-        bot.send_message(message.chat.id, get_tl_and_map(block_settings['msg_block'], lang), parse_mode="HTML")
-        return
-    
-    formatted_text = extract_html(message)
-    is_admin = user_id in ADMIN_IDS
-    
-    is_new = init_user_db(message)
-
     # --- UNIVERSAL WITHDRAWAL STATE ENGINE (Bulletproof Version) ---
     state = user_state.get(user_id, 'normal')
     lang = user_db.get(user_id, {}).get('lang', 'en')
@@ -2088,7 +2040,6 @@ def handle_messages(message):
         user_state[user_id] = 'normal' 
         
         # FIX: Translate the TEMPLATE first, then replace the placeholders
-        # This prevents the translator from getting confused by the wallet address
         raw_conf_tpl = global_w_setup.get('w_msg_conf', 'Confirm withdrawal of %withdraw% to %address%')
         translated_conf = get_tl_and_map(raw_conf_tpl, lang)
         
@@ -2108,7 +2059,7 @@ def handle_messages(message):
 
     # --- NEW ARCHITECTURE: MASTER INTERCEPTOR (ENFORCES GATEWAY ON ALL TEXT COMMANDS) ---
     if requires_subscription_wall(user_id, is_new):
-        try: bot.delete_message(message.chat.id, message.message_id) # Erase what they tried to do
+        try: bot.delete_message(message.chat.id, message.message_id) 
         except: pass
         deploy_subscription_wall(message.chat.id, user_id)
         return
