@@ -345,7 +345,8 @@ global_messages_setup = db_data.get('global_messages_setup', {
 reinvest_settings = db_data.get('reinvest_settings', {
     'msg_success': '✅ <b>Reinvest Successful!</b>\nYou have successfully reinvested <b>$%amount%</b> into <b>%plan_name%</b>.',
     'msg_fail': '❌ You can not invest right now: You need at least %min_amount% USDT to invest!',
-    'inline_deposit_text': '🏦 Deposit Now'
+    'inline_deposit_text': '🏦 Deposit Now',
+    'inline_deposit_command': '/deposit' # <--- ADD THIS DEFAULT
 })
 
 invite_settings = db_data.get('invite_settings', {
