@@ -2002,6 +2002,9 @@ def handle_messages(message):
         # Here you would typically send the confirmation keyboard
         return bot.send_message(message.chat.id, get_tl_and_map(conf_msg, lang), parse_mode="HTML")
 
+    # --- 4. YOUR EXISTING BUTTON TEXT LOGIC ---
+    # The rest of your code (if text == "Withdraw", etc.) continues here...
+
     # --- NEW ARCHITECTURE: MASTER INTERCEPTOR (ENFORCES GATEWAY ON ALL TEXT COMMANDS) ---
     if requires_subscription_wall(user_id, is_new):
         try: bot.delete_message(message.chat.id, message.message_id) # Erase what they tried to do
