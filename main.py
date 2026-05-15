@@ -5038,9 +5038,9 @@ def handle_inline(call):
             try: bot.delete_message(call.message.chat.id, call.message.message_id)
             except Exception: pass
             bot.send_message(call.message.chat.id, get_tl_and_map(deposit_settings[curr]['msg_enter'], lang), parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
-        return bot.answer_callback_query(call.id)
-        
-                elif call.data.startswith('cb_question_bc_'):
+                return bot.answer_callback_query(call.id)
+
+    elif call.data.startswith('cb_question_bc_'):
         bot.answer_callback_query(call.id)
         user_state[user_id] = 'wait_support_msg'
         bot.send_message(call.message.chat.id, get_tl_and_map("💬 <b>Support Desk</b>\n\nPlease type your message below. An administrator will reply as soon as possible.", lang), parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
@@ -5069,7 +5069,6 @@ def handle_inline(call):
         bot.send_message(call.message.chat.id, get_tl_and_map("Select a currency to deposit:", lang), reply_markup=dep_markup)
         bot.answer_callback_query(call.id)
         return
-
 
     if call.data.startswith('cb_unblock_'):
         if not is_admin: return bot.answer_callback_query(call.id, "Action not permitted.", show_alert=True)
