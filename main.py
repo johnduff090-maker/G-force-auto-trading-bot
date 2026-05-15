@@ -5393,7 +5393,7 @@ def handle_inline(call):
         # FIX: Replace 'cb_dep_' with nothing to keep full names like 'USDT_TRC20'
         curr = call.data.replace('cb_dep_', '')
         
-        # If the direct match fails, we check for broadcast/custom button IDs
+        # Fallback check for broadcast/custom button IDs if direct match fails
         if curr not in deposit_settings:
             btn_id = call.data.split('_')[2] if len(call.data.split('_')) > 2 else None
             for path, posts in menu_posts.items():
@@ -5402,7 +5402,7 @@ def handle_inline(call):
                         if b['id'] == btn_id:
                             curr = b['data'].strip().upper().replace(" ", "_")
 
-        # Check if the final currency exists in settings
+        # Validation check
         if curr not in deposit_settings:
             return bot.answer_callback_query(call.id, get_tl_and_map("Error: Currency not configured.", lang), show_alert=True)
             
@@ -5416,7 +5416,7 @@ def handle_inline(call):
         except Exception: 
             pass
         
-        # Redirect to the 'Enter Amount' phase
+        # Move user to the 'Enter Amount' stage of the standard deposit flow
         bot.send_message(call.message.chat.id, get_tl_and_map(deposit_settings[curr]['msg_enter'], lang), 
                          parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
         return
