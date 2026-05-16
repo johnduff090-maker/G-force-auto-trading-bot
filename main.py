@@ -40,7 +40,7 @@ REVERSE_TL_MAP = {}
 #   - macros like %amount%, %balance%, %loading_bar_3s%
 #   - slash commands like /setwallet, /start
 #   - HTML tags like <b>, </code>
-_MACRO_RE = re.compile(r'(%[A-Za-z0-9_]+%|/[A-Za-z][A-Za-z0-9_]*|</?[A-Za-z][^>]*>)')
+_MACRO_RE = re.compile(r'(%[^%\n]+?%|/[A-Za-z][A-Za-z0-9_]*|</?[A-Za-z][^>]*>)')
 
 # Private-Use Area: characters U+E000..U+F8FF have no defined meaning, so
 # Google Translate (and every other translation engine) passes them through
@@ -358,17 +358,53 @@ if raw_admins:
 print(f"👑 RECOGNIZED ADMIN IDs: {ADMIN_IDS}")
 print("="*40 + "\n")
 
+def _is_admin_panel_state(state):
+    """Return True when an admin user is currently inside the admin panel
+    (admin menus, wizards, content editor, balance manager, etc.). Anything
+    else — normal browsing, withdraw, deposit, plan-buy, calculator, support —
+    is the regular user-facing interface and should be translated."""
+    if not state or state == 'normal':
+        return False
+    # Explicit prefixes that always mean "admin panel"
+    admin_prefixes = (
+        'admin_', 'bal_', 'posts_', 'pi_wait_', 'bc_wait_',
+        'w_setup_', 'dep_setup_', 'wallet_setup_', 'bonus_setup_',
+        'reinvest_setup_', 'msg_setup_', 'plan_setup_',
+        'wait_block', 'wait_edit_block', 'wait_edit_unblock',
+        'wait_wipe', 'wait_general_wipe', 'wait_sub_', 'wait_home_',
+        'wait_invite_', 'wait_ref_', 'wait_payout_popup',
+    )
+    if state.startswith(admin_prefixes):
+        return True
+    # Explicit state names (content/button editor, broadcast)
+    admin_exact = {
+        'editing', 'adding_button', 'renaming_button', 'button_settings',
+        'assign_command', 'assign_plan', 'admin_wait_tx_id',
+        'admin_loading_time', 'wait_support_msg',
+    }
+    return state in admin_exact
+
 def get_user_lang(uid):
-    """Resolve a user's UI language. Admins always see English UI so the admin
-    panel and all admin-side controls stay readable regardless of any language
-    they have selected for themselves."""
-    try:
-        if uid in ADMIN_IDS:
-            return 'en'
-    except Exception:
-        pass
+    """Resolve a user's UI language.
+
+    Admins see English ONLY while they are inside the admin panel itself
+    (admin menus, content/button editor, balance manager, wizards, broadcast,
+    etc.). When an admin browses the bot like a normal user (main menu,
+    withdraw, deposit, plan-buy, support chat, calculator…), their selected
+    language is respected just like any other user."""
     if 'user_db' not in globals():
         return 'en'
+    try:
+        is_admin = uid in ADMIN_IDS
+    except Exception:
+        is_admin = False
+    if is_admin:
+        try:
+            state = user_state.get(uid, 'normal') if 'user_state' in globals() else 'normal'
+        except Exception:
+            state = 'normal'
+        if _is_admin_panel_state(state):
+            return 'en'
     try:
         return user_db.get(uid, {}).get('lang', 'en')
     except Exception:
