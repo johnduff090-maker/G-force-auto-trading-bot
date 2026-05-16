@@ -5388,24 +5388,40 @@ def handle_inline(call):
 
         user_db[user_id]['lang'] = target_lang
 
-        # Pre-warm translation cache so the new menu renders FULLY in the new language
-        # on the very first click. Uses batch API; bounded by an internal timeout.
-        bot.answer_callback_query(call.id)
+        # 1. Instant popup confirmation
         try:
-            prewarm_language(target_lang, timeout=12.0)
-        except Exception as e:
-            print(f"prewarm_language error: {e}")
+            bot.answer_callback_query(
+                call.id,
+                get_tl_and_map("✅ Language updated!", target_lang),
+                show_alert=False,
+            )
+        except Exception:
+            pass
 
+        # 2. Delete the language-selection post and render the main menu NOW
         try: bot.delete_message(call.message.chat.id, call.message.message_id)
         except: pass
 
         user_current_path[user_id] = 'root'
         user_state[user_id] = 'normal'
-        send_path_content(call.message.chat.id, user_id, 'root', is_editing=False, reply_keyboard=get_keyboard(user_id))
-        try:
-            bot.send_message(call.message.chat.id, get_tl_and_map("Language updated!", target_lang))
-        except Exception:
-            pass
+        chat_id = call.message.chat.id
+        send_path_content(chat_id, user_id, 'root', is_editing=False, reply_keyboard=get_keyboard(user_id))
+
+        # 3. Pre-warm in the background; when done, refresh the menu so it appears
+        # fully translated without the user having to click again.
+        def _bg_prewarm_and_refresh(uid=user_id, tlang=target_lang, cid=chat_id):
+            try:
+                added = prewarm_language(tlang, timeout=20.0)
+            except Exception as e:
+                print(f"prewarm_language error: {e}")
+                added = 0
+            if added > 0:
+                try:
+                    send_path_content(cid, uid, 'root', is_editing=False, reply_keyboard=get_keyboard(uid))
+                except Exception as e:
+                    print(f"language refresh error: {e}")
+
+        threading.Thread(target=_bg_prewarm_and_refresh, daemon=True).start()
         return
 
     if call.data.startswith('cb_calcbuy_'):
