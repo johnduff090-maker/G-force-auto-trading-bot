@@ -36,6 +36,33 @@ except ImportError:
 TL_CACHE = {}
 REVERSE_TL_MAP = {}
 
+# Tokens that must be preserved verbatim through translation:
+#   - macros like %amount%, %balance%, %loading_bar_3s%
+#   - slash commands like /setwallet, /start
+#   - HTML tags like <b>, </code>
+_MACRO_RE = re.compile(r'(%[A-Za-z0-9_]+%|/[A-Za-z][A-Za-z0-9_]*|</?[A-Za-z][^>]*>)')
+
+def _protect_tokens(text):
+    """Replace macros/commands/HTML tags with unobtrusive placeholders so Google
+    Translate leaves them alone. Returns (protected_text, token_map)."""
+    tokens = {}
+    def _sub(m):
+        idx = len(tokens)
+        ph = f"XQX{idx}XQX"  # capitalized letters Google rarely alters
+        tokens[ph] = m.group(0)
+        return ph
+    return _MACRO_RE.sub(_sub, text), tokens
+
+def _restore_tokens(text, tokens):
+    if not tokens or not isinstance(text, str):
+        return text
+    # Google may lower-case or insert spaces around our placeholders; normalize.
+    for ph, original in tokens.items():
+        text = text.replace(ph, original)
+        # Defensive: also try lowercase variant (some languages get lowercased)
+        text = text.replace(ph.lower(), original)
+    return text
+
 # --- GLOBAL SPEED CACHE (Instant Translations for All 13 Languages) ---
 # This dictionary prevents timeouts by hardcoding core withdrawal phrases.
 CORE_TL_DATA = {
@@ -81,8 +108,10 @@ _TL_WAIT_SECONDS = 0.6
 
 def _tl_fetch_and_cache(cache_key, text, target_lang):
     try:
-        result = GoogleTranslator(source='en', target=target_lang).translate(text)
+        protected, tokens = _protect_tokens(text)
+        result = GoogleTranslator(source='en', target=target_lang).translate(protected)
         if result:
+            result = _restore_tokens(result, tokens)
             TL_CACHE[cache_key] = result
             if target_lang not in REVERSE_TL_MAP: REVERSE_TL_MAP[target_lang] = {}
             REVERSE_TL_MAP[target_lang][result] = text
@@ -194,8 +223,21 @@ def prewarm_language(target_lang, timeout=12.0):
 
     def _do_batch(batch):
         try:
+            # Protect macros/commands/HTML in each string before sending to Google
+            protected_batch = []
+            token_maps = []
+            for s in batch:
+                p, toks = _protect_tokens(s)
+                protected_batch.append(p)
+                token_maps.append(toks)
             translator = GoogleTranslator(source='en', target=target_lang)
-            results = translator.translate_batch(batch)
+            results = translator.translate_batch(protected_batch)
+            # Restore the original tokens in each result
+            if results:
+                results = [
+                    _restore_tokens(r, t) if isinstance(r, str) else r
+                    for r, t in zip(results, token_maps)
+                ]
             return batch, results
         except Exception as e:
             print(f"prewarm batch error ({target_lang}): {e}")
@@ -254,6 +296,22 @@ if raw_admins:
 
 print(f"👑 RECOGNIZED ADMIN IDs: {ADMIN_IDS}")
 print("="*40 + "\n")
+
+def get_user_lang(uid):
+    """Resolve a user's UI language. Admins always see English UI so the admin
+    panel and all admin-side controls stay readable regardless of any language
+    they have selected for themselves."""
+    try:
+        if uid in ADMIN_IDS:
+            return 'en'
+    except Exception:
+        pass
+    if 'user_db' not in globals():
+        return 'en'
+    try:
+        return user_db.get(uid, {}).get('lang', 'en')
+    except Exception:
+        return 'en'
 
 MASTER_SEED = os.getenv('MASTER_SEED_PHRASE', '')
 if MASTER_SEED:
@@ -765,7 +823,7 @@ def requires_subscription_wall(user_id, is_new_user):
 def deploy_subscription_wall(chat_id, user_id):
     """Deploys the un-bypassable Multi-Channel UI wall."""
     udata = user_db.get(user_id, {})
-    lang = udata.get('lang', 'en')
+    lang = get_user_lang(user_id)
     markup = InlineKeyboardMarkup()
     
     for ch in subscription_settings.get('channels', []):
@@ -787,7 +845,7 @@ def check_homepage_bonus(chat_id, user_id):
     p_data = bot_plans.get('plan0', {})
     if not p_data: return False
     
-    lang = udata.get('lang', 'en')
+    lang = get_user_lang(user_id)
     
     # --- THE FIX: Pull the exact Plan 0 text and process all macros ---
     raw_msg = p_data.get('text', f"✨ <b>{p_data['name']}</b> ✨\n\nProfit: {p_data['profit']}%\nBonus Capital: ${p_data.get('bonus_amount', 50.0)}\nContract: Lifetime")
@@ -870,7 +928,7 @@ def process_referral_commission(user_id, amount, is_deposit=True):
             user_db[inviter]['affiliate_earnings'] += comm
             log_tx(inviter, "Referral Commission", comm)
             try:
-                lang = user_db[inviter].get('lang', 'en')
+                lang = get_user_lang(inviter)
                 msg = global_messages_setup.get('ref_commission_msg', '💵 You received +{amount} USDT from your referral activity!')
                 msg = msg.replace('{amount}', f"{fmt_amt(comm)}")
                 bot.send_message(inviter, get_tl_and_map(msg, lang), parse_mode="HTML")
@@ -984,7 +1042,7 @@ def blockchain_watcher_loop():
                                 conf = deposit_settings[curr]
                                 msg_success = conf.get('msg_success', "✅ <b>Deposit Detected!</b>\n\nThe blockchain confirmed a deposit of <b>%crypto_amount% %currency%</b>.\n<b>$%usd_amount% USD</b> has been automatically added to your balance!")
                                 msg_success = msg_success.replace('%usd_amount%', f"{fmt_amt(usd_value)}").replace('%crypto_amount%', f"{fmt_amt(crypto_amount)}").replace('%currency%', curr.replace('_', ' '))
-                                lang = user_db.get(uid, {}).get('lang', 'en')
+                                lang = get_user_lang(uid)
                                 bot.send_message(uid, get_tl_and_map(msg_success, lang), parse_mode="HTML")
                             except Exception: pass
                             
@@ -1064,7 +1122,7 @@ def check_and_trigger_auto_buy(user_id):
         
         try:
             msg = f"🎉 <b>Auto-Purchase Successful!</b>\n\nYour deposit triggered your pending plan.\n<b>{p_data['name']}</b> is now active with an investment of <b>${fmt_amt(invest_amt)}</b>!"
-            lang = user_db.get(user_id, {}).get('lang', 'en')
+            lang = get_user_lang(user_id)
             bot.send_message(user_id, get_tl_and_map(msg, lang), parse_mode="HTML")
         except Exception: pass
 
@@ -1099,7 +1157,7 @@ def process_accruals(user_id):
                 try:
                     msg = global_messages_setup.get('hourly_dm', '💰You have received +{hourly_amount} USDT hourly profits.\nTime left: {time_left}')
                     msg = msg.replace('{hourly_amount}', f"{fmt_amt(hourly_earned)}").replace('{time_left}', time_left_str)
-                    lang = u.get('lang', 'en')
+                    lang = get_user_lang(user_id)
                     bot.send_message(user_id, get_tl_and_map(msg, lang), parse_mode="HTML")
                 except: pass
                 
@@ -1110,7 +1168,7 @@ def process_accruals(user_id):
                 try:
                     msg = global_messages_setup.get('expiry_dm', '💰You have received a total profit of +{total_profit} USDT.\n⏰Trading Completed')
                     msg = msg.replace('{total_profit}', f"{fmt_amt(p['earned'])}")
-                    lang = u.get('lang', 'en')
+                    lang = get_user_lang(user_id)
                     bot.send_message(user_id, get_tl_and_map(msg, lang), parse_mode="HTML")
                 except: pass
 
@@ -1406,7 +1464,7 @@ def execute_live_trading_animation(chat_id, msg_id, user_id, base_text, full_pat
     for _ in range(30):
         time.sleep(1.0)
         try:
-            lang = user_db.get(user_id, {}).get('lang', 'en')
+            lang = get_user_lang(user_id)
             updated_text = replace_macros(get_tl_and_map(base_text, lang), user_id, full_path)
             if is_photo:
                 bot.edit_message_caption(caption=updated_text, chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
@@ -1425,7 +1483,7 @@ def send_path_content(chat_id, user_id, path, is_editing=False, reply_keyboard=N
             except Exception: pass
         editor_msg_ids[user_id] = []
 
-    lang = user_db.get(user_id, {}).get('lang', 'en')
+    lang = get_user_lang(user_id)
     meta = btn_metadata.get(path, get_default_metadata())
     assigned_plan = meta.get('assigned_plan')
     
@@ -1984,7 +2042,7 @@ def get_keyboard_raw(user_id):
 
 def get_keyboard(user_id):
     markup = get_keyboard_raw(user_id)
-    lang = user_db.get(user_id, {}).get('lang', 'en')
+    lang = get_user_lang(user_id)
     if lang == 'en' or not markup: return markup
 
     new_markup = ReplyKeyboardMarkup(resize_keyboard=True)
@@ -2025,7 +2083,7 @@ def finalize_user_registration(user_id):
         udata['referred_by'] = inviter_id
         user_db[inviter_id]['ref_count'] += 1
         try:
-            lang = user_db[inviter_id].get('lang', 'en')
+            lang = get_user_lang(inviter_id)
             bot.send_message(inviter_id, get_tl_and_map(global_messages_setup['ref_join_msg'], lang))
         except: pass
         
@@ -2069,7 +2127,7 @@ def send_welcome(message):
     user_id = message.from_user.id
     
     if user_id in blocked_users:
-        lang = user_db.get(user_id, {}).get('lang', 'en')
+        lang = get_user_lang(user_id)
         bot.send_message(message.chat.id, get_tl_and_map(block_settings['msg_block'], lang), parse_mode="HTML")
         return
 
@@ -2137,7 +2195,7 @@ def handle_messages(message):
     text = message.text if message.text else (message.caption if message.caption else "")
     
     if user_id in blocked_users:
-        lang = user_db.get(user_id, {}).get('lang', 'en')
+        lang = get_user_lang(user_id)
         bot.send_message(message.chat.id, get_tl_and_map(block_settings['msg_block'], lang), parse_mode="HTML")
         return
     
@@ -2148,7 +2206,7 @@ def handle_messages(message):
 
     # --- UNIVERSAL WITHDRAWAL STATE ENGINE (Bulletproof Version) ---
     state = user_state.get(user_id, 'normal')
-    lang = user_db.get(user_id, {}).get('lang', 'en')
+    lang = get_user_lang(user_id)
 
     if state == 'withdraw_wait_amount':
         # 🛡️ SAFETY 1: Ensure user data exists to prevent the "glitch"
@@ -2237,7 +2295,7 @@ def handle_messages(message):
 
     process_accruals(user_id) 
     
-    lang = user_db.get(user_id, {}).get('lang', 'en')
+    lang = get_user_lang(user_id)
     
     if text == '/setwallet info' or text == '/setwallet':
         if global_wallet_setup['ask_email'] and user_db[user_id].get('email', 'Not Set') == 'Not Set':
@@ -2386,7 +2444,7 @@ def handle_messages(message):
         
     if state.startswith('admin_suprep_'):
         target_uid = int(state.split('_')[2])
-        target_lang = user_db.get(target_uid, {}).get('lang', 'en')
+        target_lang = get_user_lang(target_uid)
         
         reply_msg = f"👤 <b>Message from Support:</b>\n\n{formatted_text}"
         try:
@@ -2594,7 +2652,7 @@ def handle_messages(message):
 
             for uid in list(user_db.keys()):
                 try:
-                    lang = user_db.get(uid, {}).get('lang', 'en')
+                    lang = get_user_lang(uid)
                     tl_text = replace_macros(get_tl_and_map(bc_data['text'], lang), uid, 'root') if bc_data['text'] else None
                     
                     tl_markup = None
@@ -4316,7 +4374,7 @@ def handle_messages(message):
             bot.send_message(message.chat.id, f"✅ User {target_id} has been permanently blocked.", reply_markup=get_keyboard(user_id))
             
             # Send the block message directly to the targeted user
-            target_lang = user_db.get(target_id, {}).get('lang', 'en')
+            target_lang = get_user_lang(target_id)
             try: bot.send_message(target_id, get_tl_and_map(block_settings['msg_block'], target_lang), parse_mode="HTML")
             except: pass
         except ValueError:
@@ -4486,7 +4544,7 @@ def handle_messages(message):
             
             if admin_bal_notify.get(user_id, True):
                 try:
-                    target_lang = user_db.get(target, {}).get('lang', 'en')
+                    target_lang = get_user_lang(target)
                     if comment:
                         msg = f"{comment}\n\nYour {btype.title()} is now: <b>{fmt_amt(new_bal)}</b>"
                     else:
@@ -4815,7 +4873,7 @@ def execute_plan_purchase_via_popup(user_id, chat_id, message_id, call_id, plan_
     elif invest_amount is None:
         invest_amount = p_data['min']
 
-    lang = user_db.get(user_id, {}).get('lang', 'en')
+    lang = get_user_lang(user_id)
 
     if p_data.get('is_free', False) or plan_id == 'plan0':
         # --- FREE PLAN LOOPHOLE FIX ---
@@ -4887,7 +4945,7 @@ def handle_inline(call):
     current_path = user_current_path.get(user_id, 'root')
     target_btn = user_selected_button.get(user_id)
     is_admin = user_id in ADMIN_IDS
-    lang = user_db.get(user_id, {}).get('lang', 'en')
+    lang = get_user_lang(user_id)
     
     global pending_withdrawals
 
@@ -5201,7 +5259,7 @@ def handle_inline(call):
             blocked_users.remove(target_id)
             bot.answer_callback_query(call.id, f"✅ User {target_id} successfully unblocked.", show_alert=True)
             
-            target_lang = user_db.get(target_id, {}).get('lang', 'en')
+            target_lang = get_user_lang(target_id)
             try: bot.send_message(target_id, get_tl_and_map(block_settings['msg_unblock'], target_lang), parse_mode="HTML")
             except: pass
             
@@ -5231,7 +5289,7 @@ def handle_inline(call):
         target = w_data['user_id']
         amt = w_data['amount']
         w_var = w_data['currency_var']
-        target_lang = user_db.get(target, {}).get('lang', 'en')
+        target_lang = get_user_lang(target)
         
         if action == 'app':
             log_tx(target, "Withdrawal Approved", 0) 
@@ -5506,7 +5564,7 @@ def handle_inline(call):
             
             msg_success = conf.get('msg_success', "✅ <b>Deposit Approved!</b>\n<b>$%usd_amount%</b> has been successfully added to your deposit balance.")
             msg_success = msg_success.replace('%usd_amount%', f"{fmt_amt(amt)}").replace('%crypto_amount%', '')
-            target_lang = user_db.get(target, {}).get('lang', 'en')
+            target_lang = get_user_lang(target)
             bot.send_message(target, get_tl_and_map(msg_success, target_lang), parse_mode="HTML")
             
             try:
@@ -5530,7 +5588,7 @@ def handle_inline(call):
         target = dep['user_id']
         
         try:
-            target_lang = user_db.get(target, {}).get('lang', 'en')
+            target_lang = get_user_lang(target)
             bot.send_message(target, get_tl_and_map(f"❌ <b>Deposit Rejected</b>\nYour deposit request for <b>${fmt_amt(dep['amount'])}</b> could not be verified.", target_lang), parse_mode="HTML")
             if call.message.photo: bot.edit_message_caption(f"{call.message.caption}\n\n❌ **REJECTED**", call.message.chat.id, call.message.message_id, reply_markup=None)
             else: bot.edit_message_text(f"{call.message.text}\n\n❌ **REJECTED**", call.message.chat.id, call.message.message_id, reply_markup=None)
