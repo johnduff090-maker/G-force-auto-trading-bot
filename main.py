@@ -5397,9 +5397,11 @@ def handle_inline(call):
         return bot.answer_callback_query(call.id)
         
     elif call.data.startswith('cb_dep_'):
-        btn_id = call.data.split('_')[2]
-        if len(call.data.split('_')) > 2 and call.data.split('_')[2] in deposit_settings:
-             curr = call.data.replace('cb_dep_', '')
+        suffix = call.data.replace('cb_dep_', '', 1)
+        btn_id = suffix.split('_')[0]
+        curr = None
+        if suffix in deposit_settings:
+            curr = suffix
         else:
             for path, posts in menu_posts.items():
                 for p in posts:
