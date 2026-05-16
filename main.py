@@ -1407,7 +1407,7 @@ def execute_live_trading_animation(chat_id, msg_id, user_id, base_text, full_pat
         time.sleep(1.0)
         try:
             lang = user_db.get(user_id, {}).get('lang', 'en')
-            updated_text = get_tl_and_map(replace_macros(base_text, user_id, full_path), lang)
+            updated_text = replace_macros(get_tl_and_map(base_text, lang), user_id, full_path)
             if is_photo:
                 bot.edit_message_caption(caption=updated_text, chat_id=chat_id, message_id=msg_id, parse_mode="HTML")
             else:
@@ -1433,7 +1433,7 @@ def send_path_content(chat_id, user_id, path, is_editing=False, reply_keyboard=N
     
     if assigned_plan and assigned_plan in bot_plans:
         p_data = bot_plans[assigned_plan]
-        p_text = get_tl_and_map(replace_macros(p_data.get('text', ''), user_id, path), lang)
+        p_text = replace_macros(get_tl_and_map(p_data.get('text', ''), lang), user_id, path)
         p_photo = p_data.get('photo')
         
         has_active = any(p['macro'] == assigned_plan and p['status'] == 'active' for p in user_db.get(user_id, {}).get('active_plans', []))
@@ -1461,7 +1461,7 @@ def send_path_content(chat_id, user_id, path, is_editing=False, reply_keyboard=N
         return
         
     for i, p in enumerate(posts):
-        raw_text = get_tl_and_map(replace_macros(p['text'], user_id, path), lang)
+        raw_text = replace_macros(get_tl_and_map(p['text'], lang), user_id, path)
         
         has_loading_macro = False
         total_loading_time = float(global_ui_settings.get('loading_bar_time', 3.0))
@@ -2595,7 +2595,7 @@ def handle_messages(message):
             for uid in list(user_db.keys()):
                 try:
                     lang = user_db.get(uid, {}).get('lang', 'en')
-                    tl_text = get_tl_and_map(replace_macros(bc_data['text'], uid, 'root'), lang) if bc_data['text'] else None
+                    tl_text = replace_macros(get_tl_and_map(bc_data['text'], lang), uid, 'root') if bc_data['text'] else None
                     
                     tl_markup = None
                     if markup:
@@ -3448,8 +3448,10 @@ def handle_messages(message):
         }
         user_db[user_id]['active_plans'].append(new_plan)
 
-        succ_msg = reinvest_settings['msg_success'].replace('%amount%', f"{fmt_amt(amount)}").replace('%plan_name%', matched_plan_data['name'])
-        bot.send_message(message.chat.id, get_tl_and_map(replace_macros(succ_msg, user_id, user_current_path[user_id]), lang), parse_mode="HTML", reply_markup=get_keyboard(user_id))
+        succ_template = reinvest_settings['msg_success']
+        translated = get_tl_and_map(succ_template, lang)
+        succ_msg = translated.replace('%amount%', f"{fmt_amt(amount)}").replace('%plan_name%', matched_plan_data['name'])
+        bot.send_message(message.chat.id, replace_macros(succ_msg, user_id, user_current_path[user_id]), parse_mode="HTML", reply_markup=get_keyboard(user_id))
         user_state[user_id] = 'normal'
         return
 
@@ -4525,11 +4527,11 @@ def handle_messages(message):
         if not global_w_setup.get('do_not_ask_address'):
             user_state[user_id] = 'w_action_addr'
             msg = global_w_setup.get('w_msg_addr') or "Please enter your withdrawal address:"
-            bot.send_message(message.chat.id, get_tl_and_map(replace_macros(msg, user_id, target_path, user_action_data[user_id]), lang), parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+            bot.send_message(message.chat.id, replace_macros(get_tl_and_map(msg, lang), user_id, target_path, user_action_data[user_id]), parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
         else:
             user_state[user_id] = 'w_action_conf'
             msg = global_w_setup.get('w_msg_conf') or "Are you sure you want to withdraw %withdraw% USDT via %network% to:\n<code>%address%</code>"
-            bot.send_message(message.chat.id, get_tl_and_map(replace_macros(msg, user_id, target_path, user_action_data[user_id]), lang), parse_mode="HTML", reply_markup=get_withdrawal_conf_inline(lang))
+            bot.send_message(message.chat.id, replace_macros(get_tl_and_map(msg, lang), user_id, target_path, user_action_data[user_id]), parse_mode="HTML", reply_markup=get_withdrawal_conf_inline(lang))
         return
 
     if state == 'w_action_addr':
@@ -4545,7 +4547,7 @@ def handle_messages(message):
         
         user_state[user_id] = 'w_action_conf'
         msg = global_w_setup.get('w_msg_conf') or "Are you sure you want to withdraw %withdraw% USDT via %network% to:\n<code>%address%</code>"
-        bot.send_message(message.chat.id, get_tl_and_map(replace_macros(msg, user_id, target_path, user_action_data[user_id]), lang), parse_mode="HTML", reply_markup=get_withdrawal_conf_inline(lang))
+        bot.send_message(message.chat.id, replace_macros(get_tl_and_map(msg, lang), user_id, target_path, user_action_data[user_id]), parse_mode="HTML", reply_markup=get_withdrawal_conf_inline(lang))
         return
 
     # --- GLOBAL FEATURE: Move by Command ---
@@ -4677,11 +4679,11 @@ def handle_messages(message):
                 
                 user_state[user_id] = 'w_action_amount'
                 msg = global_w_setup.get('w_msg_enter') or "Please enter the amount you wish to withdraw:"
-                bot.send_message(message.chat.id, get_tl_and_map(replace_macros(msg, user_id, custom_btn_path), lang), parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+                bot.send_message(message.chat.id, replace_macros(get_tl_and_map(msg, lang), user_id, custom_btn_path), parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
                 return
 
             if meta.get('is_wallet') and state != 'posts_editing':
-                msg = get_tl_and_map(replace_macros(global_wallet_setup['msg_main'], user_id, custom_btn_path), lang)
+                msg = replace_macros(get_tl_and_map(global_wallet_setup['msg_main'], lang), user_id, custom_btn_path)
                 w_status = user_db[user_id].get('wallet', 'Not Set')
                 btn_text = get_tl_and_map(global_wallet_setup['inline_change'] if w_status != 'Not Set' else global_wallet_setup['inline_set'], lang)
                 
@@ -4706,8 +4708,8 @@ def handle_messages(message):
                     user_db[user_id]['last_bonus_time'] = now
                     log_tx(user_id, "Bonus Received", global_bonus_setup['amount'])
                     
-                    msg = global_bonus_setup['msg_success'].replace('%bonus_amount%', str(global_bonus_setup['amount']))
-                    bot.send_message(message.chat.id, get_tl_and_map(replace_macros(msg, user_id, custom_btn_path), lang), parse_mode="HTML")
+                    msg = get_tl_and_map(global_bonus_setup['msg_success'], lang).replace('%bonus_amount%', str(global_bonus_setup['amount']))
+                    bot.send_message(message.chat.id, replace_macros(msg, user_id, custom_btn_path), parse_mode="HTML")
                     
                     min_w = global_bonus_setup.get('min_withdraw', 50.0)
                     if user_db[user_id]['bonus'] >= min_w:
@@ -4723,8 +4725,8 @@ def handle_messages(message):
                     minutes, seconds = divmod(remainder, 60)
                     time_str = f"{hours}h {minutes}m {seconds}s"
                     
-                    msg = global_bonus_setup['msg_fail'].replace('%time_left%', time_str)
-                    bot.send_message(message.chat.id, get_tl_and_map(replace_macros(msg, user_id, custom_btn_path), lang), parse_mode="HTML")
+                    msg = get_tl_and_map(global_bonus_setup['msg_fail'], lang).replace('%time_left%', time_str)
+                    bot.send_message(message.chat.id, replace_macros(msg, user_id, custom_btn_path), parse_mode="HTML")
                 return
 
             if meta.get('is_calculator') and state != 'posts_editing':
@@ -4769,7 +4771,7 @@ def handle_messages(message):
                     markup = InlineKeyboardMarkup()
                     btn_text = get_tl_and_map(reinvest_settings['inline_deposit_text'], lang)
                     markup.row(InlineKeyboardButton(btn_text, callback_data='cb_reinv_dep_menu'))
-                    bot.send_message(message.chat.id, get_tl_and_map(replace_macros(fail_msg, user_id, custom_btn_path), lang), parse_mode="HTML", reply_markup=markup)
+                    bot.send_message(message.chat.id, replace_macros(get_tl_and_map(fail_msg, lang), user_id, custom_btn_path), parse_mode="HTML", reply_markup=markup)
                 else:
                     user_state[user_id] = 'wait_reinvest_amount'
                     bot.send_message(message.chat.id, get_tl_and_map(f"🔄 <b>Reinvest</b>\n\nAvailable Balance: ${fmt_amt(total_avail)}\nMinimum Investment: ${fmt_amt(min_plan_amount)}\n\nEnter the amount you wish to reinvest:", lang), parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
@@ -5388,17 +5390,7 @@ def handle_inline(call):
 
         user_db[user_id]['lang'] = target_lang
 
-        # 1. Instant popup confirmation
-        try:
-            bot.answer_callback_query(
-                call.id,
-                get_tl_and_map("✅ Language updated!", target_lang),
-                show_alert=False,
-            )
-        except Exception:
-            pass
-
-        # 2. Delete the language-selection post and render the main menu NOW
+        # 1. Delete the language-selection post and render the main menu first
         try: bot.delete_message(call.message.chat.id, call.message.message_id)
         except: pass
 
@@ -5406,6 +5398,16 @@ def handle_inline(call):
         user_state[user_id] = 'normal'
         chat_id = call.message.chat.id
         send_path_content(chat_id, user_id, 'root', is_editing=False, reply_keyboard=get_keyboard(user_id))
+
+        # 2. Native Telegram alert popup (with OK button) over the main menu
+        try:
+            bot.answer_callback_query(
+                call.id,
+                get_tl_and_map("✅ Language updated!", target_lang),
+                show_alert=True,
+            )
+        except Exception:
+            pass
 
         # 3. Pre-warm in the background; when done, refresh the menu so it appears
         # fully translated without the user having to click again.
@@ -5743,7 +5745,7 @@ def handle_inline(call):
             except: pass
 
             proc_msg = global_w_setup.get('w_msg_processing', '♻️ Your Withdrawal of %withdraw% is processing on the blockchain...')
-            raw_text = get_tl_and_map(replace_macros(proc_msg, user_id, data['path'], data), lang)
+            raw_text = replace_macros(get_tl_and_map(proc_msg, lang), user_id, data['path'], data)
             
             match = re.search(r'%loading_bar(?:_(\d+(?:\.\d+)?)s)?%', raw_text)
             if match:
