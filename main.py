@@ -5724,11 +5724,15 @@ def handle_inline(call):
 
         user_db[user_id]['lang'] = target_lang
         chat_id = call.message.chat.id
-        current_path = user_current_path.get(user_id, 'root')
+
+        # Reset to root so the user always lands on a known, valid page after
+        # switching language (avoids stale state from the language menu).
+        user_current_path[user_id] = 'root'
+        user_state[user_id] = 'normal'
 
         # 1. Native Telegram alert popup (with OK button) — instant feedback.
-        # The language-selection MESSAGE itself stays in place so the title
-        # "Choose Language" / language menu does not jump or disappear.
+        # The language-selection MESSAGE itself stays in place (not deleted)
+        # so its title remains visible above the new main menu.
         try:
             bot.answer_callback_query(
                 call.id,
@@ -5738,18 +5742,17 @@ def handle_inline(call):
         except Exception:
             pass
 
-        # 2. Refresh ONLY the reply keyboard (so menu buttons translate) — we
-        # do this by sending a tiny invisible message that updates the keyboard
-        # then deleting it, leaving the language post intact.
+        # 2. Render the main menu immediately so the user gets the new
+        # translated reply keyboard right away — no /start needed.
         try:
-            tmp = bot.send_message(chat_id, "🌐", reply_markup=get_keyboard(user_id))
-            bot.delete_message(chat_id, tmp.message_id)
-        except Exception:
-            pass
+            send_path_content(chat_id, user_id, 'root', is_editing=False,
+                              reply_keyboard=get_keyboard(user_id))
+        except Exception as e:
+            print(f"language initial render error: {e}")
 
-        # 3. Pre-warm in the background. When done, re-render the CURRENT page
-        # (not root) so the user stays where they were and sees full translation.
-        def _bg_prewarm_and_refresh(uid=user_id, tlang=target_lang, cid=chat_id, cpath=current_path):
+        # 3. Pre-warm in the background. When done, re-render the main menu so
+        # any newly-cached strings show up fully translated.
+        def _bg_prewarm_and_refresh(uid=user_id, tlang=target_lang, cid=chat_id):
             try:
                 added = prewarm_language(tlang, timeout=20.0)
             except Exception as e:
@@ -5757,7 +5760,8 @@ def handle_inline(call):
                 added = 0
             if added > 0:
                 try:
-                    send_path_content(cid, uid, cpath, is_editing=False, reply_keyboard=get_keyboard(uid))
+                    send_path_content(cid, uid, 'root', is_editing=False,
+                                      reply_keyboard=get_keyboard(uid))
                 except Exception as e:
                     print(f"language refresh error: {e}")
 
@@ -6729,6 +6733,7 @@ if __name__ == '__main__':
     # Start the Auto-Save Database Thread
     print("💾 Starting JSON database auto-save thread...")
     threading.Thread(target=auto_save_loop, daemon=True).start()
+    
     # Start the Telegram Bot
     print("🚀 Bot is running fast! Press Ctrl+C to stop.")
     bot.infinity_polling(skip_pending=True)
