@@ -31,6 +31,7 @@ except ImportError:
     class GoogleTranslator:
         def __init__(self, source, target): pass
         def translate(self, text): return text
+        def translate_batch(self, texts): return list(texts)
 
 TL_CACHE = {}
 REVERSE_TL_MAP = {}
@@ -127,6 +128,96 @@ def get_tl_and_map(text, target_lang):
     REVERSE_TL_MAP[target_lang][tl_text] = text
 
     return tl_text
+
+
+def _collect_ui_strings():
+    """Collect all UI strings that may be shown to a user, for batch pre-translation."""
+    strings = set()
+    try:
+        for path, posts in menu_posts.items():
+            for p in posts:
+                if p.get('text'): strings.add(p['text'])
+                for b in p.get('custom_inlines', []) or []:
+                    if b.get('text') and b.get('mode') != 'set_lang':
+                        strings.add(b['text'])
+        for path, btns in menus.items():
+            for b in btns or []:
+                if isinstance(b, dict) and b.get('name'): strings.add(b['name'])
+                elif isinstance(b, str): strings.add(b)
+        for d in (global_w_setup, global_wallet_setup, global_bonus_setup,
+                  reinvest_settings, global_messages_setup, block_settings,
+                  subscription_settings, homepage_bonus_settings, invite_settings,
+                  deposit_broadcast_settings):
+            if isinstance(d, dict):
+                for v in d.values():
+                    if isinstance(v, str) and v.strip(): strings.add(v)
+        for c, dd in (deposit_settings or {}).items():
+            if isinstance(dd, dict):
+                for v in dd.values():
+                    if isinstance(v, str) and v.strip(): strings.add(v)
+        for p_macro, p_data in (bot_plans or {}).items():
+            if isinstance(p_data, dict):
+                for v in p_data.values():
+                    if isinstance(v, str) and v.strip(): strings.add(v)
+    except Exception as e:
+        print(f"_collect_ui_strings warning: {e}")
+    strings.update([
+        "Language updated!", "Action cancelled.", "Select a currency to deposit:",
+        "Error: Currency not configured.", "Action not permitted.", "Post not found.",
+        "Switching language...", "🌐 Switching language...",
+    ])
+    return [s for s in strings if isinstance(s, str) and s.strip()]
+
+
+def prewarm_language(target_lang, timeout=12.0):
+    """Translate every UI string into target_lang via batch API and store in TL_CACHE.
+
+    Returns the number of newly translated strings. Blocks up to `timeout` seconds.
+    """
+    if not target_lang or target_lang == 'en':
+        return 0
+    all_strings = _collect_ui_strings()
+    # Only translate strings not already cached (memory or CORE_TL_DATA)
+    pending = []
+    for s in all_strings:
+        if ('en', target_lang, s) in TL_CACHE:
+            continue
+        if s in CORE_TL_DATA and target_lang in CORE_TL_DATA[s]:
+            TL_CACHE[('en', target_lang, s)] = CORE_TL_DATA[s][target_lang]
+            continue
+        pending.append(s)
+    if not pending:
+        return 0
+
+    BATCH_SIZE = 25  # keep each HTTP request small enough to stay fast
+    batches = [pending[i:i + BATCH_SIZE] for i in range(0, len(pending), BATCH_SIZE)]
+
+    def _do_batch(batch):
+        try:
+            translator = GoogleTranslator(source='en', target=target_lang)
+            results = translator.translate_batch(batch)
+            return batch, results
+        except Exception as e:
+            print(f"prewarm batch error ({target_lang}): {e}")
+            return batch, None
+
+    futures = [_TL_EXECUTOR.submit(_do_batch, b) for b in batches]
+    done, _ = concurrent.futures.wait(futures, timeout=timeout)
+    added = 0
+    for fut in done:
+        try:
+            batch, results = fut.result()
+        except Exception:
+            continue
+        if not results:
+            continue
+        for src, tr in zip(batch, results):
+            if isinstance(tr, str) and tr.strip():
+                TL_CACHE[('en', target_lang, src)] = tr
+                REVERSE_TL_MAP.setdefault(target_lang, {})[tr] = src
+                added += 1
+    return added
+
 
 # --- 1. SECURITY VAULT (Environment Variables) ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -5296,13 +5387,25 @@ def handle_inline(call):
         else: target_lang = target_lang.lower()
 
         user_db[user_id]['lang'] = target_lang
-        bot.answer_callback_query(call.id, get_tl_and_map("Language updated!", target_lang), show_alert=True)
+
+        # Pre-warm translation cache so the new menu renders FULLY in the new language
+        # on the very first click. Uses batch API; bounded by an internal timeout.
+        bot.answer_callback_query(call.id)
+        try:
+            prewarm_language(target_lang, timeout=12.0)
+        except Exception as e:
+            print(f"prewarm_language error: {e}")
+
         try: bot.delete_message(call.message.chat.id, call.message.message_id)
         except: pass
-        
+
         user_current_path[user_id] = 'root'
         user_state[user_id] = 'normal'
         send_path_content(call.message.chat.id, user_id, 'root', is_editing=False, reply_keyboard=get_keyboard(user_id))
+        try:
+            bot.send_message(call.message.chat.id, get_tl_and_map("Language updated!", target_lang))
+        except Exception:
+            pass
         return
 
     if call.data.startswith('cb_calcbuy_'):
