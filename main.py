@@ -1747,31 +1747,107 @@ def send_path_content(chat_id, user_id, path, is_editing=False, reply_keyboard=N
             markup = reply_keyboard
             kb_attached = True
         
+        ptype = p.get('type', 'text')
+        # Telegram caption limit is 1024 chars for photo/video/animation/document.
+        # Plain message limit is 4096. Truncate captions to avoid 400 errors.
+        is_media_post = ptype in ('photo', 'video', 'animation', 'document') and p.get(ptype)
+        cap_full = final_text if final_text else None
+        if is_media_post and isinstance(cap_full, str) and len(cap_full) > 1024:
+            cap = cap_full[:1020] + '…'
+        else:
+            cap = cap_full
+
+        sent = _safe_render_post(
+            chat_id, ptype, p, cap, markup,
+            is_live_trading=meta.get('is_live_trading') and not is_editing,
+            user_id=user_id, path=path,
+        )
+        if sent is not None and is_editing:
+            editor_msg_ids.setdefault(user_id, []).append(sent.message_id)
+
+def _safe_send_media(send_func, *args, **kwargs):
+    """Try to send media with HTML parse_mode; on 400 (e.g. malformed entities
+    in a translated caption), retry with the caption / text HTML-stripped and
+    parse_mode dropped. Returns the sent Message or None."""
+    try:
+        return send_func(*args, **kwargs)
+    except telebot.apihelper.ApiTelegramException as e:
+        if '400' not in str(e):
+            raise
+        # Retry: strip HTML tags from caption (kw) and text (kw OR positional
+        # arg index 1, e.g. bot.send_message(chat_id, text)) and drop HTML mode.
         try:
-            ptype = p.get('type', 'text')
-            cap = final_text if final_text else None
-            if ptype == 'photo' and p.get('photo'):
-                sent = bot.send_photo(chat_id, p['photo'], caption=cap, parse_mode="HTML", reply_markup=markup)
-                if meta.get('is_live_trading') and not is_editing:
-                    threading.Thread(target=execute_live_trading_animation, args=(chat_id, sent.message_id, user_id, p['text'], path, True), daemon=True).start()
-            elif ptype == 'video' and p.get('video'):
-                sent = bot.send_video(chat_id, p['video'], caption=cap, parse_mode="HTML", reply_markup=markup, supports_streaming=True)
-            elif ptype == 'animation' and p.get('animation'):
-                sent = bot.send_animation(chat_id, p['animation'], caption=cap, parse_mode="HTML", reply_markup=markup)
-            elif ptype == 'document' and p.get('document'):
-                sent = bot.send_document(chat_id, p['document'], caption=cap, parse_mode="HTML", reply_markup=markup)
-            else:
-                safe_text = final_text if final_text else " "
-                sent = bot.send_message(chat_id, safe_text, parse_mode="HTML", reply_markup=markup)
-                if meta.get('is_live_trading') and not is_editing:
-                    threading.Thread(target=execute_live_trading_animation, args=(chat_id, sent.message_id, user_id, p['text'], path, False), daemon=True).start()
-                
-            if is_editing: editor_msg_ids.setdefault(user_id, []).append(sent.message_id)
-                
-        except Exception as e:
-            err_msg = f"⚠️ <b>Error rendering post:</b>\n<code>{html.escape(str(e))}</code>\n\n<i>Fix or delete this using the buttons below!</i>"
-            sent = bot.send_message(chat_id, err_msg, parse_mode="HTML", reply_markup=markup)
-            if is_editing: editor_msg_ids.setdefault(user_id, []).append(sent.message_id)
+            if kwargs.get('caption'):
+                kwargs['caption'] = re.sub(r'<[^>]+>', '', kwargs['caption'])
+            if kwargs.get('text'):
+                kwargs['text'] = re.sub(r'<[^>]+>', '', kwargs['text'])
+            args = list(args)
+            if len(args) >= 2 and isinstance(args[1], str) and '<' in args[1]:
+                args[1] = re.sub(r'<[^>]+>', '', args[1])
+            kwargs.pop('parse_mode', None)
+            return send_func(*args, **kwargs)
+        except Exception as e2:
+            print(f"_safe_send_media fallback failed: {e2}")
+            return None
+
+
+def _safe_render_post(chat_id, ptype, p, cap, markup, is_live_trading=False, user_id=None, path=None):
+    """Render a single menu post with type-aware sending and graceful fallbacks.
+    Catches Telegram 400 errors (malformed HTML, expired file_id, etc.) and
+    degrades to plain text rather than dumping a stack trace into chat."""
+    sent = None
+    try:
+        if ptype == 'photo' and p.get('photo'):
+            sent = _safe_send_media(bot.send_photo, chat_id, p['photo'],
+                                    caption=cap, parse_mode="HTML", reply_markup=markup)
+            if sent and is_live_trading:
+                threading.Thread(target=execute_live_trading_animation,
+                                 args=(chat_id, sent.message_id, user_id, p['text'], path, True),
+                                 daemon=True).start()
+        elif ptype == 'video' and p.get('video'):
+            # Send as animation so the video AUTOPLAYS in the chat (silent,
+            # GIF-style preview) — admins requested videos to play without
+            # the user having to tap the play button.
+            sent = _safe_send_media(bot.send_animation, chat_id, p['video'],
+                                    caption=cap, parse_mode="HTML", reply_markup=markup)
+            if sent is None:
+                # Fallback: some file_ids only work via send_video.
+                sent = _safe_send_media(bot.send_video, chat_id, p['video'],
+                                        caption=cap, parse_mode="HTML",
+                                        reply_markup=markup, supports_streaming=True)
+        elif ptype == 'animation' and p.get('animation'):
+            sent = _safe_send_media(bot.send_animation, chat_id, p['animation'],
+                                    caption=cap, parse_mode="HTML", reply_markup=markup)
+        elif ptype == 'document' and p.get('document'):
+            sent = _safe_send_media(bot.send_document, chat_id, p['document'],
+                                    caption=cap, parse_mode="HTML", reply_markup=markup)
+        else:
+            safe_text = cap if cap else " "
+            sent = _safe_send_media(bot.send_message, chat_id, safe_text,
+                                    parse_mode="HTML", reply_markup=markup)
+            if sent and is_live_trading:
+                threading.Thread(target=execute_live_trading_animation,
+                                 args=(chat_id, sent.message_id, user_id, p['text'], path, False),
+                                 daemon=True).start()
+    except Exception as e:
+        # Only show the error in chat for ADMINS — regular users should never
+        # see a stack trace inside a bot menu.
+        is_admin_view = user_id in ADMIN_IDS
+        if is_admin_view:
+            err_msg = f"⚠️ <b>Error rendering post:</b>\n<code>{html.escape(str(e))}</code>\n\n<i>Fix or delete this using the buttons below.</i>"
+            try:
+                sent = bot.send_message(chat_id, err_msg, parse_mode="HTML", reply_markup=markup)
+            except Exception:
+                sent = None
+        else:
+            # Last-resort plain-text send so the user still sees something.
+            try:
+                fallback = re.sub(r'<[^>]+>', '', cap) if cap else " "
+                sent = bot.send_message(chat_id, fallback or " ", reply_markup=markup)
+            except Exception:
+                sent = None
+    return sent
+
 
 def _bc_send_media(chat_id, bc_data, caption, markup):
     """Send a broadcast item using whichever media type was attached
@@ -2613,9 +2689,9 @@ def handle_messages(message):
         state = 'admin_messages_menu'
         
     if state == 'wait_support_msg':
-        bot.send_message(message.chat.id, "Sending... ⏳")
+        bot.send_message(message.chat.id, get_tl_and_map("Sending... ⏳", lang))
         time.sleep(1.5)
-        bot.send_message(message.chat.id, "✅ Your message has been routed securely to Support.", reply_markup=get_keyboard(user_id))
+        bot.send_message(message.chat.id, get_tl_and_map("✅ Your message has been routed securely to Support.", lang), reply_markup=get_keyboard(user_id))
         user_state[user_id] = 'normal'
         
         markup = InlineKeyboardMarkup()
@@ -5059,8 +5135,9 @@ def handle_messages(message):
 
 # --- HELPER: MASTER PLAN BUYING ENGINE WITH POPUPS & REDIRECTS ---
 def execute_plan_purchase_via_popup(user_id, chat_id, message_id, call_id, plan_id, invest_amount=None):
+    lang = get_user_lang(user_id)
     if plan_id not in bot_plans:
-        return bot.answer_callback_query(call_id, "⚠️ Plan not found.", show_alert=True)
+        return bot.answer_callback_query(call_id, get_tl_and_map("⚠️ Plan not found.", lang), show_alert=True)
         
     p_data = bot_plans[plan_id]
     
@@ -5068,8 +5145,6 @@ def execute_plan_purchase_via_popup(user_id, chat_id, message_id, call_id, plan_
         invest_amount = p_data.get('bonus_amount', 50.0)
     elif invest_amount is None:
         invest_amount = p_data['min']
-
-    lang = get_user_lang(user_id)
 
     if p_data.get('is_free', False) or plan_id == 'plan0':
         # --- FREE PLAN LOOPHOLE FIX ---
@@ -5162,13 +5237,13 @@ def handle_inline(call):
     # --- NEW ARCHITECTURE: HOMEPAGE POPUP GATEWAY ---
     if call.data == 'cb_claim_homepage':
         if user_db[user_id].get('has_seen_homepage', False):
-            bot.answer_callback_query(call.id, "⚠️ Already claimed.", show_alert=True)
+            bot.answer_callback_query(call.id, get_tl_and_map("⚠️ Already claimed.", lang), show_alert=True)
             try: bot.delete_message(call.message.chat.id, call.message.message_id)
             except: pass
             return
             
         p_data = bot_plans.get('plan0', {})
-        if not p_data: return bot.answer_callback_query(call.id, "Plan 0 not configured.", show_alert=True)
+        if not p_data: return bot.answer_callback_query(call.id, get_tl_and_map("Plan 0 not configured.", lang), show_alert=True)
             
         invest_amt = p_data.get('bonus_amount', 50.0)
             
@@ -5648,17 +5723,12 @@ def handle_inline(call):
         else: target_lang = target_lang.lower()
 
         user_db[user_id]['lang'] = target_lang
-
-        # 1. Delete the language-selection post and render the main menu first
-        try: bot.delete_message(call.message.chat.id, call.message.message_id)
-        except: pass
-
-        user_current_path[user_id] = 'root'
-        user_state[user_id] = 'normal'
         chat_id = call.message.chat.id
-        send_path_content(chat_id, user_id, 'root', is_editing=False, reply_keyboard=get_keyboard(user_id))
+        current_path = user_current_path.get(user_id, 'root')
 
-        # 2. Native Telegram alert popup (with OK button) over the main menu
+        # 1. Native Telegram alert popup (with OK button) — instant feedback.
+        # The language-selection MESSAGE itself stays in place so the title
+        # "Choose Language" / language menu does not jump or disappear.
         try:
             bot.answer_callback_query(
                 call.id,
@@ -5668,9 +5738,18 @@ def handle_inline(call):
         except Exception:
             pass
 
-        # 3. Pre-warm in the background; when done, refresh the menu so it appears
-        # fully translated without the user having to click again.
-        def _bg_prewarm_and_refresh(uid=user_id, tlang=target_lang, cid=chat_id):
+        # 2. Refresh ONLY the reply keyboard (so menu buttons translate) — we
+        # do this by sending a tiny invisible message that updates the keyboard
+        # then deleting it, leaving the language post intact.
+        try:
+            tmp = bot.send_message(chat_id, "🌐", reply_markup=get_keyboard(user_id))
+            bot.delete_message(chat_id, tmp.message_id)
+        except Exception:
+            pass
+
+        # 3. Pre-warm in the background. When done, re-render the CURRENT page
+        # (not root) so the user stays where they were and sees full translation.
+        def _bg_prewarm_and_refresh(uid=user_id, tlang=target_lang, cid=chat_id, cpath=current_path):
             try:
                 added = prewarm_language(tlang, timeout=20.0)
             except Exception as e:
@@ -5678,7 +5757,7 @@ def handle_inline(call):
                 added = 0
             if added > 0:
                 try:
-                    send_path_content(cid, uid, 'root', is_editing=False, reply_keyboard=get_keyboard(uid))
+                    send_path_content(cid, uid, cpath, is_editing=False, reply_keyboard=get_keyboard(uid))
                 except Exception as e:
                     print(f"language refresh error: {e}")
 
@@ -6650,7 +6729,6 @@ if __name__ == '__main__':
     # Start the Auto-Save Database Thread
     print("💾 Starting JSON database auto-save thread...")
     threading.Thread(target=auto_save_loop, daemon=True).start()
-    
     # Start the Telegram Bot
     print("🚀 Bot is running fast! Press Ctrl+C to stop.")
     bot.infinity_polling(skip_pending=True)
