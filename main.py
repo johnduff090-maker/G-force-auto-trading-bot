@@ -108,26 +108,19 @@ def get_tl_and_map(text, target_lang):
     if not tl_text and cache_key in TL_CACHE:
         tl_text = TL_CACHE[cache_key]
 
-    # 3. Bounded Google call: wait briefly, otherwise fall back to English
+    # 3. Not cached: return English INSTANTLY, fetch in background for next time.
     if not tl_text:
         with _TL_INFLIGHT_LOCK:
             already_fetching = cache_key in _TL_INFLIGHT
             if not already_fetching:
                 _TL_INFLIGHT.add(cache_key)
-
-        if already_fetching:
-            # Another request is already translating this; don't pile up. Use English now.
-            tl_text = text
-        else:
-            future = _TL_EXECUTOR.submit(_tl_fetch_and_cache, cache_key, text, target_lang)
+        if not already_fetching:
             try:
-                result = future.result(timeout=_TL_WAIT_SECONDS)
-                tl_text = result if result else text
-            except concurrent.futures.TimeoutError:
-                # Let it finish in background; return English so the bot stays instant.
-                tl_text = text
+                _TL_EXECUTOR.submit(_tl_fetch_and_cache, cache_key, text, target_lang)
             except Exception:
-                tl_text = text
+                with _TL_INFLIGHT_LOCK:
+                    _TL_INFLIGHT.discard(cache_key)
+        tl_text = text
 
     # Update REVERSE_TL_MAP so the bot recognizes buttons in this language
     if target_lang not in REVERSE_TL_MAP: REVERSE_TL_MAP[target_lang] = {}
