@@ -42,26 +42,50 @@ REVERSE_TL_MAP = {}
 #   - HTML tags like <b>, </code>
 _MACRO_RE = re.compile(r'(%[A-Za-z0-9_]+%|/[A-Za-z][A-Za-z0-9_]*|</?[A-Za-z][^>]*>)')
 
+# Private-Use Area: characters U+E000..U+F8FF have no defined meaning, so
+# Google Translate (and every other translation engine) passes them through
+# verbatim — no spacing, no full-width conversion, no case changes. This is
+# critical for Chinese / Japanese / Arabic where ASCII placeholders break.
+_PUA_BASE = 0xE000
+
 def _protect_tokens(text):
-    """Replace macros/commands/HTML tags with unobtrusive placeholders so Google
-    Translate leaves them alone. Returns (protected_text, token_map)."""
-    tokens = {}
+    """Replace macros/commands/HTML tags with PUA placeholders that survive
+    every translation engine intact. Returns (protected_text, token_map)."""
+    tokens = []
     def _sub(m):
-        idx = len(tokens)
-        ph = f"XQX{idx}XQX"  # capitalized letters Google rarely alters
-        tokens[ph] = m.group(0)
+        ph = chr(_PUA_BASE + len(tokens))
+        tokens.append((ph, m.group(0)))
         return ph
-    return _MACRO_RE.sub(_sub, text), tokens
+    protected = _MACRO_RE.sub(_sub, text)
+    return protected, tokens
 
 def _restore_tokens(text, tokens):
     if not tokens or not isinstance(text, str):
         return text
-    # Google may lower-case or insert spaces around our placeholders; normalize.
-    for ph, original in tokens.items():
+    for ph, original in tokens:
         text = text.replace(ph, original)
-        # Defensive: also try lowercase variant (some languages get lowercased)
-        text = text.replace(ph.lower(), original)
     return text
+
+# Normalize various language code aliases to what deep-translator expects.
+# Common pitfalls: Telegram/legacy codes vs Google's expected codes.
+_LANG_ALIAS = {
+    'iw': 'he',        # legacy Hebrew code -> Modern Hebrew
+    'in': 'id',        # legacy Indonesian
+    'ji': 'yi',        # legacy Yiddish
+    'jv': 'jw',        # Javanese
+    'zh': 'zh-CN',     # default Chinese to Simplified
+    'zh-cn': 'zh-CN',
+    'zh-tw': 'zh-TW',
+    'pt-br': 'pt',     # Brazilian Portuguese -> pt
+    'pt-pt': 'pt',
+    'nb': 'no',        # Norwegian Bokmål -> Norwegian
+}
+
+def _normalize_lang(code):
+    if not code or not isinstance(code, str):
+        return 'en'
+    low = code.strip().lower()
+    return _LANG_ALIAS.get(low, code if code == 'zh-CN' else low)
 
 # --- GLOBAL SPEED CACHE (Instant Translations for All 13 Languages) ---
 # This dictionary prevents timeouts by hardcoding core withdrawal phrases.
@@ -109,13 +133,18 @@ _TL_WAIT_SECONDS = 0.6
 def _tl_fetch_and_cache(cache_key, text, target_lang):
     try:
         protected, tokens = _protect_tokens(text)
-        result = GoogleTranslator(source='en', target=target_lang).translate(protected)
+        target_norm = _normalize_lang(target_lang)
+        result = GoogleTranslator(source='en', target=target_norm).translate(protected)
         if result:
             result = _restore_tokens(result, tokens)
-            TL_CACHE[cache_key] = result
-            if target_lang not in REVERSE_TL_MAP: REVERSE_TL_MAP[target_lang] = {}
-            REVERSE_TL_MAP[target_lang][result] = text
-            return result
+            # Skip caching when Google returned the input unchanged: that means
+            # the translation didn't actually happen (rate limit, unsupported
+            # source, etc.) and we don't want to lock in the English version.
+            if result.strip() and result.strip() != text.strip():
+                TL_CACHE[cache_key] = result
+                if target_lang not in REVERSE_TL_MAP: REVERSE_TL_MAP[target_lang] = {}
+                REVERSE_TL_MAP[target_lang][result] = text
+                return result
     except Exception as e:
         print(f"Translate error ({target_lang}): {e}")
     finally:
@@ -125,6 +154,8 @@ def _tl_fetch_and_cache(cache_key, text, target_lang):
 
 def get_tl_and_map(text, target_lang):
     if not text or target_lang == 'en': return text
+    target_lang = _normalize_lang(target_lang)
+    if target_lang == 'en': return text
 
     tl_text = None
 
@@ -190,10 +221,22 @@ def _collect_ui_strings():
                     if isinstance(v, str) and v.strip(): strings.add(v)
     except Exception as e:
         print(f"_collect_ui_strings warning: {e}")
+    # Core UI strings that appear on every keyboard / state for regular users.
     strings.update([
-        "Language updated!", "Action cancelled.", "Select a currency to deposit:",
-        "Error: Currency not configured.", "Action not permitted.", "Post not found.",
+        "Language updated!", "✅ Language updated!", "Action cancelled.",
+        "Select a currency to deposit:", "Error: Currency not configured.",
+        "Action not permitted.", "Post not found.",
         "Switching language...", "🌐 Switching language...",
+        # Reply keyboard core buttons
+        "❌ Cancel Action", "🔙 Back", "🏠 Home", "💵 Balance",
+        "🔐 Admin", "🎛️ Buttons Editor", "📝 Posts Editor",
+        "🔙 Back to Main", "🔙 Exit Balance", "🔙 Exit Button Settings",
+        # Common error / fallback messages
+        "⚠️ Invalid amount. Please enter numbers only.",
+        "⚠️ Invalid amount. Numbers only.",
+        "⚠️ Insufficient funds.",
+        "⛔️ You do not have permission to use this button.",
+        "🚫 You are currently blocked.",
     ])
     return [s for s in strings if isinstance(s, str) and s.strip()]
 
@@ -204,6 +247,9 @@ def prewarm_language(target_lang, timeout=12.0):
     Returns the number of newly translated strings. Blocks up to `timeout` seconds.
     """
     if not target_lang or target_lang == 'en':
+        return 0
+    target_norm = _normalize_lang(target_lang)
+    if target_norm == 'en':
         return 0
     all_strings = _collect_ui_strings()
     # Only translate strings not already cached (memory or CORE_TL_DATA)
@@ -222,26 +268,36 @@ def prewarm_language(target_lang, timeout=12.0):
     batches = [pending[i:i + BATCH_SIZE] for i in range(0, len(pending), BATCH_SIZE)]
 
     def _do_batch(batch):
+        # Protect macros/commands/HTML in each string before sending to Google
+        protected_batch = []
+        token_maps = []
+        for s in batch:
+            p, toks = _protect_tokens(s)
+            protected_batch.append(p)
+            token_maps.append(toks)
+        translator = GoogleTranslator(source='en', target=target_norm)
+        # First try the batch endpoint (fast: one HTTP request).
         try:
-            # Protect macros/commands/HTML in each string before sending to Google
-            protected_batch = []
-            token_maps = []
-            for s in batch:
-                p, toks = _protect_tokens(s)
-                protected_batch.append(p)
-                token_maps.append(toks)
-            translator = GoogleTranslator(source='en', target=target_lang)
             results = translator.translate_batch(protected_batch)
-            # Restore the original tokens in each result
-            if results:
-                results = [
-                    _restore_tokens(r, t) if isinstance(r, str) else r
-                    for r, t in zip(results, token_maps)
-                ]
-            return batch, results
         except Exception as e:
-            print(f"prewarm batch error ({target_lang}): {e}")
-            return batch, None
+            print(f"prewarm batch error ({target_lang}): {e}; falling back to per-string")
+            results = None
+        # If batch failed or returned bad data, fall back to per-string.
+        if not results or not isinstance(results, list) or len(results) != len(protected_batch):
+            results = []
+            for p in protected_batch:
+                try:
+                    r = translator.translate(p)
+                except Exception as e:
+                    print(f"per-string translate error ({target_lang}): {e}")
+                    r = None
+                results.append(r)
+        # Restore the original tokens in each result
+        results = [
+            _restore_tokens(r, t) if isinstance(r, str) else r
+            for r, t in zip(results, token_maps)
+        ]
+        return batch, results
 
     futures = [_TL_EXECUTOR.submit(_do_batch, b) for b in batches]
     done, _ = concurrent.futures.wait(futures, timeout=timeout)
@@ -254,10 +310,15 @@ def prewarm_language(target_lang, timeout=12.0):
         if not results:
             continue
         for src, tr in zip(batch, results):
-            if isinstance(tr, str) and tr.strip():
-                TL_CACHE[('en', target_lang, src)] = tr
-                REVERSE_TL_MAP.setdefault(target_lang, {})[tr] = src
-                added += 1
+            # Skip empty results and anything that came back equal to the source
+            # (means Google didn't actually translate it for this language).
+            if not (isinstance(tr, str) and tr.strip()):
+                continue
+            if tr.strip() == src.strip():
+                continue
+            TL_CACHE[('en', target_lang, src)] = tr
+            REVERSE_TL_MAP.setdefault(target_lang, {})[tr] = src
+            added += 1
     return added
 
 
@@ -3475,7 +3536,7 @@ def handle_messages(message):
         total_avail = u_dep + u_bal
 
         if amount > total_avail:
-            return bot.send_message(message.chat.id, get_tl_and_map(f"⚠️ Insufficient funds. You only have ${fmt_amt(total_avail)} available.", lang))
+            return bot.send_message(message.chat.id, get_tl_and_map("⚠️ Insufficient funds. You only have $%avail% available.", lang).replace('%avail%', fmt_amt(total_avail)))
 
         matched_plan_id = None
         matched_plan_data = None
@@ -3488,7 +3549,7 @@ def handle_messages(message):
         if not matched_plan_id:
             min_plan_amount = min(p['min'] for p in valid_plans.values())
             max_plan_amount = max(p['max'] for p in valid_plans.values())
-            return bot.send_message(message.chat.id, get_tl_and_map(f"⚠️ Amount does not match any plan. Please enter an amount between ${fmt_amt(min_plan_amount)} and ${fmt_amt(max_plan_amount)}.", lang))
+            return bot.send_message(message.chat.id, get_tl_and_map("⚠️ Amount does not match any plan. Please enter an amount between $%min% and $%max%.", lang).replace('%min%', fmt_amt(min_plan_amount)).replace('%max%', fmt_amt(max_plan_amount)))
 
         if u_dep >= amount:
             user_db[user_id]['deposit'] -= amount
@@ -3516,7 +3577,7 @@ def handle_messages(message):
         if not matched_plan_id:
             min_plan_amount = min(p['min'] for p in valid_plans.values())
             max_plan_amount = max(p['max'] for p in valid_plans.values())
-            return bot.send_message(message.chat.id, get_tl_and_map(f"⚠️ Amount does not match any plan. Please enter an amount between ${fmt_amt(min_plan_amount)} and ${fmt_amt(max_plan_amount)}.", lang))
+            return bot.send_message(message.chat.id, get_tl_and_map("⚠️ Amount does not match any plan. Please enter an amount between $%min% and $%max%.", lang).replace('%min%', fmt_amt(min_plan_amount)).replace('%max%', fmt_amt(max_plan_amount)))
 
         if u_dep >= amount:
             user_db[user_id]['deposit'] -= amount
@@ -3619,7 +3680,7 @@ def handle_messages(message):
                 else:
                     msg += f"Total Return: Lifetime\n\n"
 
-                markup.row(InlineKeyboardButton(get_tl_and_map(f"🛒 Buy {p_data['name']}", lang), callback_data=f"cb_calcbuy_{p_id}_{amount}"))
+                markup.row(InlineKeyboardButton(get_tl_and_map("🛒 Buy %plan_name%", lang).replace('%plan_name%', p_data['name']), callback_data=f"cb_calcbuy_{p_id}_{amount}"))
 
         if not found:
             msg += "❌ No plans available for this exact amount. Please check the minimum and maximum limits."
@@ -3637,7 +3698,7 @@ def handle_messages(message):
         p_data = bot_plans[p_id]
         
         if invest_amount < p_data['min'] or invest_amount > p_data['max']:
-            return bot.send_message(message.chat.id, get_tl_and_map(f"⚠️ Amount must be between <b>${p_data['min']}</b> and <b>${p_data['max']}</b>.", lang), parse_mode="HTML")
+            return bot.send_message(message.chat.id, get_tl_and_map("⚠️ Amount must be between <b>$%min%</b> and <b>$%max%</b>.", lang).replace('%min%', str(p_data['min'])).replace('%max%', str(p_data['max'])), parse_mode="HTML")
             
         u_dep = user_db[user_id].get('deposit', 0)
         u_bal = user_db[user_id].get('balance', 0)
@@ -3687,8 +3748,8 @@ def handle_messages(message):
         
         c_min = conf.get('min', 0.0)
         c_max = conf.get('max', float('inf'))
-        if usd_amount < c_min: return bot.send_message(message.chat.id, get_tl_and_map(f"⚠️ Minimum deposit is <b>${fmt_amt(c_min)} USD</b>.", lang), parse_mode="HTML")
-        if usd_amount > c_max: return bot.send_message(message.chat.id, get_tl_and_map(f"⚠️ Maximum deposit is <b>${fmt_amt(c_max)} USD</b>.", lang), parse_mode="HTML")
+        if usd_amount < c_min: return bot.send_message(message.chat.id, get_tl_and_map("⚠️ Minimum deposit is <b>$%min% USD</b>.", lang).replace('%min%', fmt_amt(c_min)), parse_mode="HTML")
+        if usd_amount > c_max: return bot.send_message(message.chat.id, get_tl_and_map("⚠️ Maximum deposit is <b>$%max% USD</b>.", lang).replace('%max%', fmt_amt(c_max)), parse_mode="HTML")
 
         user_action_data[user_id]['usd_amount'] = usd_amount
         
@@ -3706,10 +3767,10 @@ def handle_messages(message):
             }
             bars = frames.get(str(style_opt), frames['1'])
             
-            loading_msg = bot.send_message(message.chat.id, get_tl_and_map(f"🔄 <b>Initializing Secure Connection...</b>\n{bars[0]}", lang), parse_mode="HTML")
+            loading_msg = bot.send_message(message.chat.id, get_tl_and_map("🔄 <b>Initializing Secure Connection...</b>\n%bar%", lang).replace('%bar%', bars[0]), parse_mode="HTML")
             for bar in bars[1:]:
                 time.sleep(0.5)
-                try: bot.edit_message_text(get_tl_and_map(f"🔄 <b>Generating Wallet...</b>\n{bar}", lang), message.chat.id, loading_msg.message_id, parse_mode="HTML")
+                try: bot.edit_message_text(get_tl_and_map("🔄 <b>Generating Wallet...</b>\n%bar%", lang).replace('%bar%', bar), message.chat.id, loading_msg.message_id, parse_mode="HTML")
                 except: pass
 
             if 'USDT' in curr:
@@ -4130,7 +4191,7 @@ def handle_messages(message):
         total_avail = u_dep + u_bal
 
         if amount > total_avail:
-            return bot.send_message(message.chat.id, get_tl_and_map(f"⚠️ Insufficient funds. You only have ${fmt_amt(total_avail)} available.", lang))
+            return bot.send_message(message.chat.id, get_tl_and_map("⚠️ Insufficient funds. You only have $%avail% available.", lang).replace('%avail%', fmt_amt(total_avail)))
 
         matched_plan_id = None
         matched_plan_data = None
@@ -4143,7 +4204,7 @@ def handle_messages(message):
         if not matched_plan_id:
             min_plan_amount = min(p['min'] for p in valid_plans.values())
             max_plan_amount = max(p['max'] for p in valid_plans.values())
-            return bot.send_message(message.chat.id, get_tl_and_map(f"⚠️ Amount does not match any plan. Please enter an amount between ${fmt_amt(min_plan_amount)} and ${fmt_amt(max_plan_amount)}.", lang))
+            return bot.send_message(message.chat.id, get_tl_and_map("⚠️ Amount does not match any plan. Please enter an amount between $%min% and $%max%.", lang).replace('%min%', fmt_amt(min_plan_amount)).replace('%max%', fmt_amt(max_plan_amount)))
 
         if u_dep >= amount:
             user_db[user_id]['deposit'] -= amount
@@ -4434,7 +4495,7 @@ def handle_messages(message):
             bot.send_message(message.chat.id, "Select the balance to manage:", reply_markup=get_keyboard(user_id))
         else:
             bal = user_db[user_id]['balance']
-            bot.send_message(message.chat.id, get_tl_and_map(f"Balance: ${fmt_amt(bal)}", lang))
+            bot.send_message(message.chat.id, get_tl_and_map("Balance: $%bal%", lang).replace('%bal%', fmt_amt(bal)))
         return
 
     if state == 'bal_select':
@@ -4573,12 +4634,12 @@ def handle_messages(message):
         w_min = float(global_w_setup.get('w_min') or 0)
         w_max = float(global_w_setup.get('w_max') or float('inf'))
         
-        if amount < w_min: return bot.send_message(message.chat.id, get_tl_and_map(f"⚠️ Minimum withdrawal is {w_min}.", lang))
-        if amount > w_max: return bot.send_message(message.chat.id, get_tl_and_map(f"⚠️ Maximum withdrawal is {w_max}.", lang))
+        if amount < w_min: return bot.send_message(message.chat.id, get_tl_and_map("⚠️ Minimum withdrawal is %min%.", lang).replace('%min%', str(w_min)))
+        if amount > w_max: return bot.send_message(message.chat.id, get_tl_and_map("⚠️ Maximum withdrawal is %max%.", lang).replace('%max%', str(w_max)))
             
         w_var = global_w_setup.get('w_var', 'balance')
         user_bal = user_db[user_id].get(w_var, 0)
-        if amount > user_bal: return bot.send_message(message.chat.id, get_tl_and_map(f"❌ Insufficient funds. Your {w_var} balance is {fmt_amt(user_bal)}.", lang))
+        if amount > user_bal: return bot.send_message(message.chat.id, get_tl_and_map("❌ Insufficient funds. Your %balance_type% balance is %balance%.", lang).replace('%balance_type%', w_var).replace('%balance%', fmt_amt(user_bal)))
             
         user_action_data[user_id]['amount'] = amount
         
@@ -4832,7 +4893,7 @@ def handle_messages(message):
                     bot.send_message(message.chat.id, replace_macros(get_tl_and_map(fail_msg, lang), user_id, custom_btn_path), parse_mode="HTML", reply_markup=markup)
                 else:
                     user_state[user_id] = 'wait_reinvest_amount'
-                    bot.send_message(message.chat.id, get_tl_and_map(f"🔄 <b>Reinvest</b>\n\nAvailable Balance: ${fmt_amt(total_avail)}\nMinimum Investment: ${fmt_amt(min_plan_amount)}\n\nEnter the amount you wish to reinvest:", lang), parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+                    bot.send_message(message.chat.id, get_tl_and_map("🔄 <b>Reinvest</b>\n\nAvailable Balance: $%avail%\nMinimum Investment: $%min%\n\nEnter the amount you wish to reinvest:", lang).replace('%avail%', fmt_amt(total_avail)).replace('%min%', fmt_amt(min_plan_amount)), parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
                 return
 
             has_submenus = custom_btn_path in menus and len(menus[custom_btn_path]) > 0
@@ -4879,7 +4940,7 @@ def execute_plan_purchase_via_popup(user_id, chat_id, message_id, call_id, plan_
         # --- FREE PLAN LOOPHOLE FIX ---
         if user_db[user_id].get('has_claimed_free_plan', False) or any(p['macro'] == plan_id for p in user_db[user_id].get('active_plans', [])):
             user_db[user_id]['has_claimed_free_plan'] = True # Lock it down permanently if they snuck in
-            return bot.answer_callback_query(call_id, get_tl_and_map(f"❌ Access Denied: You have already claimed your one-time Free Plan!", lang), show_alert=True)
+            return bot.answer_callback_query(call_id, get_tl_and_map("❌ Access Denied: You have already claimed your one-time Free Plan!", lang), show_alert=True)
             
         user_db[user_id]['has_claimed_free_plan'] = True # Set flag to true immediately
         
@@ -4890,7 +4951,7 @@ def execute_plan_purchase_via_popup(user_id, chat_id, message_id, call_id, plan_
         }
         user_db[user_id]['active_plans'].append(new_plan)
         log_tx(user_id, f"Activated Free {p_data['name']}", invest_amount)
-        bot.answer_callback_query(call_id, get_tl_and_map(f"🎉 Success! Activated {p_data['name']} with ${fmt_amt(invest_amount)} virtual capital!", lang), show_alert=True)
+        bot.answer_callback_query(call_id, get_tl_and_map("🎉 Success! Activated %plan_name% with $%amount% virtual capital!", lang).replace('%plan_name%', p_data['name']).replace('%amount%', fmt_amt(invest_amount)), show_alert=True)
         
         user_current_path[user_id] = 'root'
         send_path_content(chat_id, user_id, 'root', False)
@@ -4902,7 +4963,7 @@ def execute_plan_purchase_via_popup(user_id, chat_id, message_id, call_id, plan_
     
     if total_avail < invest_amount:
         user_db[user_id]['pending_plan'] = plan_id
-        bot.answer_callback_query(call_id, get_tl_and_map(f"⚠️ Insufficient funds! You need ${fmt_amt(invest_amount)}.", lang), show_alert=True)
+        bot.answer_callback_query(call_id, get_tl_and_map("⚠️ Insufficient funds! You need $%amount%.", lang).replace('%amount%', fmt_amt(invest_amount)), show_alert=True)
         
         redirect_cmd = p_data.get('redirect_cmd') or '/deposit'
         try: bot.delete_message(chat_id, message_id)
@@ -4931,7 +4992,7 @@ def execute_plan_purchase_via_popup(user_id, chat_id, message_id, call_id, plan_
     }
     user_db[user_id]['active_plans'].append(new_plan)
     
-    bot.answer_callback_query(call_id, get_tl_and_map(f"🎉 Success! You invested ${fmt_amt(invest_amount)} into {p_data['name']}! Profit is accruing automatically.", lang), show_alert=True)
+    bot.answer_callback_query(call_id, get_tl_and_map("🎉 Success! You invested $%amount% into %plan_name%! Profit is accruing automatically.", lang).replace('%amount%', fmt_amt(invest_amount)).replace('%plan_name%', p_data['name']), show_alert=True)
     try: bot.delete_message(chat_id, message_id)
     except Exception: pass
     
