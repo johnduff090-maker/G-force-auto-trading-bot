@@ -3702,9 +3702,15 @@ def handle_messages(message):
         # IMPORTANT: This ensures the Dashboard sees the changes immediately
         user_state[user_id] = 'normal'
         
-        # Success message with both Email and Wallet confirmed
+        # Success message with both Email and Wallet confirmed.
+        # Translate the LABELS only; the user's email/address/network stay
+        # verbatim because they are inserted AFTER translation via macros.
         user_email = user_db[user_id].get('email', 'Not Set')
-        msg = f"✅ <b>Success!</b>\n\n<b>Email:</b> {user_email}\n<b>Wallet:</b> {addr}\n<b>Network:</b> {user_db[user_id]['wallet_net']}"
+        msg_tpl = "✅ <b>Success!</b>\n\n<b>Email:</b> %email%\n<b>Wallet:</b> %wallet%\n<b>Network:</b> %network%"
+        msg = (get_tl_and_map(msg_tpl, lang)
+               .replace('%email%', user_email)
+               .replace('%wallet%', addr)
+               .replace('%network%', user_db[user_id]['wallet_net']))
         bot.send_message(message.chat.id, msg, parse_mode="HTML", reply_markup=get_keyboard(user_id))
         return
 
@@ -5123,7 +5129,7 @@ def handle_inline(call):
             bot.delete_message(call.message.chat.id, call.message.message_id)
         except: pass
             
-        bot.answer_callback_query(call.id, get_tl_and_map(f"🎉 Success! You claimed ${fmt_amt(invest_amt)} capital!", lang), show_alert=True)
+        bot.answer_callback_query(call.id, get_tl_and_map("🎉 Success! You claimed $%amount% capital!", lang).replace('%amount%', fmt_amt(invest_amt)), show_alert=True)
             
         # THE MAGIC TRIGGER: USER CLEARED THE FINAL GATE
         finalize_user_registration(user_id)
@@ -5282,16 +5288,18 @@ def handle_inline(call):
             }
             bars = frames.get(str(style_opt), frames['1'])
             
-            loading_msg = bot.send_message(call.message.chat.id, get_tl_and_map(f"⏳ <b>Generating Unique Link...</b>\n{bars[0]}", lang), parse_mode="HTML")
+            loading_msg = bot.send_message(call.message.chat.id, get_tl_and_map("⏳ <b>Generating Unique Link...</b>\n%bar%", lang).replace('%bar%', bars[0]), parse_mode="HTML")
             for bar in bars[1:]:
                 time.sleep(0.4)
-                try: bot.edit_message_text(get_tl_and_map(f"⏳ <b>Generating Unique Link...</b>\n{bar}", lang), call.message.chat.id, loading_msg.message_id, parse_mode="HTML")
+                try: bot.edit_message_text(get_tl_and_map("⏳ <b>Generating Unique Link...</b>\n%bar%", lang).replace('%bar%', bar), call.message.chat.id, loading_msg.message_id, parse_mode="HTML")
                 except: pass
                 
             try: bot.delete_message(call.message.chat.id, loading_msg.message_id)
             except: pass
             
-        bot.send_message(call.message.chat.id, get_tl_and_map(f"✅ <b>Your Unique Referral Link:</b>\n\n{ref_link}", lang), parse_mode="HTML")
+        # IMPORTANT: translate the label only; the link itself must NEVER
+        # pass through the translator (it would be mangled in CJK / Arabic).
+        bot.send_message(call.message.chat.id, get_tl_and_map("✅ <b>Your Unique Referral Link:</b>\n\n%link%", lang).replace('%link%', ref_link), parse_mode="HTML")
         return
 
     if call.data.startswith('cb_question_'):
@@ -5511,11 +5519,11 @@ def handle_inline(call):
         }
         bar_styles = frames.get(str(style_opt), frames['1'])
         
-        scan_msg = bot.send_message(call.message.chat.id, get_tl_and_map(f"⏳ <b>Checking Blockchain...</b>\n[▯▯▯▯▯▯▯▯▯▯] 0%", lang), parse_mode="HTML")
+        scan_msg = bot.send_message(call.message.chat.id, get_tl_and_map("⏳ <b>Checking Blockchain...</b>\n%bar%", lang).replace('%bar%', '[▯▯▯▯▯▯▯▯▯▯] 0%'), parse_mode="HTML")
         
         for bar in bar_styles:
             time.sleep(0.4) 
-            try: bot.edit_message_text(get_tl_and_map(f"⏳ <b>Checking Blockchain...</b>\n{bar}", lang), call.message.chat.id, scan_msg.message_id, parse_mode="HTML")
+            try: bot.edit_message_text(get_tl_and_map("⏳ <b>Checking Blockchain...</b>\n%bar%", lang).replace('%bar%', bar), call.message.chat.id, scan_msg.message_id, parse_mode="HTML")
             except: pass
 
         found_deposit, crypto_amount, txid_found, _ = check_address_for_new_deposit(addr, curr)
@@ -5543,11 +5551,11 @@ def handle_inline(call):
             # --- LIVE CHANNEL HOOK ---
             broadcast_real_deposit(user_id, usd_value, crypto_amount, curr, txid_found)
             
-            try: bot.send_message(call.message.chat.id, get_tl_and_map(f"✅ <b>Deposit Successful!</b>\nAmount: {fmt_amt(crypto_amount)} {curr.split('_')[0]}\nCredited: ${fmt_amt(usd_value)}", lang), parse_mode="HTML")
+            try: bot.send_message(call.message.chat.id, get_tl_and_map("✅ <b>Deposit Successful!</b>\nAmount: %crypto% %currency%\nCredited: $%usd%", lang).replace('%crypto%', fmt_amt(crypto_amount)).replace('%currency%', curr.split('_')[0]).replace('%usd%', fmt_amt(usd_value)), parse_mode="HTML")
             except: pass
             
         else:
-            try: bot.send_message(call.message.chat.id, get_tl_and_map(f"⏳ <b>Pending:</b> Your transaction is still waiting for blockchain confirmation. Please wait a moment and click Confirm again.", lang), parse_mode="HTML")
+            try: bot.send_message(call.message.chat.id, get_tl_and_map("⏳ <b>Pending:</b> Your transaction is still waiting for blockchain confirmation. Please wait a moment and click Confirm again.", lang), parse_mode="HTML")
             except: pass
             
         try: bot.delete_message(call.message.chat.id, scan_msg.message_id)
@@ -5638,7 +5646,7 @@ def handle_inline(call):
         
         if total_avail < p_data['min']:
             user_db[user_id]['pending_plan'] = plan_id
-            bot.answer_callback_query(call.id, get_tl_and_map(f"⚠️ Insufficient balance. You need at least ${fmt_amt(p_data['min'])}.", lang), show_alert=True)
+            bot.answer_callback_query(call.id, get_tl_and_map("⚠️ Insufficient balance. You need at least $%min%.", lang).replace('%min%', fmt_amt(p_data['min'])), show_alert=True)
             
             redirect_cmd = p_data.get('redirect_cmd') or '/deposit'
             try: bot.delete_message(call.message.chat.id, call.message.message_id)
@@ -5655,7 +5663,7 @@ def handle_inline(call):
         user_action_data[user_id]['buy_plan_id'] = plan_id
             
         user_state[user_id] = 'buyplan_wait_amount'
-        bot.send_message(call.message.chat.id, get_tl_and_map(f"📈 <b>{p_data['name']}</b>\nMin: ${fmt_amt(p_data['min'])} | Max: ${fmt_amt(p_data['max'])}\n\nAvailable Balance: ${fmt_amt(total_avail)}\n\nEnter the amount you wish to invest:", lang), parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+        bot.send_message(call.message.chat.id, get_tl_and_map("📈 <b>%plan_name%</b>\nMin: $%min% | Max: $%max%\n\nAvailable Balance: $%avail%\n\nEnter the amount you wish to invest:", lang).replace('%plan_name%', p_data['name']).replace('%min%', fmt_amt(p_data['min'])).replace('%max%', fmt_amt(p_data['max'])).replace('%avail%', fmt_amt(total_avail)), parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
         bot.answer_callback_query(call.id)
         return
 
@@ -5719,7 +5727,7 @@ def handle_inline(call):
         
         try:
             target_lang = get_user_lang(target)
-            bot.send_message(target, get_tl_and_map(f"❌ <b>Deposit Rejected</b>\nYour deposit request for <b>${fmt_amt(dep['amount'])}</b> could not be verified.", target_lang), parse_mode="HTML")
+            bot.send_message(target, get_tl_and_map("❌ <b>Deposit Rejected</b>\nYour deposit request for <b>$%amount%</b> could not be verified.", target_lang).replace('%amount%', fmt_amt(dep['amount'])), parse_mode="HTML")
             if call.message.photo: bot.edit_message_caption(f"{call.message.caption}\n\n❌ **REJECTED**", call.message.chat.id, call.message.message_id, reply_markup=None)
             else: bot.edit_message_text(f"{call.message.text}\n\n❌ **REJECTED**", call.message.chat.id, call.message.message_id, reply_markup=None)
         except Exception: pass
