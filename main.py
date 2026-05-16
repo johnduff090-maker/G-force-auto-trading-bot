@@ -4,6 +4,7 @@ import uuid
 import time
 import os
 import threading
+import concurrent.futures
 import requests
 import json
 import html
@@ -69,33 +70,69 @@ CORE_TL_DATA = {
     }
 }
 
+# Bounded thread pool for non-blocking Google Translate calls.
+_TL_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix='tl')
+_TL_INFLIGHT = set()  # cache_keys currently being fetched, to avoid duplicate calls
+_TL_INFLIGHT_LOCK = threading.Lock()
+# Max time we let the user wait for a fresh translation before falling back to English.
+# The translation will still complete in the background and be cached for next time.
+_TL_WAIT_SECONDS = 0.6
+
+def _tl_fetch_and_cache(cache_key, text, target_lang):
+    try:
+        result = GoogleTranslator(source='en', target=target_lang).translate(text)
+        if result:
+            TL_CACHE[cache_key] = result
+            if target_lang not in REVERSE_TL_MAP: REVERSE_TL_MAP[target_lang] = {}
+            REVERSE_TL_MAP[target_lang][result] = text
+            return result
+    except Exception as e:
+        print(f"Translate error ({target_lang}): {e}")
+    finally:
+        with _TL_INFLIGHT_LOCK:
+            _TL_INFLIGHT.discard(cache_key)
+    return None
+
 def get_tl_and_map(text, target_lang):
     if not text or target_lang == 'en': return text
-    
+
     tl_text = None
-    
-    # 1. Check the Instant Global Speed Cache first
+
+    # 1. Instant Global Speed Cache
     if text in CORE_TL_DATA and target_lang in CORE_TL_DATA[text]:
         tl_text = CORE_TL_DATA[text][target_lang]
-    
-    # 2. If not in Speed Cache, check the standard memory cache (TL_CACHE)
+
+    cache_key = ('en', target_lang, text)
+
+    # 2. Memory cache
+    if not tl_text and cache_key in TL_CACHE:
+        tl_text = TL_CACHE[cache_key]
+
+    # 3. Bounded Google call: wait briefly, otherwise fall back to English
     if not tl_text:
-        cache_key = ('en', target_lang, text)
-        if cache_key in TL_CACHE:
-            tl_text = TL_CACHE[cache_key]
+        with _TL_INFLIGHT_LOCK:
+            already_fetching = cache_key in _TL_INFLIGHT
+            if not already_fetching:
+                _TL_INFLIGHT.add(cache_key)
+
+        if already_fetching:
+            # Another request is already translating this; don't pile up. Use English now.
+            tl_text = text
         else:
-            # 3. As a last resort, call Google Translate
+            future = _TL_EXECUTOR.submit(_tl_fetch_and_cache, cache_key, text, target_lang)
             try:
-                tl_text = GoogleTranslator(source='en', target=target_lang).translate(text)
-                TL_CACHE[cache_key] = tl_text
-            except:
-                # If Google times out, return English so the bot doesn't glitch
+                result = future.result(timeout=_TL_WAIT_SECONDS)
+                tl_text = result if result else text
+            except concurrent.futures.TimeoutError:
+                # Let it finish in background; return English so the bot stays instant.
+                tl_text = text
+            except Exception:
                 tl_text = text
 
     # Update REVERSE_TL_MAP so the bot recognizes buttons in this language
     if target_lang not in REVERSE_TL_MAP: REVERSE_TL_MAP[target_lang] = {}
     REVERSE_TL_MAP[target_lang][tl_text] = text
-    
+
     return tl_text
 
 # --- 1. SECURITY VAULT (Environment Variables) ---
@@ -254,7 +291,9 @@ def save_database():
         # --- NEW ARCHITECTURE: SAVE MASTER GATEWAY CONFIGS ---
         'subscription_settings': subscription_settings,
         'homepage_bonus_settings': homepage_bonus_settings,
-        'deposit_broadcast_settings': deposit_broadcast_settings # <--- ADD THIS LINE
+        'deposit_broadcast_settings': deposit_broadcast_settings, # <--- ADD THIS LINE
+        # Persist translation cache so non-English users get instant responses across restarts.
+        'tl_cache': {f"{k[1]}|{k[2]}": v for k, v in TL_CACHE.items()}
     }
     try:
         conn = psycopg2.connect(DATABASE_URL)
@@ -317,6 +356,18 @@ menus = db_data.get('menus', {'root': []})
 menu_posts = db_data.get('menu_posts', {'root': [{'id': 'init', 'type': 'text', 'text': 'Welcome to the Main Menu! Select an option below:', 'photo': None}]})
 btn_metadata = db_data.get('btn_metadata', {})
 processed_txids = set(db_data.get('processed_txids', []))
+
+# Restore persisted translation cache so non-English users are instant after restarts.
+try:
+    _saved_tl = db_data.get('tl_cache', {}) or {}
+    for _k, _v in _saved_tl.items():
+        if isinstance(_k, str) and '|' in _k and isinstance(_v, str):
+            _lang, _src = _k.split('|', 1)
+            TL_CACHE[('en', _lang, _src)] = _v
+            REVERSE_TL_MAP.setdefault(_lang, {})[_v] = _src
+    print(f"🌐 Loaded {len(TL_CACHE)} cached translations")
+except Exception as _e:
+    print(f"TL cache restore error: {_e}")
 
 blocked_users = set(db_data.get('blocked_users', []))
 block_settings = db_data.get('block_settings', {
