@@ -123,7 +123,8 @@ CORE_TL_DATA = {
 }
 
 # Bounded thread pool for non-blocking Google Translate calls.
-_TL_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix='tl')
+# Larger pool = many strings translate in parallel on first language switch.
+_TL_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=16, thread_name_prefix='tl')
 _TL_INFLIGHT = set()  # cache_keys currently being fetched, to avoid duplicate calls
 _TL_INFLIGHT_LOCK = threading.Lock()
 # Max time we let the user wait for a fresh translation before falling back to English.
@@ -287,7 +288,7 @@ def prewarm_language(target_lang, timeout=12.0):
     if not pending:
         return 0
 
-    BATCH_SIZE = 25  # keep each HTTP request small enough to stay fast
+    BATCH_SIZE = 80  # bigger batches = fewer HTTP round-trips on language switch
     batches = [pending[i:i + BATCH_SIZE] for i in range(0, len(pending), BATCH_SIZE)]
 
     def _do_batch(batch):
@@ -1251,9 +1252,11 @@ def check_and_trigger_auto_buy(user_id):
         user_db[user_id]['pending_plan'] = None
         
         try:
-            msg = f"🎉 <b>Auto-Purchase Successful!</b>\n\nYour deposit triggered your pending plan.\n<b>{p_data['name']}</b> is now active with an investment of <b>${fmt_amt(invest_amt)}</b>!"
             lang = get_user_lang(user_id)
-            bot.send_message(user_id, get_tl_and_map(msg, lang), parse_mode="HTML")
+            msg = (get_tl_and_map("🎉 <b>Auto-Purchase Successful!</b>\n\nYour deposit triggered your pending plan.\n<b>%plan_name%</b> is now active with an investment of <b>$%amount%</b>!", lang)
+                   .replace('%plan_name%', p_data['name'])
+                   .replace('%amount%', fmt_amt(invest_amt)))
+            bot.send_message(user_id, msg, parse_mode="HTML")
         except Exception: pass
 
 def process_accruals(user_id):
@@ -1745,11 +1748,18 @@ def send_path_content(chat_id, user_id, path, is_editing=False, reply_keyboard=N
             kb_attached = True
         
         try:
-            if p['type'] == 'photo':
-                cap = final_text if final_text else None
+            ptype = p.get('type', 'text')
+            cap = final_text if final_text else None
+            if ptype == 'photo' and p.get('photo'):
                 sent = bot.send_photo(chat_id, p['photo'], caption=cap, parse_mode="HTML", reply_markup=markup)
                 if meta.get('is_live_trading') and not is_editing:
                     threading.Thread(target=execute_live_trading_animation, args=(chat_id, sent.message_id, user_id, p['text'], path, True), daemon=True).start()
+            elif ptype == 'video' and p.get('video'):
+                sent = bot.send_video(chat_id, p['video'], caption=cap, parse_mode="HTML", reply_markup=markup, supports_streaming=True)
+            elif ptype == 'animation' and p.get('animation'):
+                sent = bot.send_animation(chat_id, p['animation'], caption=cap, parse_mode="HTML", reply_markup=markup)
+            elif ptype == 'document' and p.get('document'):
+                sent = bot.send_document(chat_id, p['document'], caption=cap, parse_mode="HTML", reply_markup=markup)
             else:
                 safe_text = final_text if final_text else " "
                 sent = bot.send_message(chat_id, safe_text, parse_mode="HTML", reply_markup=markup)
@@ -1762,6 +1772,48 @@ def send_path_content(chat_id, user_id, path, is_editing=False, reply_keyboard=N
             err_msg = f"⚠️ <b>Error rendering post:</b>\n<code>{html.escape(str(e))}</code>\n\n<i>Fix or delete this using the buttons below!</i>"
             sent = bot.send_message(chat_id, err_msg, parse_mode="HTML", reply_markup=markup)
             if is_editing: editor_msg_ids.setdefault(user_id, []).append(sent.message_id)
+
+def _bc_send_media(chat_id, bc_data, caption, markup):
+    """Send a broadcast item using whichever media type was attached
+    (photo / video / animation / document) or fall back to plain text."""
+    cap = caption if caption else None
+    if bc_data.get('photo'):
+        bot.send_photo(chat_id, bc_data['photo'], caption=cap, parse_mode="HTML", reply_markup=markup)
+    elif bc_data.get('video'):
+        bot.send_video(chat_id, bc_data['video'], caption=cap, parse_mode="HTML", reply_markup=markup, supports_streaming=True)
+    elif bc_data.get('animation'):
+        bot.send_animation(chat_id, bc_data['animation'], caption=cap, parse_mode="HTML", reply_markup=markup)
+    elif bc_data.get('document'):
+        bot.send_document(chat_id, bc_data['document'], caption=cap, parse_mode="HTML", reply_markup=markup)
+    else:
+        bot.send_message(chat_id, cap or " ", parse_mode="HTML", reply_markup=markup)
+
+def _build_post_from_message(message, formatted_text):
+    """Build a menu_posts entry from an incoming Telegram message,
+    auto-detecting photo / video / animation (GIF) / document."""
+    post = {
+        'id': str(uuid.uuid4())[:8],
+        'type': 'text',
+        'text': formatted_text,
+        'photo': None,
+        'video': None,
+        'animation': None,
+        'document': None,
+        'custom_inlines': []
+    }
+    if getattr(message, 'photo', None):
+        post['type'] = 'photo'
+        post['photo'] = message.photo[-1].file_id
+    elif getattr(message, 'video', None):
+        post['type'] = 'video'
+        post['video'] = message.video.file_id
+    elif getattr(message, 'animation', None):
+        post['type'] = 'animation'
+        post['animation'] = message.animation.file_id
+    elif getattr(message, 'document', None):
+        post['type'] = 'document'
+        post['document'] = message.document.file_id
+    return post
 
 def extract_html(message):
     text = message.text or message.caption or ""
@@ -1945,12 +1997,10 @@ def get_keyboard_raw(user_id):
     is_admin = user_id in ADMIN_IDS
     
     if is_admin:
-        if state == 'posts_editing':
-            markup.row(KeyboardButton('➕ Add Message'))
-            markup.row(KeyboardButton('Pagination in Editor (10)'))
-            markup.row(KeyboardButton('🎛️ Buttons Editor'), KeyboardButton('🛑 Stop Editor'))
-            return markup
-
+        # NOTE: posts_editing used to return here, hiding all the menu buttons.
+        # That blocked navigation while editing posts. Now it falls through to
+        # the regular menu rendering below (just like the 'editing' state),
+        # and the post-editor specific buttons get appended near the bottom.
         if state in ['posts_adding', 'posts_insert_after', 'posts_rep_text', 'posts_rep_all']:
             markup.row(KeyboardButton('❌ Cancel Action'))
             return markup
@@ -2163,6 +2213,11 @@ def get_keyboard_raw(user_id):
         if user_clipboard.get(user_id):
             markup.row(KeyboardButton(f'📋 Paste "{user_clipboard[user_id]["name"]}"'))
         markup.row(KeyboardButton('🛑 Stop Editor'), KeyboardButton('📝 Posts Editor'))
+    elif state == 'posts_editing':
+        # Post-editor specific bottom bar — menu nav buttons above remain
+        # visible so admin can navigate submenus while editing posts.
+        markup.row(KeyboardButton('➕ Add Message'), KeyboardButton('🎛️ Buttons Editor'))
+        markup.row(KeyboardButton('🛑 Stop Editor'))
     elif state == 'normal':
         markup.row(KeyboardButton('🎛️ Buttons Editor'), KeyboardButton('📝 Posts Editor'))
         if current_path == 'root':
@@ -2315,7 +2370,7 @@ def send_welcome(message):
     send_path_content(message.chat.id, user_id, 'root', is_editing=False, reply_keyboard=get_keyboard(user_id))
 
 
-@bot.message_handler(content_types=['text', 'photo'])
+@bot.message_handler(content_types=['text', 'photo', 'video', 'animation', 'document'])
 def handle_messages(message):
     # 🛑 2. THE STEALTH SILENCER (Ignores all group chat text instantly)
     if message.chat.type != 'private':
@@ -2673,14 +2728,23 @@ def handle_messages(message):
 
     if text == '📢 Broadcast Message' and is_admin:
         user_state[user_id] = 'admin_broadcast_input'
-        user_action_data[user_id] = {'broadcast': {'text': '', 'photo': None, 'inlines': []}}
-        bot.send_message(message.chat.id, "Send the text or photo for the broadcast message:", reply_markup=get_cancel_action_keyboard())
+        user_action_data[user_id] = {'broadcast': {'text': '', 'photo': None, 'video': None, 'animation': None, 'document': None, 'inlines': []}}
+        bot.send_message(message.chat.id, "Send the text, photo, video, GIF, or document for the broadcast message:", reply_markup=get_cancel_action_keyboard())
         return
 
     if state == 'admin_broadcast_input':
         user_action_data[user_id]['broadcast']['text'] = formatted_text
+        bc = user_action_data[user_id]['broadcast']
+        # Reset any previously attached media so re-sends work cleanly.
+        bc['photo'] = bc['video'] = bc['animation'] = bc['document'] = None
         if message.photo:
-            user_action_data[user_id]['broadcast']['photo'] = message.photo[-1].file_id
+            bc['photo'] = message.photo[-1].file_id
+        elif getattr(message, 'video', None):
+            bc['video'] = message.video.file_id
+        elif getattr(message, 'animation', None):
+            bc['animation'] = message.animation.file_id
+        elif getattr(message, 'document', None):
+            bc['document'] = message.document.file_id
         user_state[user_id] = 'admin_broadcast_action'
         markup = ReplyKeyboardMarkup(resize_keyboard=True)
         markup.row(KeyboardButton('➕ Add Inline'), KeyboardButton('✅ Proceed'))
@@ -2712,10 +2776,7 @@ def handle_messages(message):
             rmarkup.row(KeyboardButton('🚀 Send Broadcast'), KeyboardButton('❌ Cancel Action'))
             
             bot.send_message(message.chat.id, "<b>Preview of Broadcast:</b>", parse_mode="HTML", reply_markup=rmarkup)
-            if bc_data['photo']:
-                bot.send_photo(message.chat.id, bc_data['photo'], caption=bc_data['text'], parse_mode="HTML", reply_markup=markup if markup.keyboard else None)
-            else:
-                bot.send_message(message.chat.id, bc_data['text'] or " ", parse_mode="HTML", reply_markup=markup if markup.keyboard else None)
+            _bc_send_media(message.chat.id, bc_data, bc_data.get('text'), markup if markup.keyboard else None)
         return
 
     if state == 'bc_wait_mode':
@@ -2796,10 +2857,7 @@ def handle_messages(message):
                                 else: tl_row.append(InlineKeyboardButton(tl_btn_text, callback_data=btn.callback_data))
                             tl_markup.row(*tl_row)
 
-                    if bc_data['photo']:
-                        bot.send_photo(uid, bc_data['photo'], caption=tl_text, parse_mode="HTML", reply_markup=tl_markup)
-                    else:
-                        bot.send_message(uid, tl_text or " ", parse_mode="HTML", reply_markup=tl_markup)
+                    _bc_send_media(uid, bc_data, tl_text, tl_markup)
                     sent_count += 1
                 except telebot.apihelper.ApiTelegramException as e:
                     if 'Forbidden' in str(e) or 'chat not found' in str(e) or 'deactivated' in str(e):
@@ -3145,13 +3203,7 @@ def handle_messages(message):
 
     if state == 'posts_adding':
         if current_path not in menu_posts: menu_posts[current_path] = []
-        new_post = {
-            'id': str(uuid.uuid4())[:8],
-            'type': 'photo' if message.photo else 'text',
-            'text': formatted_text,
-            'photo': message.photo[-1].file_id if message.photo else None,
-            'custom_inlines': []
-        }
+        new_post = _build_post_from_message(message, formatted_text)
         menu_posts[current_path].append(new_post)
         user_state[user_id] = 'posts_editing'
         bot.send_message(message.chat.id, get_tl_and_map("✅ Message added successfully!", lang), reply_markup=get_keyboard(user_id))
@@ -3172,9 +3224,14 @@ def handle_messages(message):
         p_id = user_action_data[user_id]['post_id']
         post = next((p for p in menu_posts.get(current_path, []) if p['id'] == p_id), None)
         if post:
-            post['type'] = 'photo' if message.photo else 'text'
-            post['text'] = formatted_text
-            post['photo'] = message.photo[-1].file_id if message.photo else None
+            rebuilt = _build_post_from_message(message, formatted_text)
+            # Preserve id and custom_inlines; replace media + text
+            post['type'] = rebuilt['type']
+            post['text'] = rebuilt['text']
+            post['photo'] = rebuilt.get('photo')
+            post['video'] = rebuilt.get('video')
+            post['animation'] = rebuilt.get('animation')
+            post['document'] = rebuilt.get('document')
         user_state[user_id] = 'posts_editing'
         bot.send_message(message.chat.id, get_tl_and_map("✅ Message completely replaced!", lang), reply_markup=get_keyboard(user_id))
         send_path_content(message.chat.id, user_id, current_path, True)
@@ -3185,13 +3242,7 @@ def handle_messages(message):
         posts_list = menu_posts.get(current_path, [])
         idx = next((i for i, p in enumerate(posts_list) if p['id'] == p_id), -1)
         
-        new_post = {
-            'id': str(uuid.uuid4())[:8],
-            'type': 'photo' if message.photo else 'text',
-            'text': formatted_text,
-            'photo': message.photo[-1].file_id if message.photo else None,
-            'custom_inlines': []
-        }
+        new_post = _build_post_from_message(message, formatted_text)
         if idx != -1:
             posts_list.insert(idx + 1, new_post)
         else:
@@ -3664,8 +3715,11 @@ def handle_messages(message):
         }
         user_db[user_id]['active_plans'].append(new_plan)
 
-        succ_msg = reinvest_settings['msg_success'].replace('%amount%', f"{fmt_amt(amount)}").replace('%plan_name%', matched_plan_data['name'])
-        bot.send_message(message.chat.id, get_tl_and_map(replace_macros(succ_msg, user_id, user_current_path[user_id]), lang), parse_mode="HTML", reply_markup=get_keyboard(user_id))
+        # Translate the TEMPLATE first (with %amount% / %plan_name% intact),
+        # then substitute the actual amount and plan name.
+        succ_translated = get_tl_and_map(reinvest_settings['msg_success'], lang)
+        succ_msg = succ_translated.replace('%amount%', f"{fmt_amt(amount)}").replace('%plan_name%', matched_plan_data['name'])
+        bot.send_message(message.chat.id, replace_macros(succ_msg, user_id, user_current_path[user_id]), parse_mode="HTML", reply_markup=get_keyboard(user_id))
         user_state[user_id] = 'normal'
         return
 
@@ -3804,8 +3858,11 @@ def handle_messages(message):
         user_db[user_id]['active_plans'].append(new_plan)
         
         user_state[user_id] = 'normal'
-        msg = f"🎉 <b>Success!</b>\nYou invested <b>${fmt_amt(invest_amount)}</b> into <b>{p_data['name']}</b>!\nYour profit is accruing automatically."
-        bot.send_message(message.chat.id, get_tl_and_map(msg, lang), parse_mode="HTML", reply_markup=get_keyboard(user_id))
+        # Translate the static template first, then inject dynamic values.
+        msg = (get_tl_and_map("🎉 <b>Success!</b>\nYou invested <b>$%amount%</b> into <b>%plan_name%</b>!\nYour profit is accruing automatically.", lang)
+               .replace('%amount%', fmt_amt(invest_amount))
+               .replace('%plan_name%', p_data['name']))
+        bot.send_message(message.chat.id, msg, parse_mode="HTML", reply_markup=get_keyboard(user_id))
         return
 
     # --- ENHANCED USER DEPOSIT FLOW ENGINE (WITH ORACLE & HD WALLETS) ---
@@ -4297,8 +4354,11 @@ def handle_messages(message):
         }
         user_db[user_id]['active_plans'].append(new_plan)
 
-        succ_msg = reinvest_settings['msg_success'].replace('%amount%', f"{fmt_amt(amount)}").replace('%plan_name%', matched_plan_data['name'])
-        bot.send_message(message.chat.id, get_tl_and_map(replace_macros(succ_msg, user_id, user_current_path[user_id]), lang), parse_mode="HTML", reply_markup=get_keyboard(user_id))
+        # Translate the TEMPLATE first (with %amount% / %plan_name% intact),
+        # then substitute the actual amount and plan name.
+        succ_translated = get_tl_and_map(reinvest_settings['msg_success'], lang)
+        succ_msg = succ_translated.replace('%amount%', f"{fmt_amt(amount)}").replace('%plan_name%', matched_plan_data['name'])
+        bot.send_message(message.chat.id, replace_macros(succ_msg, user_id, user_current_path[user_id]), parse_mode="HTML", reply_markup=get_keyboard(user_id))
         user_state[user_id] = 'normal'
         return
 
@@ -4465,7 +4525,7 @@ def handle_messages(message):
             return
         elif text == '➕ Add Message':
             user_state[user_id] = 'posts_adding'
-            bot.send_message(message.chat.id, "Send the text or photo for the new message:", reply_markup=get_cancel_action_keyboard())
+            bot.send_message(message.chat.id, "Send the text, photo, video, GIF, or document for the new message:", reply_markup=get_cancel_action_keyboard())
             return
         elif text.startswith('Pagination'):
             bot.send_message(message.chat.id, "Pagination settings acknowledged. (Logic pending).", reply_markup=get_keyboard(user_id))
@@ -5457,13 +5517,16 @@ def handle_inline(call):
             if mode == 'm':
                 msg_template = global_w_setup.get('w_msg_approve')
                 if msg_template:
-                    msg = replace_macros(msg_template, target, w_data['path'], w_data)
+                    # Translate TEMPLATE first (with macros intact), THEN replace
+                    # macros — otherwise the user's name/address would be sent
+                    # to Google and mangled in CJK/Arabic.
+                    msg = replace_macros(get_tl_and_map(msg_template, target_lang), target, w_data['path'], w_data)
                     
                     payout_markup = InlineKeyboardMarkup()
                     btn_text = global_w_setup.get('payout_btn_text', '📜 View Receipt')
                     payout_markup.row(InlineKeyboardButton(get_tl_and_map(btn_text, target_lang), callback_data='cb_payout_popup_alert'))
                     
-                    try: bot.send_message(target, get_tl_and_map(msg, target_lang), parse_mode="HTML", reply_markup=payout_markup)
+                    try: bot.send_message(target, msg, parse_mode="HTML", reply_markup=payout_markup)
                     except: pass
             
             pub_chat = global_w_setup.get('public_report')
@@ -5484,8 +5547,8 @@ def handle_inline(call):
             if mode == 'm':
                 msg_template = global_w_setup.get('w_msg_decline')
                 if msg_template:
-                    msg = replace_macros(msg_template, target, w_data['path'], w_data)
-                    try: bot.send_message(target, get_tl_and_map(msg, target_lang), parse_mode="HTML")
+                    msg = replace_macros(get_tl_and_map(msg_template, target_lang), target, w_data['path'], w_data)
+                    try: bot.send_message(target, msg, parse_mode="HTML")
                     except: pass
 
         elif action == 'ign':
@@ -5493,8 +5556,8 @@ def handle_inline(call):
             if mode == 'm':
                 msg_template = global_w_setup.get('w_msg_ignore')
                 if msg_template:
-                    msg = replace_macros(msg_template, target, w_data['path'], w_data)
-                    try: bot.send_message(target, get_tl_and_map(msg, target_lang), parse_mode="HTML")
+                    msg = replace_macros(get_tl_and_map(msg_template, target_lang), target, w_data['path'], w_data)
+                    try: bot.send_message(target, msg, parse_mode="HTML")
                     except: pass
         
         return bot.answer_callback_query(call.id, "Action executed successfully.")
@@ -5815,7 +5878,7 @@ def handle_inline(call):
             user_action_data[user_id] = {'post_id': post_id}
             post = next((p for p in menu_posts.get(current_path, []) if p['id'] == post_id), None)
             curr_txt = post['text'] if post else ""
-            bot.send_message(call.message.chat.id, f"Send the new message (text or photo):\n\nℹ️ <b>Current Text:</b>\n\n{curr_txt}", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+            bot.send_message(call.message.chat.id, f"Send the new message (text, photo, video, GIF, or document):\n\nℹ️ <b>Current Text:</b>\n\n{curr_txt}", parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
             
         elif action == 'add':
             user_state[user_id] = 'posts_insert_after'
