@@ -140,7 +140,11 @@ def _tl_fetch_and_cache(cache_key, text, target_lang):
             # Skip caching when Google returned the input unchanged: that means
             # the translation didn't actually happen (rate limit, unsupported
             # source, etc.) and we don't want to lock in the English version.
-            if result.strip() and result.strip() != text.strip():
+            # Also skip if any %macro%, /command, or HTML tag from the source
+            # didn't make it back into the result.
+            if (result.strip()
+                    and result.strip() != text.strip()
+                    and _tokens_intact(text, result)):
                 TL_CACHE[cache_key] = result
                 if target_lang not in REVERSE_TL_MAP: REVERSE_TL_MAP[target_lang] = {}
                 REVERSE_TL_MAP[target_lang][result] = text
@@ -152,6 +156,18 @@ def _tl_fetch_and_cache(cache_key, text, target_lang):
             _TL_INFLIGHT.discard(cache_key)
     return None
 
+def _tokens_intact(source, translated):
+    """Return True iff every %macro% / /command / HTML tag that appears in
+    `source` also appears verbatim in `translated`. Used to detect cached
+    translations that lost their macros (e.g. older entries cached before the
+    PUA-placeholder fix, where Chinese turned %address% into %地址%)."""
+    if not isinstance(translated, str):
+        return False
+    for tok in _MACRO_RE.findall(source):
+        if tok not in translated:
+            return False
+    return True
+
 def get_tl_and_map(text, target_lang):
     if not text or target_lang == 'en': return text
     target_lang = _normalize_lang(target_lang)
@@ -161,13 +177,20 @@ def get_tl_and_map(text, target_lang):
 
     # 1. Instant Global Speed Cache
     if text in CORE_TL_DATA and target_lang in CORE_TL_DATA[text]:
-        tl_text = CORE_TL_DATA[text][target_lang]
+        candidate = CORE_TL_DATA[text][target_lang]
+        if _tokens_intact(text, candidate):
+            tl_text = candidate
 
     cache_key = ('en', target_lang, text)
 
-    # 2. Memory cache
+    # 2. Memory cache (validate macros survived)
     if not tl_text and cache_key in TL_CACHE:
-        tl_text = TL_CACHE[cache_key]
+        candidate = TL_CACHE[cache_key]
+        if _tokens_intact(text, candidate):
+            tl_text = candidate
+        else:
+            # Stale entry from before the PUA fix; drop it so we re-fetch.
+            TL_CACHE.pop(cache_key, None)
 
     # 3. Not cached: return English INSTANTLY, fetch in background for next time.
     if not tl_text:
@@ -315,6 +338,9 @@ def prewarm_language(target_lang, timeout=12.0):
             if not (isinstance(tr, str) and tr.strip()):
                 continue
             if tr.strip() == src.strip():
+                continue
+            # Skip results that lost a %macro% / /command / HTML tag.
+            if not _tokens_intact(src, tr):
                 continue
             TL_CACHE[('en', target_lang, src)] = tr
             REVERSE_TL_MAP.setdefault(target_lang, {})[tr] = src
@@ -599,12 +625,19 @@ processed_txids = set(db_data.get('processed_txids', []))
 # Restore persisted translation cache so non-English users are instant after restarts.
 try:
     _saved_tl = db_data.get('tl_cache', {}) or {}
+    _skipped = 0
     for _k, _v in _saved_tl.items():
         if isinstance(_k, str) and '|' in _k and isinstance(_v, str):
             _lang, _src = _k.split('|', 1)
+            # Drop stale entries where macros/commands/HTML tags were mangled
+            # by an older translation pass (pre-PUA-placeholder). These will
+            # be re-fetched cleanly on next use.
+            if not _tokens_intact(_src, _v):
+                _skipped += 1
+                continue
             TL_CACHE[('en', _lang, _src)] = _v
             REVERSE_TL_MAP.setdefault(_lang, {})[_v] = _src
-    print(f"🌐 Loaded {len(TL_CACHE)} cached translations")
+    print(f"🌐 Loaded {len(TL_CACHE)} cached translations" + (f" (skipped {_skipped} stale)" if _skipped else ""))
 except Exception as _e:
     print(f"TL cache restore error: {_e}")
 
