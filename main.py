@@ -5915,18 +5915,13 @@ def handle_inline(call):
         user_current_path[user_id] = 'root'
         user_state[user_id] = 'normal'
 
-        # 1. Dismiss the inline tap immediately so Telegram doesn't show
-        # a spinner on the language button.
-        try:
-            bot.answer_callback_query(call.id)
-        except Exception:
-            pass
-
-        # 2. SYNCHRONOUSLY translate the root-page strings + reply keyboard
-        # before we render anything. This is what guarantees the user never
-        # sees English flash on the first switch. The batch endpoint sends
-        # all strings in ONE HTTP request so total wall-clock is ~300-1500ms
-        # even for fresh languages. Subsequent visits hit TL_CACHE → instant.
+        # 1. SYNCHRONOUSLY translate the root-page strings + reply keyboard
+        # + the popup label before we answer the callback. This is what
+        # guarantees the user never sees English flash on the first switch.
+        # The batch endpoint sends all strings in ONE HTTP request so total
+        # wall-clock is ~300-1500ms even for fresh languages. Subsequent
+        # visits hit TL_CACHE → instant. Telegram allows up to ~10s before
+        # the callback times out, so a 4s cap is safely within budget.
         try:
             root_strings = _collect_path_strings('root')
             # Also include the main reply keyboard labels (Balance, Admin,
@@ -5937,11 +5932,24 @@ def handle_inline(call):
                     for btn in row:
                         if btn.get('text'):
                             root_strings.add(btn['text'])
-            # Always include the success popup string.
+            # Always include the success popup string so the native alert
+            # below is already cached and renders in the target language.
             root_strings.add("✅ Language updated!")
             _bulk_prewarm(root_strings, target_lang, timeout=4.0)
         except Exception as e:
             print(f"language sync prewarm error: {e}")
+
+        # 2. Native Telegram alert popup (with OK button) — instant feedback
+        # in the user's new language. The language-selection MESSAGE itself
+        # stays in place so its title remains visible above the new main menu.
+        try:
+            bot.answer_callback_query(
+                call.id,
+                get_tl_and_map("✅ Language updated!", target_lang),
+                show_alert=True,
+            )
+        except Exception:
+            pass
 
         # 3. Render the main menu — every visible string is now cached.
         try:
@@ -5950,15 +5958,7 @@ def handle_inline(call):
         except Exception as e:
             print(f"language initial render error: {e}")
 
-        # 4. Confirmation popup AFTER the menu renders (so the user has
-        # something translated to look at when they tap OK).
-        try:
-            bot.send_message(chat_id,
-                             get_tl_and_map("✅ Language updated!", target_lang))
-        except Exception:
-            pass
-
-        # 5. Background prewarm of ALL remaining UI strings so future pages
+        # 4. Background prewarm of ALL remaining UI strings so future pages
         # (deposit, withdraw, plans, history…) are instant when navigated to.
         def _bg_prewarm_full(uid=user_id, tlang=target_lang):
             try:
