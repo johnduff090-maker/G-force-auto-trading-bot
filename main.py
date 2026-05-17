@@ -127,12 +127,14 @@ CORE_TL_DATA = {
 _TL_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=16, thread_name_prefix='tl')
 _TL_INFLIGHT = {}  # cache_key -> Future, to coalesce duplicate fetches and let callers wait
 _TL_INFLIGHT_LOCK = threading.Lock()
-# Max time we let the user wait for a fresh translation before falling back
-# to English. Buttons MUST translate before being shown, so we wait long
-# enough for Google Translate to respond (typical: 200-800ms). Once cached
-# the translation is instant for every future call (and survives restarts
-# via the persistent TL_CACHE).
-_TL_WAIT_SECONDS = 5.0
+# Max time we let the user wait for a single fresh translation before falling
+# back to English. Buttons MUST translate before being shown, but we cap the
+# wait short so a slow Google response never freezes the UI. The translation
+# still completes in the background and is cached for next time.
+_TL_WAIT_SECONDS = 2.5
+# Total wall-clock budget for the bulk prewarm we run before each render.
+# Most languages return ≤1.5s even for 30 strings (single batch HTTP call).
+_TL_BULK_TIMEOUT = 3.0
 
 def _tl_fetch_and_cache(cache_key, text, target_lang):
     """Worker run inside _TL_EXECUTOR. Returns the translated string on success
@@ -1642,12 +1644,52 @@ def execute_live_trading_animation(chat_id, msg_id, user_id, base_text, full_pat
                 break
             pass
 
-def _bulk_prewarm(strings, target_lang):
-    """Submit all uncached strings to the translator pool IN PARALLEL and
-    wait for them to finish (up to _TL_WAIT_SECONDS total). After this returns,
-    a single sequential pass of get_tl_and_map() will mostly hit cache instead
-    of blocking once per string. Used right before rendering a menu so the
-    user never sees a half-translated keyboard."""
+def _bulk_translate_batch(strings, target_lang):
+    """Translate a list of English strings into target_lang in ONE Google
+    Translate batch HTTP request (much faster than one request per string).
+    Writes successful results into TL_CACHE + REVERSE_TL_MAP. Returns nothing."""
+    if not strings:
+        return
+    target_norm = _normalize_lang(target_lang)
+    protected_batch, token_maps = [], []
+    for s in strings:
+        p, toks = _protect_tokens(s)
+        protected_batch.append(p)
+        token_maps.append(toks)
+    translator = GoogleTranslator(source='en', target=target_norm)
+    try:
+        results = translator.translate_batch(protected_batch)
+    except Exception as e:
+        print(f"bulk_prewarm batch error ({target_lang}): {e}")
+        results = None
+    if not results or not isinstance(results, list) or len(results) != len(protected_batch):
+        # Batch failed — fall back to per-string so we still cache what we can.
+        results = []
+        for p in protected_batch:
+            try:
+                results.append(translator.translate(p))
+            except Exception:
+                results.append(None)
+    for src, raw, toks in zip(strings, results, token_maps):
+        if not (isinstance(raw, str) and raw.strip()):
+            continue
+        tr = _restore_tokens(raw, toks)
+        if tr.strip() == src.strip():
+            continue
+        if not _tokens_intact(src, tr):
+            continue
+        TL_CACHE[('en', target_lang, src)] = tr
+        REVERSE_TL_MAP.setdefault(target_lang, {})[tr] = src
+
+
+def _bulk_prewarm(strings, target_lang, timeout=None):
+    """Translate all uncached `strings` into `target_lang` and store them in
+    TL_CACHE. Uses Google's batch endpoint = one HTTP request for the whole
+    set, instead of one request per string. Total wall-clock is dominated by
+    a single Google round-trip (~300ms-1.5s). Capped at `timeout` seconds.
+
+    Call this right BEFORE rendering a menu so the per-string get_tl_and_map()
+    calls below mostly hit cache and the user never sees English text flash."""
     if not strings or not target_lang or target_lang == 'en':
         return
     target_lang = _normalize_lang(target_lang)
@@ -1664,26 +1706,15 @@ def _bulk_prewarm(strings, target_lang):
         pending.append(s)
     if not pending:
         return
-    futures = []
-    with _TL_INFLIGHT_LOCK:
-        for s in pending:
-            ck = ('en', target_lang, s)
-            fut = _TL_INFLIGHT.get(ck)
-            if fut is None:
-                try:
-                    fut = _TL_EXECUTOR.submit(_tl_fetch_and_cache, ck, s, target_lang)
-                    _TL_INFLIGHT[ck] = fut
-                except Exception:
-                    fut = None
-            if fut is not None:
-                futures.append(fut)
-    if futures:
-        # Wait for ALL fetches to finish in parallel — total wall-clock is
-        # dominated by the SLOWEST fetch, not the sum.
-        try:
-            concurrent.futures.wait(futures, timeout=_TL_WAIT_SECONDS)
-        except Exception:
-            pass
+    fut = _TL_EXECUTOR.submit(_bulk_translate_batch, pending, target_lang)
+    try:
+        fut.result(timeout=timeout or _TL_BULK_TIMEOUT)
+    except concurrent.futures.TimeoutError:
+        # Still translating — strings the user doesn't see immediately will
+        # be cached for the next render.
+        pass
+    except Exception as e:
+        print(f"_bulk_prewarm error: {e}")
 
 
 def _collect_path_strings(path):
@@ -5133,13 +5164,30 @@ def handle_messages(message):
                 return
 
             if meta.get('is_wallet') and state != 'posts_editing':
-                msg = replace_macros(get_tl_and_map(global_wallet_setup['msg_main'], lang), user_id, custom_btn_path)
+                # Bulk-prewarm the two strings we're about to translate so the
+                # second get_tl_and_map() call hits cache instead of blocking.
                 w_status = user_db[user_id].get('wallet', 'Not Set')
-                btn_text = get_tl_and_map(global_wallet_setup['inline_change'] if w_status != 'Not Set' else global_wallet_setup['inline_set'], lang)
-                
+                inline_label_src = global_wallet_setup['inline_change'] if w_status != 'Not Set' else global_wallet_setup['inline_set']
+                _bulk_prewarm({global_wallet_setup['msg_main'], inline_label_src}, lang)
+
+                msg = replace_macros(get_tl_and_map(global_wallet_setup['msg_main'], lang), user_id, custom_btn_path)
+                btn_text = get_tl_and_map(inline_label_src, lang)
+
                 markup = InlineKeyboardMarkup()
                 markup.row(InlineKeyboardButton(btn_text, callback_data='cb_wallet_start'))
-                bot.send_message(message.chat.id, msg, reply_markup=markup, parse_mode='HTML')
+                # Use safe-send so a malformed-HTML translation can't silently
+                # 400 and leave the user staring at an unresponsive button.
+                sent = _safe_send_media(bot.send_message, message.chat.id, msg,
+                                        parse_mode='HTML', reply_markup=markup)
+                if sent is None:
+                    # Final fallback: send the English original so the user
+                    # always sees the wallet panel even if Google glitched.
+                    try:
+                        en_msg = replace_macros(global_wallet_setup['msg_main'], user_id, custom_btn_path)
+                        bot.send_message(message.chat.id, en_msg,
+                                         parse_mode='HTML', reply_markup=markup)
+                    except Exception as e:
+                        print(f"wallet panel send error: {e}")
                 return
 
             if meta.get('is_bonus') and state != 'posts_editing':
@@ -5822,12 +5870,29 @@ def handle_inline(call):
 
     if call.data == 'cb_wallet_start':
         bot.answer_callback_query(call.id)
-        if global_wallet_setup['ask_email'] and user_db[user_id].get('email', 'Not Set') == 'Not Set':
+        # Prewarm both possible prompts so the next get_tl_and_map() is instant.
+        _bulk_prewarm({global_wallet_setup.get('msg_email_prompt', ''),
+                       global_wallet_setup.get('msg_prompt', '')}, lang)
+        if global_wallet_setup.get('ask_email') and user_db[user_id].get('email', 'Not Set') == 'Not Set':
             user_state[user_id] = 'wallet_wait_email'
-            bot.send_message(call.message.chat.id, get_tl_and_map(global_wallet_setup['msg_email_prompt'], lang), reply_markup=get_cancel_action_keyboard())
+            prompt_src = global_wallet_setup.get('msg_email_prompt', '✏️ Please enter your Email address:')
+            prompt_tl = get_tl_and_map(prompt_src, lang)
+            sent = _safe_send_media(bot.send_message, call.message.chat.id, prompt_tl,
+                                    reply_markup=get_cancel_action_keyboard())
+            if sent is None:
+                bot.send_message(call.message.chat.id, prompt_src,
+                                 reply_markup=get_cancel_action_keyboard())
         else:
             user_state[user_id] = 'wallet_wait_address'
-            bot.send_message(call.message.chat.id, get_tl_and_map(global_wallet_setup['msg_prompt'], lang), parse_mode="HTML", reply_markup=get_cancel_action_keyboard())
+            prompt_src = global_wallet_setup.get('msg_prompt', '✏️ Send your wallet address:')
+            prompt_tl = get_tl_and_map(prompt_src, lang)
+            sent = _safe_send_media(bot.send_message, call.message.chat.id, prompt_tl,
+                                    parse_mode="HTML",
+                                    reply_markup=get_cancel_action_keyboard())
+            if sent is None:
+                bot.send_message(call.message.chat.id, prompt_src,
+                                 parse_mode="HTML",
+                                 reply_markup=get_cancel_action_keyboard())
         return
 
     if call.data.startswith('cb_lang_'):
@@ -5850,42 +5915,58 @@ def handle_inline(call):
         user_current_path[user_id] = 'root'
         user_state[user_id] = 'normal'
 
-        # 1. Native Telegram alert popup (with OK button) — instant feedback.
-        # The language-selection MESSAGE itself stays in place (not deleted)
-        # so its title remains visible above the new main menu.
+        # 1. Dismiss the inline tap immediately so Telegram doesn't show
+        # a spinner on the language button.
         try:
-            bot.answer_callback_query(
-                call.id,
-                get_tl_and_map("✅ Language updated!", target_lang),
-                show_alert=True,
-            )
+            bot.answer_callback_query(call.id)
         except Exception:
             pass
 
-        # 2. Render the main menu immediately so the user gets the new
-        # translated reply keyboard right away — no /start needed.
+        # 2. SYNCHRONOUSLY translate the root-page strings + reply keyboard
+        # before we render anything. This is what guarantees the user never
+        # sees English flash on the first switch. The batch endpoint sends
+        # all strings in ONE HTTP request so total wall-clock is ~300-1500ms
+        # even for fresh languages. Subsequent visits hit TL_CACHE → instant.
+        try:
+            root_strings = _collect_path_strings('root')
+            # Also include the main reply keyboard labels (Balance, Admin,
+            # 🏠 Home, 🔙 Back, etc.) so the keyboard appears fully translated.
+            kb = get_keyboard_raw(user_id)
+            if kb:
+                for row in kb.keyboard:
+                    for btn in row:
+                        if btn.get('text'):
+                            root_strings.add(btn['text'])
+            # Always include the success popup string.
+            root_strings.add("✅ Language updated!")
+            _bulk_prewarm(root_strings, target_lang, timeout=4.0)
+        except Exception as e:
+            print(f"language sync prewarm error: {e}")
+
+        # 3. Render the main menu — every visible string is now cached.
         try:
             send_path_content(chat_id, user_id, 'root', is_editing=False,
                               reply_keyboard=get_keyboard(user_id))
         except Exception as e:
             print(f"language initial render error: {e}")
 
-        # 3. Pre-warm in the background. When done, re-render the main menu so
-        # any newly-cached strings show up fully translated.
-        def _bg_prewarm_and_refresh(uid=user_id, tlang=target_lang, cid=chat_id):
-            try:
-                added = prewarm_language(tlang, timeout=20.0)
-            except Exception as e:
-                print(f"prewarm_language error: {e}")
-                added = 0
-            if added > 0:
-                try:
-                    send_path_content(cid, uid, 'root', is_editing=False,
-                                      reply_keyboard=get_keyboard(uid))
-                except Exception as e:
-                    print(f"language refresh error: {e}")
+        # 4. Confirmation popup AFTER the menu renders (so the user has
+        # something translated to look at when they tap OK).
+        try:
+            bot.send_message(chat_id,
+                             get_tl_and_map("✅ Language updated!", target_lang))
+        except Exception:
+            pass
 
-        threading.Thread(target=_bg_prewarm_and_refresh, daemon=True).start()
+        # 5. Background prewarm of ALL remaining UI strings so future pages
+        # (deposit, withdraw, plans, history…) are instant when navigated to.
+        def _bg_prewarm_full(uid=user_id, tlang=target_lang):
+            try:
+                prewarm_language(tlang, timeout=30.0)
+            except Exception as e:
+                print(f"prewarm_language background error: {e}")
+
+        threading.Thread(target=_bg_prewarm_full, daemon=True).start()
         return
 
     if call.data.startswith('cb_calcbuy_'):
