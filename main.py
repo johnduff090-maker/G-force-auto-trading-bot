@@ -125,13 +125,20 @@ CORE_TL_DATA = {
 # Bounded thread pool for non-blocking Google Translate calls.
 # Larger pool = many strings translate in parallel on first language switch.
 _TL_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=16, thread_name_prefix='tl')
-_TL_INFLIGHT = set()  # cache_keys currently being fetched, to avoid duplicate calls
+_TL_INFLIGHT = {}  # cache_key -> Future, to coalesce duplicate fetches and let callers wait
 _TL_INFLIGHT_LOCK = threading.Lock()
-# Max time we let the user wait for a fresh translation before falling back to English.
-# The translation will still complete in the background and be cached for next time.
-_TL_WAIT_SECONDS = 0.6
+# Max time we let the user wait for a fresh translation before falling back
+# to English. Buttons MUST translate before being shown, so we wait long
+# enough for Google Translate to respond (typical: 200-800ms). Once cached
+# the translation is instant for every future call (and survives restarts
+# via the persistent TL_CACHE).
+_TL_WAIT_SECONDS = 5.0
 
 def _tl_fetch_and_cache(cache_key, text, target_lang):
+    """Worker run inside _TL_EXECUTOR. Returns the translated string on success
+    (also caching it persistently via TL_CACHE), or None on any failure /
+    when Google returned the source unchanged. Callers can `.result(timeout=…)`
+    on the Future returned by submit() to either wait or move on."""
     try:
         protected, tokens = _protect_tokens(text)
         target_norm = _normalize_lang(target_lang)
@@ -153,8 +160,9 @@ def _tl_fetch_and_cache(cache_key, text, target_lang):
     except Exception as e:
         print(f"Translate error ({target_lang}): {e}")
     finally:
+        # Always clear the inflight slot so future calls can re-attempt this key.
         with _TL_INFLIGHT_LOCK:
-            _TL_INFLIGHT.discard(cache_key)
+            _TL_INFLIGHT.pop(cache_key, None)
     return None
 
 def _tokens_intact(source, translated):
@@ -169,14 +177,25 @@ def _tokens_intact(source, translated):
             return False
     return True
 
-def get_tl_and_map(text, target_lang):
+def get_tl_and_map(text, target_lang, wait=True):
+    """Translate `text` from English to `target_lang` and remember the mapping
+    so the bot can recognise the translated string when the user taps it.
+
+    If the translation is already in CORE_TL_DATA (instant) or TL_CACHE
+    (persistent across restarts), it is returned immediately.
+
+    Otherwise we submit a fetch to the bounded thread pool. With wait=True
+    (default) we block up to _TL_WAIT_SECONDS for the result so buttons /
+    short prompts always come back fully translated. Set wait=False from
+    long-running background jobs (broadcasts, prewarm) where blocking would
+    slow the whole loop."""
     if not text or target_lang == 'en': return text
     target_lang = _normalize_lang(target_lang)
     if target_lang == 'en': return text
 
     tl_text = None
 
-    # 1. Instant Global Speed Cache
+    # 1. Instant Global Speed Cache (hand-curated, ships with the bot).
     if text in CORE_TL_DATA and target_lang in CORE_TL_DATA[text]:
         candidate = CORE_TL_DATA[text][target_lang]
         if _tokens_intact(text, candidate):
@@ -184,7 +203,7 @@ def get_tl_and_map(text, target_lang):
 
     cache_key = ('en', target_lang, text)
 
-    # 2. Memory cache (validate macros survived)
+    # 2. Persistent memory cache (validate macros survived).
     if not tl_text and cache_key in TL_CACHE:
         candidate = TL_CACHE[cache_key]
         if _tokens_intact(text, candidate):
@@ -193,21 +212,35 @@ def get_tl_and_map(text, target_lang):
             # Stale entry from before the PUA fix; drop it so we re-fetch.
             TL_CACHE.pop(cache_key, None)
 
-    # 3. Not cached: return English INSTANTLY, fetch in background for next time.
+    # 3. Not cached: submit a fetch and (if wait) block briefly for the result.
     if not tl_text:
         with _TL_INFLIGHT_LOCK:
-            already_fetching = cache_key in _TL_INFLIGHT
-            if not already_fetching:
-                _TL_INFLIGHT.add(cache_key)
-        if not already_fetching:
-            try:
-                _TL_EXECUTOR.submit(_tl_fetch_and_cache, cache_key, text, target_lang)
-            except Exception:
-                with _TL_INFLIGHT_LOCK:
-                    _TL_INFLIGHT.discard(cache_key)
-        tl_text = text
+            future = _TL_INFLIGHT.get(cache_key)
+            if future is None:
+                try:
+                    future = _TL_EXECUTOR.submit(_tl_fetch_and_cache, cache_key, text, target_lang)
+                    _TL_INFLIGHT[cache_key] = future
+                except Exception:
+                    future = None
 
-    # Update REVERSE_TL_MAP so the bot recognizes buttons in this language
+        if wait and future is not None:
+            try:
+                fetched = future.result(timeout=_TL_WAIT_SECONDS)
+                if isinstance(fetched, str) and fetched.strip():
+                    tl_text = fetched
+            except concurrent.futures.TimeoutError:
+                # Fetch is still running — fall through to English. The
+                # background job will populate TL_CACHE so the next call
+                # for the same string is instant.
+                pass
+            except Exception:
+                pass
+
+        if not tl_text:
+            tl_text = text
+
+    # Update REVERSE_TL_MAP so the bot recognises this localised string when
+    # the user taps it as a reply-keyboard button.
     if target_lang not in REVERSE_TL_MAP: REVERSE_TL_MAP[target_lang] = {}
     REVERSE_TL_MAP[target_lang][tl_text] = text
 
@@ -1609,6 +1642,68 @@ def execute_live_trading_animation(chat_id, msg_id, user_id, base_text, full_pat
                 break
             pass
 
+def _bulk_prewarm(strings, target_lang):
+    """Submit all uncached strings to the translator pool IN PARALLEL and
+    wait for them to finish (up to _TL_WAIT_SECONDS total). After this returns,
+    a single sequential pass of get_tl_and_map() will mostly hit cache instead
+    of blocking once per string. Used right before rendering a menu so the
+    user never sees a half-translated keyboard."""
+    if not strings or not target_lang or target_lang == 'en':
+        return
+    target_lang = _normalize_lang(target_lang)
+    if target_lang == 'en':
+        return
+    pending = []
+    for s in strings:
+        if not s or not isinstance(s, str):
+            continue
+        if s in CORE_TL_DATA and target_lang in CORE_TL_DATA[s]:
+            continue
+        if ('en', target_lang, s) in TL_CACHE:
+            continue
+        pending.append(s)
+    if not pending:
+        return
+    futures = []
+    with _TL_INFLIGHT_LOCK:
+        for s in pending:
+            ck = ('en', target_lang, s)
+            fut = _TL_INFLIGHT.get(ck)
+            if fut is None:
+                try:
+                    fut = _TL_EXECUTOR.submit(_tl_fetch_and_cache, ck, s, target_lang)
+                    _TL_INFLIGHT[ck] = fut
+                except Exception:
+                    fut = None
+            if fut is not None:
+                futures.append(fut)
+    if futures:
+        # Wait for ALL fetches to finish in parallel — total wall-clock is
+        # dominated by the SLOWEST fetch, not the sum.
+        try:
+            concurrent.futures.wait(futures, timeout=_TL_WAIT_SECONDS)
+        except Exception:
+            pass
+
+
+def _collect_path_strings(path):
+    """Return the set of English strings that would be rendered for `path`
+    (button labels, post bodies, inline button labels). Used to prewarm
+    translations in parallel right before render."""
+    strings = set()
+    try:
+        for name in menus.get(path, []) or []:
+            if isinstance(name, str): strings.add(name)
+        for p in menu_posts.get(path, []) or []:
+            if p.get('text'): strings.add(p['text'])
+            for b in p.get('custom_inlines', []) or []:
+                if b.get('text') and b.get('mode') != 'set_lang':
+                    strings.add(b['text'])
+    except Exception:
+        pass
+    return strings
+
+
 def send_path_content(chat_id, user_id, path, is_editing=False, reply_keyboard=None):
     if is_editing and user_id in editor_msg_ids:
         for m_id in editor_msg_ids[user_id]:
@@ -1617,6 +1712,11 @@ def send_path_content(chat_id, user_id, path, is_editing=False, reply_keyboard=N
         editor_msg_ids[user_id] = []
 
     lang = get_user_lang(user_id)
+    # Parallel-prewarm everything we are about to render so the per-string
+    # get_tl_and_map() calls below mostly hit cache instead of blocking
+    # sequentially. Keeps the menu rendering snappy on uncached languages.
+    if lang and lang != 'en':
+        _bulk_prewarm(_collect_path_strings(path), lang)
     meta = btn_metadata.get(path, get_default_metadata())
     assigned_plan = meta.get('assigned_plan')
     
@@ -2305,6 +2405,11 @@ def get_keyboard(user_id):
     markup = get_keyboard_raw(user_id)
     lang = get_user_lang(user_id)
     if lang == 'en' or not markup: return markup
+
+    # Pre-fetch all button labels in parallel before translating each one
+    # sequentially. Total wall-clock = slowest fetch, not sum of fetches.
+    all_labels = [btn['text'] for row in markup.keyboard for btn in row]
+    _bulk_prewarm(set(all_labels), lang)
 
     new_markup = ReplyKeyboardMarkup(resize_keyboard=True)
     for row in markup.keyboard:
@@ -3010,6 +3115,11 @@ def handle_messages(message):
                 user_db[target]['total_withdrawn'] = 0.0
                 user_db[target]['team_deposits'] = 0.0
                 user_db[target]['affiliate_earnings'] = 0.0
+                # Reset one-time gateway flags so the wiped user can claim
+                # the homepage bonus and free plan again from scratch.
+                user_db[target]['has_claimed_free_plan'] = False
+                user_db[target]['has_seen_homepage'] = False
+                user_db[target]['pending_plan'] = None
                 
                 user_state[user_id] = 'admin_wipe_menu'
                 bot.send_message(message.chat.id, f"✅ <b>Targeted Wipe Successful!</b>\nUser <code>{target}</code> balances have been reset to 0.", parse_mode="HTML", reply_markup=get_keyboard(user_id))
@@ -3030,6 +3140,11 @@ def handle_messages(message):
                 user_db[uid]['total_withdrawn'] = 0.0
                 user_db[uid]['team_deposits'] = 0.0
                 user_db[uid]['affiliate_earnings'] = 0.0
+                # Reset one-time gateway flags so wiped users can claim
+                # homepage bonus and free plan from scratch again.
+                user_db[uid]['has_claimed_free_plan'] = False
+                user_db[uid]['has_seen_homepage'] = False
+                user_db[uid]['pending_plan'] = None
                 
             user_state[user_id] = 'admin_wipe_menu'
             bot.send_message(message.chat.id, "☢️ <b>GENERAL WIPE COMPLETE</b> ☢️\nEvery single user in the database has had their balances and active plans reset to 0. Infrastructure remains fully operational.", parse_mode="HTML", reply_markup=get_keyboard(user_id))
@@ -4881,25 +4996,30 @@ def handle_messages(message):
         return
 
     # --- GLOBAL FEATURE: Move by Command ---
+    # Slash-style commands (e.g. /withdraw) assigned to a button. We do NOT
+    # just navigate to the button's path — we simulate clicking it so all its
+    # assigned features (withdrawal, wallet, bonus, balance, calculator, etc.)
+    # actually fire. Otherwise typing /withdraw on a leaf "Withdraw" button
+    # would only show its posts and never start the withdrawal flow.
     if state in ['normal', 'posts_editing']:
+        matched_btn_path = None
         for path, meta in btn_metadata.items():
             if meta.get('move_by_command') and meta.get('command') == text:
                 if meta.get('admin_only') and not is_admin:
                     return bot.send_message(message.chat.id, get_tl_and_map("⛔️ You do not have permission to use this button.", lang))
-                
-                user_current_path[user_id] = path
-                if path not in menus: menus[path] = []
-                
-                has_submenus = len(menus[path]) > 0
-                if has_submenus and not (is_admin and state == 'posts_editing'):
-                    btn_name = path.split('/')[-1]
-                    breadcrumb_text = f"📂 <b>{btn_name}</b>"
-                    try: bot.send_message(message.chat.id, get_tl_and_map(breadcrumb_text, lang), parse_mode="HTML", reply_markup=get_keyboard(user_id))
-                    except Exception: pass
-                    send_path_content(message.chat.id, user_id, path, is_editing=False, reply_keyboard=None)
-                else:
-                    send_path_content(message.chat.id, user_id, path, is_editing=(state == 'posts_editing'), reply_keyboard=get_keyboard(user_id) if (is_admin and state == 'posts_editing') else None)
-                return
+                matched_btn_path = path
+                break
+
+        if matched_btn_path:
+            parts = matched_btn_path.split('/')
+            btn_name = parts[-1]
+            parent_path = '/'.join(parts[:-1]) or 'root'
+            # Reposition the user at the parent so the regular button-click
+            # logic below treats `text` as a button on the current page.
+            user_current_path[user_id] = parent_path
+            current_path = parent_path
+            text = btn_name
+            # Fall through to the normal button-click handler — do NOT return.
 
     # --- HANDLE BUTTONS EDITOR ADD / RENAME ---
     if state == 'adding_button':
