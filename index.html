@@ -374,6 +374,7 @@
                 <a onclick="switchSection('templates')">📩 Email Templates</a>
                 
                 <a onclick="switchSection('admins')">👑 Admin Manager</a>
+                <a onclick="switchSection('autoapprove')">⏱️ Auto-Approve Timer</a>
                 <a onclick="logout()">🚪 Lock & Logout</a>
 
                 <div class="resource-block">
@@ -529,6 +530,24 @@
                             </div>
                     </div>
                 </section>
+
+                <section id="autoapprove" class="section glass" style="padding: 30px;">
+                    <h2>⏱️ Auto-Approve Timer</h2>
+                    <p style="color: #aaa; margin-bottom: 20px;">Set how long a blockchain transaction must age before the background watcher automatically credits the deposit. Lower values credit faster; higher values are safer against chain reorganizations. Default is 5 minutes (300 seconds).</p>
+
+                    <div class="form-group">
+                        <label style="color: #aaa; font-weight: bold;">Delay before auto-approval (in minutes)</label>
+                        <input type="number" id="autoApproveMinutes" min="0" step="0.5" placeholder="e.g. 5">
+                        <div style="font-size: 0.85em; color: #888; margin-top: 5px;">
+                            Current setting: <span id="autoApproveCurrent" style="color: #4caf50; font-weight: bold;">Loading...</span>
+                        </div>
+                    </div>
+
+                    <div style="display: flex; gap: 15px; margin-top: 20px;">
+                        <button onclick="saveAutoApprove()" style="flex: 2;">💾 Save Timer</button>
+                    </div>
+                    <div id="autoApproveStatus" style="margin-top: 15px; text-align: center; font-weight: bold; min-height: 20px;"></div>
+                </section>
             </main>
         </div>
     </div>
@@ -562,6 +581,60 @@
             if(sectionId === 'admins') fetchAdmins();
             if(sectionId === 'registry') fetchRegistry(); 
             if(sectionId === 'templates') fetchTemplates(); // Load templates when tab opens
+            if(sectionId === 'autoapprove') fetchAutoApprove();
+        }
+
+        async function fetchAutoApprove() {
+            const currentSpan = document.getElementById('autoApproveCurrent');
+            try {
+                const response = await fetch('/api/get_auto_approve', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ pin: sessionPin })
+                });
+                const data = await response.json();
+                const seconds = data.delay_seconds ?? 300;
+                const minutes = seconds / 60;
+                document.getElementById('autoApproveMinutes').value = minutes;
+                currentSpan.innerText = `${minutes} min (${seconds} seconds)`;
+            } catch (error) {
+                currentSpan.innerText = 'Error loading';
+            }
+        }
+
+        async function saveAutoApprove() {
+            const statusDiv = document.getElementById('autoApproveStatus');
+            const minutes = parseFloat(document.getElementById('autoApproveMinutes').value);
+
+            if (isNaN(minutes) || minutes < 0) {
+                statusDiv.style.color = 'var(--danger-color)';
+                statusDiv.innerText = 'Please enter a valid number of minutes (0 or more).';
+                return;
+            }
+
+            const seconds = Math.round(minutes * 60);
+            statusDiv.style.color = '#aaa';
+            statusDiv.innerText = 'Saving...';
+
+            try {
+                const response = await fetch('/api/save_auto_approve', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ pin: sessionPin, delay_seconds: seconds })
+                });
+                if (response.ok) {
+                    statusDiv.style.color = '#4caf50';
+                    statusDiv.innerText = `✅ Saved! Deposits now auto-approve after ${minutes} min.`;
+                    fetchAutoApprove();
+                } else {
+                    const err = await response.json();
+                    statusDiv.style.color = 'var(--danger-color)';
+                    statusDiv.innerText = `❌ ${err.error || 'Failed to save.'}`;
+                }
+            } catch (error) {
+                statusDiv.style.color = 'var(--danger-color)';
+                statusDiv.innerText = '❌ Network error while saving.';
+            }
         }
 
         function closeModal() {

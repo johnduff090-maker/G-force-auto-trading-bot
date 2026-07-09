@@ -593,6 +593,7 @@ def save_database():
         'subscription_settings': subscription_settings,
         'homepage_bonus_settings': homepage_bonus_settings,
         'deposit_broadcast_settings': deposit_broadcast_settings, # <--- ADD THIS LINE
+        'auto_approve_settings': auto_approve_settings,
         # Persist translation cache so non-English users get instant responses across restarts.
         'tl_cache': {f"{k[1]}|{k[2]}": v for k, v in TL_CACHE.items()}
     }
@@ -792,6 +793,13 @@ deposit_broadcast_settings = db_data.get('deposit_broadcast_settings', {
     'enabled': False,
     'channel_id': None,
     'template': "<b>🟢 NEW DEPOSIT DETECTED 🟢</b>\n━━━━━━━━━━━━━━━━━━━\n👤 <b>User ID:</b> <code>{user_id}</code>\n🌐 <b>Network:</b> {network_display}\n💵 <b>Amount:</b> {crypto_amount} {network_display} ≈ ${usd_amount}\n💎 <b>Status:</b> Confirmed & Active\n🔗 <b>Hash/Ref:</b>\n{hash_link}\n━━━━━━━━━━━━━━━━━━━\n<i>🚀 Capital successfully added to trading pool.</i>"
+})
+
+# --- NEW: AUTO-APPROVE TIMER SETTINGS ---
+# delay_seconds = how long a blockchain transaction must age before the
+# background watcher auto-credits it. Configurable from the web admin panel.
+auto_approve_settings = db_data.get('auto_approve_settings', {
+    'delay_seconds': 300
 })
 
 def preload_core_languages():
@@ -1102,83 +1110,275 @@ def process_referral_commission(user_id, amount, is_deposit=True):
         if is_deposit:
             user_db[inviter]['team_deposits'] += amount
 
+# ==========================================================================
+# BLOCKCHAIN SCANNING CONSTANTS & MULTI-PROVIDER BACKUP ENGINE
+# --------------------------------------------------------------------------
+# Every network below tries multiple providers in order. The first provider
+# that returns a valid unprocessed incoming transaction wins. Your explorer
+# API keys stay primary; keyless public providers act as automatic backups
+# so deposits are still detected even when a key fails or gets rate-limited.
+# ==========================================================================
+
+# ERC-20 Transfer(address,address,uint256) event signature (keccak256 hash).
+ERC20_TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+
+USDT_ERC20_CONTRACT = "0xdac17f958d2ee523a2206206994597c13d831ec7"  # 6 decimals
+USDT_BEP20_CONTRACT = "0x55d398326f99059ff775485246999027b3197955"  # 18 decimals
+USDT_TRC20_CONTRACT = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
+
+# Keyless public JSON-RPC nodes used for the eth_getLogs fallback.
+BSC_RPC_ENDPOINTS = [
+    "https://bsc-dataseed.binance.org",
+    "https://bsc-dataseed1.defibit.io",
+    "https://rpc.ankr.com/bsc",
+]
+ETH_RPC_ENDPOINTS = [
+    "https://eth.llamarpc.com",
+    "https://rpc.ankr.com/eth",
+    "https://cloudflare-eth.com",
+]
+
+# How many recent blocks the RPC log-scan looks back over. Kept modest so
+# free RPC nodes don't reject the getLogs range.
+EVM_RPC_BLOCK_WINDOW = 3000
+
+
+def _evm_scan_via_etherscan_v2(addr, chainid, contract, decimals):
+    """Etherscan V2 unified multichain endpoint. One Etherscan-family key
+    works across ETH (chainid=1) and BSC (chainid=56). This replaces the
+    deprecated standalone bscscan.com / etherscan.io v1 endpoints."""
+    api_key = ETHERSCAN_API_KEY or BSCSCAN_API_KEY
+    if not api_key:
+        return None
+    url = (f"https://api.etherscan.io/v2/api?chainid={chainid}"
+           f"&module=account&action=tokentx&address={addr}"
+           f"&page=1&offset=20&sort=desc&apikey={api_key}")
+    resp = requests.get(url, timeout=6)
+    if resp.status_code != 200:
+        return None
+    txs = resp.json().get('result', [])
+    if not isinstance(txs, list):
+        return None
+    for tx in txs:
+        txid = tx.get('hash')
+        if txid in processed_txids:
+            continue
+        if (tx.get('contractAddress', '').lower() == contract.lower()
+                and tx.get('to', '').lower() == addr.lower()):
+            tx_time = float(tx.get('timeStamp', time.time()))
+            return float(tx.get('value', 0)) / 10**decimals, txid, tx_time
+    return None
+
+
+def _evm_scan_via_blockscout(base_url, addr, contract, decimals):
+    """Blockscout exposes an Etherscan-compatible, keyless API."""
+    url = (f"{base_url}?module=account&action=tokentx&address={addr}"
+           f"&page=1&offset=20&sort=desc")
+    resp = requests.get(url, timeout=6)
+    if resp.status_code != 200:
+        return None
+    txs = resp.json().get('result', [])
+    if not isinstance(txs, list):
+        return None
+    for tx in txs:
+        txid = tx.get('hash')
+        if txid in processed_txids:
+            continue
+        if (tx.get('contractAddress', '').lower() == contract.lower()
+                and tx.get('to', '').lower() == addr.lower()):
+            tx_time = float(tx.get('timeStamp', time.time()))
+            return float(tx.get('value', 0)) / 10**decimals, txid, tx_time
+    return None
+
+
+def _rpc_call(endpoint, method, params):
+    payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+    resp = requests.post(endpoint, json=payload, timeout=6)
+    if resp.status_code != 200:
+        return None
+    return resp.json().get('result')
+
+
+def _evm_scan_via_rpc(endpoints, addr, contract, decimals):
+    """Keyless fallback: read USDT Transfer logs sent TO the address directly
+    from a public JSON-RPC node using eth_getLogs. Works without any API key."""
+    addr_clean = addr[2:] if addr.lower().startswith('0x') else addr
+    topic_addr = "0x" + addr_clean.lower().rjust(64, '0')
+    for endpoint in endpoints:
+        try:
+            latest_hex = _rpc_call(endpoint, "eth_blockNumber", [])
+            if not latest_hex:
+                continue
+            latest = int(latest_hex, 16)
+            from_block = hex(max(0, latest - EVM_RPC_BLOCK_WINDOW))
+            logs = _rpc_call(endpoint, "eth_getLogs", [{
+                "fromBlock": from_block,
+                "toBlock": "latest",
+                "address": contract,
+                "topics": [ERC20_TRANSFER_TOPIC, None, topic_addr],
+            }])
+            if not logs or not isinstance(logs, list):
+                continue
+            # Newest logs are last; check most recent first.
+            for log in reversed(logs):
+                txid = log.get('transactionHash')
+                if not txid or txid in processed_txids:
+                    continue
+                raw = log.get('data', '0x0')
+                try:
+                    amount = int(raw, 16) / 10**decimals
+                except (ValueError, TypeError):
+                    continue
+                if amount <= 0:
+                    continue
+                blk = _rpc_call(endpoint, "eth_getBlockByNumber",
+                                [log.get('blockNumber'), False])
+                if blk and blk.get('timestamp'):
+                    tx_time = float(int(blk['timestamp'], 16))
+                else:
+                    tx_time = time.time()
+                return amount, txid, tx_time
+        except Exception as e:
+            print(f"RPC scan error ({endpoint}): {e}")
+            continue
+    return None
+
+
+def _btc_scan_esplora(base_url, addr):
+    """Shared parser for Esplora-based explorers (mempool.space, blockstream.info)."""
+    resp = requests.get(f"{base_url}/address/{addr}/txs", timeout=6)
+    if resp.status_code != 200:
+        return None
+    txs = resp.json()
+    if not isinstance(txs, list):
+        return None
+    for tx in txs:
+        txid = tx.get('txid')
+        if not txid or txid in processed_txids:
+            continue
+        for vout in tx.get('vout', []):
+            if vout.get('scriptpubkey_address') == addr:
+                tx_time = float(tx.get('status', {}).get('block_time', time.time()))
+                return float(vout.get('value', 0)) / 10**8, txid, tx_time
+    return None
+
+
+def _btc_scan_blockchain_info(addr):
+    """Keyless backup using blockchain.info's rawaddr endpoint."""
+    resp = requests.get(f"https://blockchain.info/rawaddr/{addr}?limit=15", timeout=6)
+    if resp.status_code != 200:
+        return None
+    txs = resp.json().get('txs', [])
+    if not isinstance(txs, list):
+        return None
+    for tx in txs:
+        txid = tx.get('hash')
+        if not txid or txid in processed_txids:
+            continue
+        for out in tx.get('out', []):
+            if out.get('addr') == addr:
+                tx_time = float(tx.get('time', time.time()))
+                return float(out.get('value', 0)) / 10**8, txid, tx_time
+    return None
+
+
+def _tron_scan_trongrid(addr, curr):
+    headers = {"TRON-PRO-API-KEY": TRONGRID_API_KEY} if TRONGRID_API_KEY else {}
+    if curr == 'USDT_TRC20':
+        url = f"https://api.trongrid.io/v1/accounts/{addr}/transactions/trc20?only_to=true"
+    else:
+        url = f"https://api.trongrid.io/v1/accounts/{addr}/transactions?only_to=true"
+    resp = requests.get(url, headers=headers, timeout=6)
+    if resp.status_code != 200:
+        return None
+    txs = resp.json().get('data', [])
+    for tx in txs:
+        txid = tx.get('transaction_id') or tx.get('txID')
+        if not txid or txid in processed_txids:
+            continue
+        if curr == 'USDT_TRC20':
+            if tx.get('token_info', {}).get('address') == USDT_TRC20_CONTRACT:
+                tx_time = int(tx.get('block_timestamp', time.time() * 1000)) / 1000.0
+                return float(tx.get('value', 0)) / 1_000_000, txid, tx_time
+        else:
+            contract = tx.get('raw_data', {}).get('contract', [{}])[0]
+            if contract.get('type') == 'TransferContract':
+                amt = contract.get('parameter', {}).get('value', {}).get('amount', 0)
+                tx_time = int(tx.get('block_timestamp', time.time() * 1000)) / 1000.0
+                return float(amt) / 1_000_000, txid, tx_time
+    return None
+
+
+def _tron_scan_tronscan(addr, curr):
+    """Keyless backup via the public TronScan API."""
+    if curr == 'USDT_TRC20':
+        url = (f"https://apilist.tronscanapi.com/api/token_trc20/transfers"
+               f"?limit=20&start=0&toAddress={addr}&contract_address={USDT_TRC20_CONTRACT}")
+        resp = requests.get(url, timeout=6)
+        if resp.status_code != 200:
+            return None
+        for tx in resp.json().get('token_transfers', []):
+            txid = tx.get('transaction_id')
+            if not txid or txid in processed_txids:
+                continue
+            if tx.get('to_address') == addr:
+                tx_time = float(tx.get('block_ts', time.time() * 1000)) / 1000.0
+                return float(tx.get('quant', 0)) / 1_000_000, txid, tx_time
+    else:
+        url = f"https://apilist.tronscanapi.com/api/transaction?address={addr}&limit=20&start=0"
+        resp = requests.get(url, timeout=6)
+        if resp.status_code != 200:
+            return None
+        for tx in resp.json().get('data', []):
+            txid = tx.get('hash')
+            if not txid or txid in processed_txids:
+                continue
+            ci = tx.get('contractData', {})
+            if tx.get('toAddress') == addr and ci.get('amount'):
+                tx_time = float(tx.get('timestamp', time.time() * 1000)) / 1000.0
+                return float(ci.get('amount', 0)) / 1_000_000, txid, tx_time
+    return None
+
+
 def check_address_for_new_deposit(addr, curr):
-    crypto_amount = 0.0
-    txid_found = ""
-    tx_time = 0.0
-    
-    try:
-        if curr in ['TRX', 'USDT_TRC20']:
-            headers = {"TRON-PRO-API-KEY": TRONGRID_API_KEY} if TRONGRID_API_KEY else {}
-            
-            if curr == 'USDT_TRC20':
-                url = f"https://api.trongrid.io/v1/accounts/{addr}/transactions/trc20?only_to=true"
-            else:
-                url = f"https://api.trongrid.io/v1/accounts/{addr}/transactions?only_to=true"
-                
-            resp = requests.get(url, headers=headers, timeout=5)
-            if resp.status_code == 200:
-                txs = resp.json().get('data', [])
-                for tx in txs:
-                    txid = tx.get('transaction_id') or tx.get('txID')
-                    if txid in processed_txids: continue
-                    
-                    if curr == 'USDT_TRC20':
-                        if tx.get('token_info', {}).get('address') == "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t":
-                            tx_time = int(tx.get('block_timestamp', time.time() * 1000)) / 1000.0
-                            return True, float(tx.get('value', 0)) / 1_000_000, txid, tx_time
-                            
-                    elif curr == 'TRX':
-                        contract = tx.get('raw_data', {}).get('contract', [{}])[0]
-                        if contract.get('type') == 'TransferContract':
-                            amt = contract.get('parameter', {}).get('value', {}).get('amount', 0)
-                            tx_time = int(tx.get('block_timestamp', time.time() * 1000)) / 1000.0
-                            return True, float(amt) / 1_000_000, txid, tx_time
-                            
-        elif curr == 'USDT_ERC20':
-            url = f"https://api.etherscan.io/api?module=account&action=tokentx&address={addr}&page=1&offset=10&sort=desc&apikey={ETHERSCAN_API_KEY}"
-            resp = requests.get(url, timeout=5)
-            if resp.status_code == 200:
-                txs = resp.json().get('result', [])
-                if isinstance(txs, list):
-                    for tx in txs:
-                        txid = tx.get('hash')
-                        if txid in processed_txids: continue
-                        if tx.get('contractAddress', '').lower() == "0xdac17f958d2ee523a2206206994597c13d831ec7" and tx.get('to', '').lower() == addr.lower():
-                            tx_time = float(tx.get('timeStamp', time.time()))
-                            return True, float(tx.get('value', 0)) / 10**6, txid, tx_time
-                            
-        elif curr == 'USDT_BEP20':
-            url = f"https://api.bscscan.com/api?module=account&action=tokentx&address={addr}&page=1&offset=10&sort=desc&apikey={BSCSCAN_API_KEY}"
-            resp = requests.get(url, timeout=5)
-            if resp.status_code == 200:
-                txs = resp.json().get('result', [])
-                if isinstance(txs, list):
-                    for tx in txs:
-                        txid = tx.get('hash')
-                        if txid in processed_txids: continue
-                        if tx.get('contractAddress', '').lower() == "0x55d398326f99059ff775485246999027b3197955" and tx.get('to', '').lower() == addr.lower():
-                            tx_time = float(tx.get('timeStamp', time.time()))
-                            return True, float(tx.get('value', 0)) / 10**18, txid, tx_time
-                            
-        elif curr == 'BTC':
-            url = f"https://mempool.space/api/address/{addr}/txs"
-            resp = requests.get(url, timeout=5)
-            if resp.status_code == 200:
-                txs = resp.json()
-                if isinstance(txs, list):
-                    for tx in txs:
-                        txid = tx.get('txid')
-                        if txid in processed_txids: continue
-                        for vout in tx.get('vout', []):
-                            if vout.get('scriptpubkey_address') == addr:
-                                tx_time = float(tx.get('status', {}).get('block_time', time.time()))
-                                return True, float(vout.get('value', 0)) / 10**8, txid, tx_time
-                                
-    except Exception as e:
-        print(f"API Scan Error ({curr}): {e}")
-        pass
-        
+    """Scan the blockchain for a new incoming deposit to `addr` on network
+    `curr`, trying each provider in order until one succeeds.
+    Returns: (found: bool, crypto_amount: float, txid: str, tx_time: float)."""
+    providers = []
+
+    if curr == 'USDT_TRC20' or curr == 'TRX':
+        providers = [
+            lambda: _tron_scan_trongrid(addr, curr),
+            lambda: _tron_scan_tronscan(addr, curr),
+        ]
+    elif curr == 'USDT_ERC20':
+        providers = [
+            lambda: _evm_scan_via_etherscan_v2(addr, 1, USDT_ERC20_CONTRACT, 6),
+            lambda: _evm_scan_via_blockscout("https://eth.blockscout.com/api", addr, USDT_ERC20_CONTRACT, 6),
+            lambda: _evm_scan_via_rpc(ETH_RPC_ENDPOINTS, addr, USDT_ERC20_CONTRACT, 6),
+        ]
+    elif curr == 'USDT_BEP20':
+        providers = [
+            lambda: _evm_scan_via_etherscan_v2(addr, 56, USDT_BEP20_CONTRACT, 18),
+            lambda: _evm_scan_via_rpc(BSC_RPC_ENDPOINTS, addr, USDT_BEP20_CONTRACT, 18),
+        ]
+    elif curr == 'BTC':
+        providers = [
+            lambda: _btc_scan_esplora("https://mempool.space/api", addr),
+            lambda: _btc_scan_esplora("https://blockstream.info/api", addr),
+            lambda: _btc_scan_blockchain_info(addr),
+        ]
+
+    for provider in providers:
+        try:
+            result = provider()
+            if result:
+                crypto_amount, txid, tx_time = result
+                return True, crypto_amount, txid, tx_time
+        except Exception as e:
+            print(f"Provider scan error ({curr}): {e}")
+            continue
+
     return False, 0.0, "", 0.0
 
 def blockchain_watcher_loop():
@@ -1192,7 +1392,8 @@ def blockchain_watcher_loop():
                     if found and txid not in processed_txids:
                         now = time.time()
                         
-                        if (now - tx_time) >= 300:
+                        approve_delay = auto_approve_settings.get('delay_seconds', 300)
+                        if (now - tx_time) >= approve_delay:
                             processed_txids.add(txid)
                             
                             live_price = get_crypto_price(curr) if 'USDT' not in curr else 1.0
@@ -6888,6 +7089,39 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                 self.wfile.write(json.dumps({'success': True}).encode())
             except Exception as e:
                 self.send_response(400)
+                self.end_headers()
+                self.wfile.write(json.dumps({'error': str(e)}).encode())
+
+        # --- NEW: AUTO-APPROVE TIMER API ---
+        elif parsed_path.path == '/api/get_auto_approve':
+            if pin != ADMIN_PIN:
+                self.send_response(401)
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'delay_seconds': auto_approve_settings.get('delay_seconds', 300)}).encode())
+
+        elif parsed_path.path == '/api/save_auto_approve':
+            if pin != ADMIN_PIN:
+                self.send_response(401)
+                self.end_headers()
+                return
+            try:
+                delay = int(data.get('delay_seconds'))
+                if delay < 0:
+                    raise ValueError("Delay cannot be negative")
+                auto_approve_settings['delay_seconds'] = delay
+                save_database()
+                print(f"⏱️ Dashboard Action: Auto-approve delay set to {delay} seconds")
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': True, 'delay_seconds': delay}).encode())
+            except Exception as e:
+                self.send_response(400)
+                self.send_header('Content-type', 'application/json')
                 self.end_headers()
                 self.wfile.write(json.dumps({'error': str(e)}).encode())
 
