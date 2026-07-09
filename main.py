@@ -1127,20 +1127,22 @@ USDT_BEP20_CONTRACT = "0x55d398326f99059ff775485246999027b3197955"  # 18 decimal
 USDT_TRC20_CONTRACT = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
 
 # Keyless public JSON-RPC nodes used for the eth_getLogs fallback.
+# Each entry is (url, max_block_window): free nodes cap how far back a
+# getLogs query may look, so we clamp the range per-endpoint. These were
+# verified live to allow keyless recipient-filtered getLogs.
 BSC_RPC_ENDPOINTS = [
-    "https://bsc-dataseed.binance.org",
-    "https://bsc-dataseed1.defibit.io",
-    "https://rpc.ankr.com/bsc",
+    ("https://bsc.rpc.blxrbdn.com", 5000),
+    ("https://bsc.drpc.org", 500),
 ]
 ETH_RPC_ENDPOINTS = [
-    "https://eth.llamarpc.com",
-    "https://rpc.ankr.com/eth",
-    "https://cloudflare-eth.com",
+    ("https://eth.drpc.org", 2000),
+    ("https://rpc.mevblocker.io", 2000),
 ]
 
-# How many recent blocks the RPC log-scan looks back over. Kept modest so
-# free RPC nodes don't reject the getLogs range.
-EVM_RPC_BLOCK_WINDOW = 3000
+# Desired look-back window (blocks). Clamped to each endpoint's cap above.
+# Must comfortably exceed the auto-approve delay so the watcher can still see
+# a transaction once it is old enough to be credited.
+EVM_RPC_BLOCK_WINDOW = 2000
 
 
 def _evm_scan_via_etherscan_v2(addr, chainid, contract, decimals):
@@ -1149,15 +1151,21 @@ def _evm_scan_via_etherscan_v2(addr, chainid, contract, decimals):
     deprecated standalone bscscan.com / etherscan.io v1 endpoints."""
     api_key = ETHERSCAN_API_KEY or BSCSCAN_API_KEY
     if not api_key:
+        print(f"[SCAN] Etherscan V2 (chain {chainid}): no API key set, skipping to backups")
         return None
     url = (f"https://api.etherscan.io/v2/api?chainid={chainid}"
            f"&module=account&action=tokentx&address={addr}"
            f"&page=1&offset=20&sort=desc&apikey={api_key}")
     resp = requests.get(url, timeout=6)
     if resp.status_code != 200:
+        print(f"[SCAN] Etherscan V2 (chain {chainid}): HTTP {resp.status_code}")
         return None
-    txs = resp.json().get('result', [])
+    body = resp.json()
+    txs = body.get('result', [])
     if not isinstance(txs, list):
+        # result is an error/message string (e.g. invalid key, deprecated, rate limit)
+        print(f"[SCAN] Etherscan V2 (chain {chainid}) non-list result: "
+              f"status={body.get('status')} msg={body.get('message')} result={str(txs)[:120]}")
         return None
     for tx in txs:
         txid = tx.get('hash')
@@ -1201,16 +1209,18 @@ def _rpc_call(endpoint, method, params):
 
 def _evm_scan_via_rpc(endpoints, addr, contract, decimals):
     """Keyless fallback: read USDT Transfer logs sent TO the address directly
-    from a public JSON-RPC node using eth_getLogs. Works without any API key."""
+    from a public JSON-RPC node using eth_getLogs. Works without any API key.
+    `endpoints` is a list of (url, max_block_window) tuples."""
     addr_clean = addr[2:] if addr.lower().startswith('0x') else addr
     topic_addr = "0x" + addr_clean.lower().rjust(64, '0')
-    for endpoint in endpoints:
+    for endpoint, max_window in endpoints:
         try:
             latest_hex = _rpc_call(endpoint, "eth_blockNumber", [])
             if not latest_hex:
                 continue
             latest = int(latest_hex, 16)
-            from_block = hex(max(0, latest - EVM_RPC_BLOCK_WINDOW))
+            window = min(EVM_RPC_BLOCK_WINDOW, max_window)
+            from_block = hex(max(0, latest - window))
             logs = _rpc_call(endpoint, "eth_getLogs", [{
                 "fromBlock": from_block,
                 "toBlock": "latest",
