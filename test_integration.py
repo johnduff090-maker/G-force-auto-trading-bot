@@ -47,6 +47,7 @@ main.bot.send_message = lambda *a, **k: None
 main.broadcast_real_deposit = lambda *a, **k: None
 main.send_email_async = lambda *a, **k: None
 main.process_referral_commission = lambda *a, **k: None
+REAL_AUTO_BUY = main.check_and_trigger_auto_buy  # keep the real one for [6]
 main.check_and_trigger_auto_buy = lambda *a, **k: None
 main.save_database = lambda *a, **k: None
 main.log_tx = lambda *a, **k: None
@@ -188,6 +189,7 @@ acct = r.json()
 check("get_account name", acct.get('name') == 'Alice (@alice)', f"= {acct.get('name')}")
 check("get_account plan name", acct['active_plans'][0]['name'] == 'Starter Plan')
 check("get_account invested amount", acct['active_plans'][0]['amount'] == 75.0)
+check("get_account exposes plan id", acct['active_plans'][0].get('id') == 'x1')
 check("get_account total invested", acct['total_active_invested'] == 75.0)
 check("get_account 404 unknown", post('/api/get_account', {'pin': PIN, 'uid': 999999}).status_code == 404)
 
@@ -256,6 +258,63 @@ check("claim still active (not expired)", main.free_trial_claims[ck2]['status'] 
 # broadcast to ALL users
 r = post('/api/send_free_trial', {'pin': PIN, 'target_mode': 'all', 'amount': 10, 'expires_days': 1})
 check("send_free_trial all queued", r.json().get('queued') == 2)
+
+
+print("\n[6] Plan purchase alerts + admin termination")
+
+main.ADMIN_IDS = [999]
+main.user_db[222]['active_plans'] = []
+
+# --- admin alert fires when a plan is activated (auto-buy path, end-to-end) ---
+main.user_db[222]['deposit'] = 500.0
+main.user_db[222]['pending_plan'] = 'plan1'
+SENT.clear()
+REAL_AUTO_BUY(222)
+new_plan = main.user_db[222]['active_plans'][-1]
+check("auto-buy activated plan", new_plan['status'] == 'active' and new_plan['macro'] == 'plan1')
+check("auto-buy deducted deposit", abs(main.user_db[222]['deposit']) < 1e-9, f"= {main.user_db[222]['deposit']}")
+check("admin purchase alert sent",
+      any(uid == 999 and 'NEW PLAN ACTIVATED' in t and 'Starter Plan' in t for uid, t in SENT),
+      f"= {[t for uid, t in SENT if uid == 999][-1:]}")
+
+# --- terminate_plan endpoint: guards ---
+check("terminate_plan rejects bad pin",
+      post('/api/terminate_plan', {'pin': 'x', 'uid': 222, 'plan_id': new_plan['id']}).status_code == 401)
+check("terminate_plan unknown user",
+      post('/api/terminate_plan', {'pin': PIN, 'uid': 424242, 'plan_id': 'zz'}).status_code == 400)
+check("terminate_plan unknown plan",
+      post('/api/terminate_plan', {'pin': PIN, 'uid': 222, 'plan_id': 'zz'}).status_code == 400)
+
+# --- real termination: refund once, stop accrual, notify user + admin ---
+dep_before = main.user_db[222]['deposit']
+SENT.clear()
+r = post('/api/terminate_plan', {'pin': PIN, 'uid': 222, 'plan_id': new_plan['id'],
+                                 'reason': 'Trading plan cancel due to violation'})
+check("terminate_plan 200", r.status_code == 200, f"= {r.text}")
+check("terminate refunded principal", abs(r.json().get('refunded', 0) - 500.0) < 1e-9)
+check("refund added to deposit", abs(main.user_db[222]['deposit'] - (dep_before + 500.0)) < 1e-9)
+check("plan status terminated", new_plan['status'] == 'terminated')
+check("reason stored on plan", new_plan.get('terminated_reason') == 'Trading plan cancel due to violation')
+check("user got termination notice with reason",
+      any(uid == 222 and 'violation' in t for uid, t in SENT))
+check("admin got termination notice",
+      any(uid == 999 and 'PLAN TERMINATED' in t for uid, t in SENT))
+
+# idempotent: second termination -> 400, deposit unchanged
+r2 = post('/api/terminate_plan', {'pin': PIN, 'uid': 222, 'plan_id': new_plan['id']})
+check("terminate_plan idempotent (no double refund)",
+      r2.status_code == 400 and abs(main.user_db[222]['deposit'] - (dep_before + 500.0)) < 1e-9)
+
+# terminated plan accrues nothing even with hours elapsed
+new_plan['last_accrual'] = time.time() - 7200
+bal_before = main.user_db[222]['balance']
+main.process_accruals(222)
+check("no accrual after termination", main.user_db[222]['balance'] == bal_before)
+check("earned unchanged after termination", new_plan['earned'] == 0.0)
+
+# terminate Alice's plan too
+r = post('/api/terminate_plan', {'pin': PIN, 'uid': 111, 'plan_id': 'x1'})
+check("alice plan terminated + refunded", r.json().get('refunded') == 75.0)
 
 server.shutdown()
 

@@ -1648,6 +1648,21 @@ def blockchain_watcher_loop():
             print(f"Watcher Loop Error: {e}")
         time.sleep(30)
 
+def notify_admin_plan_purchase(user_id, plan):
+    """DMs all admins whenever a user activates or buys a plan (any path)."""
+    try:
+        macro = plan.get('macro', '?')
+        p_name = bot_plans.get(macro, {}).get('name', macro)
+        amount = plan.get('amount', 0.0)
+        uname = user_db.get(user_id, {}).get('username', 'None')
+        admin_msg = (f"📈 <b>NEW PLAN ACTIVATED</b>\nUser: <code>{user_id}</code> (@{uname})\n"
+                     f"Plan: <b>{p_name}</b>\nInvested: <b>${fmt_amt(amount)}</b>")
+        for admin in ADMIN_IDS:
+            try: bot.send_message(admin, admin_msg, parse_mode="HTML")
+            except Exception: pass
+    except Exception as e:
+        print(f"Admin plan alert error: {e}")
+
 def check_and_trigger_auto_buy(user_id):
     if not user_db[user_id].get('pending_plan'): return
     p_macro = user_db[user_id]['pending_plan']
@@ -1683,6 +1698,7 @@ def check_and_trigger_auto_buy(user_id):
             'status': 'active'
         }
         user_db[user_id]['active_plans'].append(new_plan)
+        notify_admin_plan_purchase(user_id, new_plan)
         user_db[user_id]['pending_plan'] = None
         
         try:
@@ -4307,6 +4323,7 @@ def handle_messages(message):
             'start_time': time.time(), 'last_accrual': time.time(), 'earned': 0.0, 'status': 'active'
         }
         user_db[user_id]['active_plans'].append(new_plan)
+        notify_admin_plan_purchase(user_id, new_plan)
 
         succ_template = reinvest_settings['msg_success']
         translated = get_tl_and_map(succ_template, lang)
@@ -4335,6 +4352,7 @@ def handle_messages(message):
             'start_time': time.time(), 'last_accrual': time.time(), 'earned': 0.0, 'status': 'active'
         }
         user_db[user_id]['active_plans'].append(new_plan)
+        notify_admin_plan_purchase(user_id, new_plan)
 
         # Translate the TEMPLATE first (with %amount% / %plan_name% intact),
         # then substitute the actual amount and plan name.
@@ -4477,6 +4495,7 @@ def handle_messages(message):
             'status': 'active'
         }
         user_db[user_id]['active_plans'].append(new_plan)
+        notify_admin_plan_purchase(user_id, new_plan)
         
         user_state[user_id] = 'normal'
         # Translate the static template first, then inject dynamic values.
@@ -4974,6 +4993,7 @@ def handle_messages(message):
             'start_time': time.time(), 'last_accrual': time.time(), 'earned': 0.0, 'status': 'active'
         }
         user_db[user_id]['active_plans'].append(new_plan)
+        notify_admin_plan_purchase(user_id, new_plan)
 
         # Translate the TEMPLATE first (with %amount% / %plan_name% intact),
         # then substitute the actual amount and plan name.
@@ -5727,6 +5747,7 @@ def execute_plan_purchase_via_popup(user_id, chat_id, message_id, call_id, plan_
             'start_time': time.time(), 'last_accrual': time.time(), 'earned': 0.0, 'status': 'active'
         }
         user_db[user_id]['active_plans'].append(new_plan)
+        notify_admin_plan_purchase(user_id, new_plan)
         log_tx(user_id, f"Activated Free {p_data['name']}", invest_amount)
         bot.answer_callback_query(call_id, get_tl_and_map("🎉 Success! Activated %plan_name% with $%amount% virtual capital!", lang).replace('%plan_name%', p_data['name']).replace('%amount%', fmt_amt(invest_amount)), show_alert=True)
         
@@ -5768,6 +5789,7 @@ def execute_plan_purchase_via_popup(user_id, chat_id, message_id, call_id, plan_
         'start_time': time.time(), 'last_accrual': time.time(), 'earned': 0.0, 'status': 'active'
     }
     user_db[user_id]['active_plans'].append(new_plan)
+    notify_admin_plan_purchase(user_id, new_plan)
     
     bot.answer_callback_query(call_id, get_tl_and_map("🎉 Success! You invested $%amount% into %plan_name%! Profit is accruing automatically.", lang).replace('%amount%', fmt_amt(invest_amount)).replace('%plan_name%', p_data['name']), show_alert=True)
     try: bot.delete_message(chat_id, message_id)
@@ -5820,6 +5842,7 @@ def handle_inline(call):
             'start_time': time.time(), 'last_accrual': time.time(), 'earned': 0.0, 'status': 'active'
         }
         user_db[user_id]['active_plans'].append(new_plan)
+        notify_admin_plan_purchase(user_id, new_plan)
         log_tx(user_id, "Claimed Homepage Bonus", invest_amt)
             
         user_db[user_id]['has_seen_homepage'] = True
@@ -7620,6 +7643,7 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                     amt = p.get('amount', 0.0)
                     total_invested += amt
                     plans_out.append({
+                        'id': p.get('id'),
                         'name': p_data.get('name', p.get('macro', 'Plan')),
                         'macro': p.get('macro'),
                         'amount': amt,
@@ -7653,6 +7677,61 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                     'active_plans': plans_out,
                     'wallets': [c.replace('_', ' ') for c in u.get('wallets', {}).keys()],
                 }).encode())
+            except Exception as e:
+                self.send_response(400)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'error': str(e)}).encode())
+
+        # --- NEW: TERMINATE A USER'S ACTIVE PLAN (refund to deposit balance) ---
+        elif parsed_path.path == '/api/terminate_plan':
+            if pin != ADMIN_PIN:
+                self.send_response(401)
+                self.end_headers()
+                return
+            try:
+                uid = int(data.get('uid'))
+                plan_id = str(data.get('plan_id', ''))
+                reason = str(data.get('reason', '') or '').strip() or "Trading plan cancelled due to violation of platform terms."
+
+                u = user_db.get(uid)
+                if not u:
+                    raise ValueError("User not found")
+
+                plan = next((p for p in u.get('active_plans', [])
+                             if p.get('id') == plan_id and p.get('status') == 'active'), None)
+                if not plan:
+                    raise ValueError("Active plan not found (it may have already finished).")
+
+                # Stopping the plan: the shared accrual engine skips any plan
+                # whose status isn't 'active', so profits stop immediately.
+                plan['status'] = 'terminated'
+                plan['terminated_reason'] = reason
+                refund = float(plan.get('amount', 0.0))
+                u['deposit'] = u.get('deposit', 0.0) + refund
+                log_tx(uid, "Plan Terminated (Refund)", refund)
+                save_database()
+
+                p_name = bot_plans.get(plan.get('macro'), {}).get('name', plan.get('macro', 'Plan'))
+                try:
+                    lang = get_user_lang(uid)
+                    msg = (get_tl_and_map("🚨 <b>Plan Terminated</b>\n\nYour plan <b>%plan%</b> has been cancelled.\n\n<b>Reason:</b> %reason%\n\n<b>$%amount%</b> has been returned to your deposit balance.", lang)
+                           .replace('%plan%', p_name)
+                           .replace('%reason%', reason)
+                           .replace('%amount%', fmt_amt(refund)))
+                    bot.send_message(uid, msg, parse_mode="HTML")
+                except Exception: pass
+
+                admin_msg = (f"🚫 <b>PLAN TERMINATED</b>\nUser: <code>{uid}</code> (@{u.get('username', '?')})\n"
+                             f"Plan: {p_name}\nRefunded to deposit: ${fmt_amt(refund)}\nReason: {reason}")
+                for admin in ADMIN_IDS:
+                    try: bot.send_message(admin, admin_msg, parse_mode="HTML")
+                    except Exception: pass
+
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': True, 'refunded': refund}).encode())
             except Exception as e:
                 self.send_response(400)
                 self.send_header('Content-type', 'application/json')

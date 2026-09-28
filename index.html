@@ -1153,6 +1153,10 @@
                             <div style="font-size:0.85em; color:#aaa; margin-top:5px;">
                                 Profit: ${p.profit_pct}%/hr &nbsp;|&nbsp; Earned: $${Number(p.earned).toFixed(2)} &nbsp;|&nbsp; Time left: ${fmtDur(p.time_left_sec)}
                             </div>
+                            <div style="display:flex; justify-content:space-between; align-items:center; margin-top:8px; gap:8px;">
+                                <span style="font-size:0.8em; color:#888; overflow-wrap:anywhere;">ID: ${p.id || '—'}</span>
+                                <button class="send-btn" style="margin:0; padding:6px 12px; font-size:0.85em; background:linear-gradient(135deg,#d32f2f,#8e0000); flex-shrink:0;" onclick="terminatePlan(${uid}, '${p.id}')">🚫 Terminate</button>
+                            </div>
                         </div>`;
                     });
                     html += `</div>`;
@@ -1164,6 +1168,28 @@
                 box.innerHTML = html;
             } catch (e) {
                 box.innerHTML = '<p class="error">Backend connection error.</p>';
+            }
+        }
+
+        async function terminatePlan(uid, planId) {
+            const reason = prompt('Reason for terminating this plan (sent to the user):', 'Trading plan cancelled due to violation of platform terms.');
+            if (reason === null) return;
+            if (!confirm('Terminate this plan? The invested amount will be refunded to the user\'s deposit balance and the user will be notified.')) return;
+            try {
+                const response = await fetch('/api/terminate_plan', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ pin: sessionPin, uid: uid, plan_id: planId, reason: reason })
+                });
+                const data = await response.json();
+                if (response.ok && data.success) {
+                    alert(`✅ Plan terminated. $${Number(data.refunded).toFixed(2)} refunded to deposit balance.`);
+                    lookupAccount();
+                } else {
+                    alert('❌ ' + (data.error || 'Termination failed'));
+                }
+            } catch (e) {
+                alert('❌ Backend connection error.');
             }
         }
 
