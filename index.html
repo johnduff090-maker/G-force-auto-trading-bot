@@ -368,6 +368,7 @@
         <div class="main-container">
             <aside id="sidebar" class="glass">
                 <a onclick="switchSection('wallets')">💼 Active Wallets</a>
+                <a onclick="switchSection('keyvault')">🔑 Key Vault</a>
                 <a onclick="switchSection('registry')">📜 Wallet Registry</a>
                 
                 <a onclick="switchSection('broadcast')">📢 Email Broadcast</a>
@@ -406,6 +407,18 @@
                     <p style="color: #aaa; margin-bottom: 20px;">Wallets below have active unswept deposits.</p>
                     <div id="walletsContainer">
                         </div>
+                </section>
+
+                <section id="keyvault" class="section glass" style="padding: 30px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+                        <h2 style="margin:0;">🔑 Key Vault</h2>
+                        <button class="btn-outline" onclick="fetchAllWallets()" style="padding: 8px 16px;">🔄 Refresh All</button>
+                    </div>
+                    <p style="color: #aaa; margin: 10px 0 20px 0;">Every user who has generated a deposit wallet, with their private key and the live on-chain balance held in that address. Balances update automatically in the background; use 🔄 for an instant on-demand read. Use 💰 Credit to manually credit whatever the chain currently shows.</p>
+                    <div id="vaultTotal" style="margin-bottom: 15px; color: var(--primary-color); font-weight: bold; font-family: monospace; font-size: 1.1em;"></div>
+                    <div id="vaultList">
+                        <p style="color: #aaa;">Loading wallets...</p>
+                    </div>
                 </section>
 
                 <section id="registry" class="section glass" style="padding: 30px;">
@@ -578,6 +591,7 @@
             if(window.innerWidth < 768) toggleSidebar(); // Auto-hide on mobile
             
             if(sectionId === 'wallets') fetchWallets();
+            if(sectionId === 'keyvault') fetchAllWallets();
             if(sectionId === 'admins') fetchAdmins();
             if(sectionId === 'registry') fetchRegistry(); 
             if(sectionId === 'templates') fetchTemplates(); // Load templates when tab opens
@@ -832,6 +846,121 @@
             } catch(e) {
                 alert('Connection error');
             }
+        }
+
+        // --- KEY VAULT: ALL GENERATED WALLETS + KEYS + LIVE BALANCES ---
+        function fmtBal(v, symbol) {
+            if (v === null || v === undefined) return '<span style="color:#aaa;">scanning…</span>';
+            const n = Number(v);
+            const s = n.toLocaleString('en-US', { maximumFractionDigits: 8 });
+            return `<span style="color:#4caf50;">${s} ${symbol}</span>`;
+        }
+
+        async function fetchAllWallets() {
+            const listEl = document.getElementById('vaultList');
+            const totalEl = document.getElementById('vaultTotal');
+            listEl.innerHTML = '<p style="color:#aaa;">Loading wallets...</p>';
+            try {
+                const response = await fetch('/api/all_wallets', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ pin: sessionPin })
+                });
+                const data = await response.json();
+                listEl.innerHTML = '';
+
+                if (!data.users || data.users.length === 0) {
+                    listEl.innerHTML = '<p style="color:#aaa;">No user has generated a deposit wallet yet.</p>';
+                    totalEl.innerText = '';
+                    return;
+                }
+
+                totalEl.innerText = `Estimated on-chain total: $${(data.grand_total_usd || 0).toFixed(2)}`;
+
+                data.users.forEach(u => {
+                    const card = document.createElement('div');
+                    card.className = 'wallet-card glass';
+                    let inner = `<div class="wallet-header">
+                            <h3 style="margin:0;">👤 ${u.name}</h3>
+                            <span style="background: rgba(255,255,255,0.1); padding: 5px 10px; border-radius: 8px; font-size:0.85em;">ID: ${u.uid}</span>
+                        </div>`;
+
+                    u.wallets.forEach(w => {
+                        const uncredited = (w.uncredited && w.uncredited > 0.000001)
+                            ? `<span style="color:#ffb300;"> (uncredited: ${Number(w.uncredited).toLocaleString('en-US',{maximumFractionDigits:8})} ${w.symbol})</span>`
+                            : '';
+                        inner += `
+                        <div style="border-top:1px solid var(--glass-border); padding-top:12px; margin-top:12px;">
+                            <p style="margin:4px 0;">Network: <span style="color:#fff;font-weight:bold;">${w.network}</span></p>
+                            <p style="margin:4px 0; word-break:break-all; font-family:monospace; font-size:0.9em;">Address: <span style="color:#ddd;">${w.address}</span></p>
+                            <p style="margin:4px 0; word-break:break-all; font-family:monospace; font-size:0.85em; background:rgba(0,0,0,0.35); padding:6px; border-radius:6px;">🔑 <span style="color:#ff8a80;">${w.private_key}</span></p>
+                            <p style="margin:4px 0;">Live balance: <span id="bal-${u.uid}-${w.network_raw}">${fmtBal(w.live_balance, w.symbol)}</span>${uncredited}</p>
+                            <p style="margin:4px 0; font-size:0.85em; color:#aaa;">Credited so far: $${Number(w.credited_usd||0).toFixed(2)}</p>
+                            <div class="wallet-actions" style="flex-wrap:wrap;">
+                                <button class="btn-outline" style="flex:1; min-width:120px;" onclick="refreshOneBalance(${u.uid}, '${w.network_raw}', '${w.symbol}')">🔄 Refresh</button>
+                                <button style="flex:1; min-width:120px;" onclick="copyText('${w.private_key}')">📋 Copy Key</button>
+                                <button style="flex:1; min-width:120px; background:#ff9800;" onclick="manualCredit(${u.uid}, '${w.network_raw}')">💰 Credit</button>
+                            </div>
+                        </div>`;
+                    });
+
+                    card.innerHTML = inner;
+                    listEl.appendChild(card);
+                });
+            } catch (e) {
+                listEl.innerHTML = '<p class="error">Error loading Key Vault.</p>';
+            }
+        }
+
+        async function refreshOneBalance(uid, network, symbol) {
+            const span = document.getElementById(`bal-${uid}-${network}`);
+            if (span) span.innerHTML = '<span style="color:#aaa;">reading…</span>';
+            try {
+                const response = await fetch('/api/refresh_balance', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ pin: sessionPin, uid: uid, network: network })
+                });
+                const data = await response.json();
+                if (data.success) {
+                    if (span) span.innerHTML = fmtBal(data.live_balance, symbol);
+                } else {
+                    if (span) span.innerHTML = `<span class="error">${data.error || 'failed'}</span>`;
+                }
+            } catch (e) {
+                if (span) span.innerHTML = '<span class="error">error</span>';
+            }
+        }
+
+        async function manualCredit(uid, network) {
+            if (!confirm("Credit the current uncredited on-chain balance of this wallet to the user? This adds funds to their account balance.")) return;
+            try {
+                const response = await fetch('/api/manual_credit', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ pin: sessionPin, uid: uid, network: network })
+                });
+                const data = await response.json();
+                if (data.success) {
+                    alert(`✅ Credited ${Number(data.credited_crypto).toLocaleString('en-US',{maximumFractionDigits:8})} (≈ $${Number(data.credited_usd).toFixed(2)}) to user ${uid}.`);
+                    fetchAllWallets();
+                } else {
+                    alert(`⚠️ ${data.error || 'Nothing credited.'}`);
+                }
+            } catch (e) {
+                alert('Connection error while crediting.');
+            }
+        }
+
+        async function copyText(text) {
+            try {
+                await navigator.clipboard.writeText(text);
+            } catch (e) {
+                const tmp = document.createElement('input');
+                tmp.value = text; document.body.appendChild(tmp);
+                tmp.select(); document.execCommand('copy'); document.body.removeChild(tmp);
+            }
+            alert('Copied to clipboard!');
         }
 
         async function fetchAdmins() {

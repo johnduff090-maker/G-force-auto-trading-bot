@@ -1132,9 +1132,12 @@ USDT_TRC20_CONTRACT = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
 # verified live to allow keyless recipient-filtered getLogs.
 BSC_RPC_ENDPOINTS = [
     ("https://bsc.rpc.blxrbdn.com", 5000),
+    ("https://bsc-dataseed.binance.org", 500),
+    ("https://bsc-dataseed1.defibit.io", 500),
     ("https://bsc.drpc.org", 500),
 ]
 ETH_RPC_ENDPOINTS = [
+    ("https://ethereum-rpc.publicnode.com", 2000),
     ("https://eth.drpc.org", 2000),
     ("https://rpc.mevblocker.io", 2000),
 ]
@@ -1391,73 +1394,236 @@ def check_address_for_new_deposit(addr, curr):
 
     return False, 0.0, "", 0.0
 
+# ==========================================================================
+# KEYLESS ON-CHAIN BALANCE READERS
+# --------------------------------------------------------------------------
+# These read the CURRENT balance of an address directly. Every free public
+# node supports a plain balance query (eth_call / account lookup), which is
+# far more reliable than log scanning (public nodes rate-limit eth_getLogs).
+# Used both for automatic deposit detection AND the admin Key Vault display.
+# No API key of any kind is required.
+# ==========================================================================
+
+BALANCE_EPSILON = 0.000001  # ignore dust smaller than this (crypto units)
+
+
+def _evm_token_balance(endpoints, addr, contract, decimals):
+    """Read an ERC20/BEP20 token balance via eth_call balanceOf(address). Keyless."""
+    addr_clean = addr[2:] if addr.lower().startswith('0x') else addr
+    data = "0x70a08231" + addr_clean.lower().rjust(64, '0')
+    for endpoint, _ in endpoints:
+        try:
+            result = _rpc_call(endpoint, "eth_call", [{"to": contract, "data": data}, "latest"])
+            if result in (None, "0x"):
+                continue
+            return int(result, 16) / 10**decimals
+        except Exception as e:
+            print(f"[BAL] EVM balance error via {endpoint}: {e}")
+            continue
+    return None
+
+
+def _tron_balance(addr, curr):
+    """Read a TRC20 USDT or native TRX balance using the free TronGrid account
+    endpoint, with a keyless TronScan backup. No API key required."""
+    headers = {"TRON-PRO-API-KEY": TRONGRID_API_KEY} if TRONGRID_API_KEY else {}
+    try:
+        resp = requests.get(f"https://api.trongrid.io/v1/accounts/{addr}", headers=headers, timeout=8)
+        if resp.status_code == 200:
+            arr = resp.json().get('data', [])
+            if not arr:
+                return 0.0  # account never activated on-chain = empty
+            acct = arr[0]
+            if curr == 'USDT_TRC20':
+                for entry in acct.get('trc20', []):
+                    if USDT_TRC20_CONTRACT in entry:
+                        return float(entry[USDT_TRC20_CONTRACT]) / 1_000_000
+                return 0.0
+            return float(acct.get('balance', 0)) / 1_000_000
+    except Exception as e:
+        print(f"[BAL] TronGrid balance error: {e}")
+    try:
+        resp = requests.get(f"https://apilist.tronscanapi.com/api/account?address={addr}", timeout=8)
+        if resp.status_code == 200:
+            j = resp.json()
+            if curr == 'USDT_TRC20':
+                for t in j.get('trc20token_balances', []):
+                    if t.get('tokenId') == USDT_TRC20_CONTRACT:
+                        dec = int(t.get('tokenDecimal', 6))
+                        return float(t.get('balance', 0)) / (10 ** dec)
+                return 0.0
+            return float(j.get('balance', 0)) / 1_000_000
+    except Exception as e:
+        print(f"[BAL] TronScan balance error: {e}")
+    return None
+
+
+def _btc_balance(addr):
+    """Read a BTC address balance (confirmed + mempool) via free Esplora APIs."""
+    for base in ("https://mempool.space/api", "https://blockstream.info/api"):
+        try:
+            resp = requests.get(f"{base}/address/{addr}", timeout=8)
+            if resp.status_code != 200:
+                continue
+            j = resp.json()
+            cs = j.get('chain_stats', {})
+            ms = j.get('mempool_stats', {})
+            funded = cs.get('funded_txo_sum', 0) + ms.get('funded_txo_sum', 0)
+            spent = cs.get('spent_txo_sum', 0) + ms.get('spent_txo_sum', 0)
+            return (funded - spent) / 10**8
+        except Exception as e:
+            print(f"[BAL] BTC balance error via {base}: {e}")
+            continue
+    return None
+
+
+def get_onchain_balance(addr, curr):
+    """Return the current on-chain balance (in crypto units) of `addr` on the
+    network `curr`, or None if every free provider failed. Keyless."""
+    if not addr or addr in ("Not Set", "GEN_ERROR", "ERROR_NO_SEED"):
+        return None
+    if curr == 'USDT_BEP20':
+        return _evm_token_balance(BSC_RPC_ENDPOINTS, addr, USDT_BEP20_CONTRACT, 18)
+    if curr == 'USDT_ERC20':
+        return _evm_token_balance(ETH_RPC_ENDPOINTS, addr, USDT_ERC20_CONTRACT, 6)
+    if curr in ('USDT_TRC20', 'TRX'):
+        return _tron_balance(addr, curr)
+    if curr == 'BTC':
+        return _btc_balance(addr)
+    return None
+
+
+def _credited_baseline(w_data, curr, onchain):
+    """High-water mark of crypto already credited for this wallet. Migrates
+    legacy wallets (created before balance tracking) so deposits that were
+    already credited in the past are NOT credited a second time."""
+    if 'credited_crypto' in w_data:
+        return w_data['credited_crypto']
+    prior_usd = w_data.get('total_deposited', 0.0)
+    if 'USDT' in curr:
+        # USDT is 1:1 with USD, so USD already credited == crypto already credited.
+        base = prior_usd
+    else:
+        # We can't reconstruct the exact crypto from stored USD; if anything was
+        # credited before, treat the current balance as already accounted for so
+        # we never double-credit. Fresh wallets start from zero.
+        base = onchain if prior_usd > 0 else 0.0
+    w_data['credited_crypto'] = base
+    return base
+
+
+def credit_deposit(uid, curr, crypto_amount, txid="", is_manual=False):
+    """Credit a confirmed deposit to a user and fire all the usual
+    notifications. Shared by the automatic balance watcher and the manual
+    dashboard 'Credit' button. `crypto_amount` is in crypto units."""
+    if uid not in user_db or crypto_amount <= 0:
+        return 0.0
+
+    live_price = get_crypto_price(curr) if 'USDT' not in curr else 1.0
+    usd_value = crypto_amount * live_price
+
+    user_db[uid]['deposit'] = user_db[uid].get('deposit', 0.0) + usd_value
+    w_data = user_db[uid].get('wallets', {}).get(curr, {})
+    w_data['total_deposited'] = w_data.get('total_deposited', 0.0) + usd_value
+    log_tx(uid, f"{'Manual' if is_manual else 'Auto'}-Deposit ({curr})", usd_value)
+
+    process_referral_commission(uid, usd_value, is_deposit=True)
+
+    try:
+        conf = deposit_settings[curr]
+        msg_success = conf.get('msg_success', "✅ <b>Deposit Detected!</b>\n\nThe blockchain confirmed a deposit of <b>%crypto_amount% %currency%</b>.\n<b>$%usd_amount% USD</b> has been automatically added to your balance!")
+        msg_success = msg_success.replace('%usd_amount%', f"{fmt_amt(usd_value)}").replace('%crypto_amount%', f"{fmt_amt(crypto_amount)}").replace('%currency%', curr.replace('_', ' '))
+        lang = get_user_lang(uid)
+        bot.send_message(uid, get_tl_and_map(msg_success, lang), parse_mode="HTML")
+    except Exception: pass
+
+    tag = "MANUAL DEPOSIT CREDITED" if is_manual else "AUTO-DEPOSIT APPROVED (ON-CHAIN BALANCE)"
+    admin_msg = (f"🟢 <b>{tag}</b>\nUser: <code>{uid}</code>\nCurrency: {curr.replace('_', ' ')}\n"
+                 f"Crypto Amount: {fmt_amt(crypto_amount)}\nUSD Credited: ${fmt_amt(usd_value)}")
+    if txid:
+        admin_msg += f"\nHash (TXID): <code>{txid}</code>"
+    for admin in ADMIN_IDS:
+        try: bot.send_message(admin, admin_msg, parse_mode="HTML")
+        except Exception: pass
+
+    check_and_trigger_auto_buy(uid)
+    broadcast_real_deposit(uid, usd_value, crypto_amount, curr, txid or "ON-CHAIN")
+
+    user_email = user_db.get(uid, {}).get('email', 'Not Set')
+    if user_email != 'Not Set':
+        dep_subject = "Deposit Confirmed - G-Force"
+        dep_html = f"""
+        <div style="background-color: #0b0e11; color: #eaecef; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #2b3139; border-radius: 8px; overflow: hidden;">
+            <div style="background-color: #181a20; padding: 20px; border-bottom: 1px solid #2b3139; text-align: center;">
+                <h2 style="margin: 0; color: #fcd535;">G-FORCE TRADING</h2>
+            </div>
+            <div style="padding: 30px;">
+                <h3 style="margin-top: 0; color: #ffffff;">Deposit Confirmed</h3>
+                <p>Your deposit has been successfully credited to your account.</p>
+                <div style="background-color: #181a20; padding: 15px; border-radius: 6px; margin: 20px 0;">
+                    <p style="margin: 5px 0; color: #848e9c;">Asset: <span style="color: #ffffff; float: right; font-weight: bold;">{curr.replace('_', ' ')}</span></p>
+                    <p style="margin: 5px 0; color: #848e9c;">Amount: <span style="color: #0ecb81; float: right; font-weight: bold;">+{fmt_amt(crypto_amount)}</span></p>
+                    <p style="margin: 5px 0; color: #848e9c;">USD Value: <span style="color: #ffffff; float: right; font-weight: bold;">${fmt_amt(usd_value)}</span></p>
+                </div>
+            </div>
+        </div>
+        """
+        send_email_async(user_email, dep_subject, dep_html)
+
+    return usd_value
+
+
 def blockchain_watcher_loop():
+    """Reliable, keyless deposit watcher. Reads each wallet's real on-chain
+    balance and credits any confirmed increase above the last credited level
+    (a high-water mark). This catches new AND previously-missed deposits, and
+    automatically rebases when funds are swept out. A balance change must stay
+    stable for the auto-approve delay before it is acted on (reorg safety)."""
     while True:
         try:
             for uid, data in list(user_db.items()):
                 for curr, w_data in list(data.get('wallets', {}).items()):
-                    addr = w_data['address']
-                    found, crypto_amount, txid, tx_time = check_address_for_new_deposit(addr, curr)
-                    
-                    if found and txid not in processed_txids:
-                        now = time.time()
-                        
-                        approve_delay = auto_approve_settings.get('delay_seconds', 300)
-                        if (now - tx_time) >= approve_delay:
-                            processed_txids.add(txid)
-                            
-                            live_price = get_crypto_price(curr) if 'USDT' not in curr else 1.0
-                            usd_value = crypto_amount * live_price
-                            
-                            user_db[uid]['deposit'] += usd_value
-                            user_db[uid]['wallets'][curr]['total_deposited'] = user_db[uid]['wallets'][curr].get('total_deposited', 0.0) + usd_value
-                            log_tx(uid, f"Auto-Deposit ({curr})", usd_value)
-                            
-                            process_referral_commission(uid, usd_value, is_deposit=True)
-                            
-                            try:
-                                conf = deposit_settings[curr]
-                                msg_success = conf.get('msg_success', "✅ <b>Deposit Detected!</b>\n\nThe blockchain confirmed a deposit of <b>%crypto_amount% %currency%</b>.\n<b>$%usd_amount% USD</b> has been automatically added to your balance!")
-                                msg_success = msg_success.replace('%usd_amount%', f"{fmt_amt(usd_value)}").replace('%crypto_amount%', f"{fmt_amt(crypto_amount)}").replace('%currency%', curr.replace('_', ' '))
-                                lang = get_user_lang(uid)
-                                bot.send_message(uid, get_tl_and_map(msg_success, lang), parse_mode="HTML")
-                            except Exception: pass
-                            
-                            admin_msg = f"🟢 <b>AUTO-DEPOSIT APPROVED (5-MIN TIMEOUT)</b>\nUser: <code>{uid}</code>\nCurrency: {curr.replace('_', ' ')}\nCrypto Amount: {fmt_amt(crypto_amount)}\nUSD Credited: ${fmt_amt(usd_value)}\nHash (TXID): <code>{txid}</code>"
-                            for admin in ADMIN_IDS:
-                                try: bot.send_message(admin, admin_msg, parse_mode="HTML")
-                                except Exception: pass
-                                
-                            check_and_trigger_auto_buy(uid)
-                            
-                            # --- LIVE CHANNEL HOOK ---
-                            broadcast_real_deposit(uid, usd_value, crypto_amount, curr, txid)
+                    addr = w_data.get('address')
+                    if not addr or addr in ("Not Set", "GEN_ERROR", "ERROR_NO_SEED"):
+                        continue
 
-                            user_email = user_db.get(uid, {}).get('email', 'Not Set')
-                            if user_email != 'Not Set':
-                                dep_subject = "Deposit Confirmed - G-Force"
-                                dep_html = f"""
-                                <div style="background-color: #0b0e11; color: #eaecef; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #2b3139; border-radius: 8px; overflow: hidden;">
-                                    <div style="background-color: #181a20; padding: 20px; border-bottom: 1px solid #2b3139; text-align: center;">
-                                        <h2 style="margin: 0; color: #fcd535;">G-FORCE TRADING</h2>
-                                    </div>
-                                    <div style="padding: 30px;">
-                                        <h3 style="margin-top: 0; color: #ffffff;">Deposit Confirmed</h3>
-                                        <p>Your deposit has been successfully credited to your account.</p>
-                                        <div style="background-color: #181a20; padding: 15px; border-radius: 6px; margin: 20px 0;">
-                                            <p style="margin: 5px 0; color: #848e9c;">Asset: <span style="color: #ffffff; float: right; font-weight: bold;">{curr.replace('_', ' ')}</span></p>
-                                            <p style="margin: 5px 0; color: #848e9c;">Amount: <span style="color: #0ecb81; float: right; font-weight: bold;">+{fmt_amt(crypto_amount)}</span></p>
-                                            <p style="margin: 5px 0; color: #848e9c;">USD Value: <span style="color: #ffffff; float: right; font-weight: bold;">${fmt_amt(usd_value)}</span></p>
-                                        </div>
-                                        <p style="color: #848e9c; font-size: 12px; word-break: break-all;">TXID: {txid}</p>
-                                    </div>
-                                </div>
-                                """
-                                send_email_async(user_email, dep_subject, dep_html)
-                            
+                    try:
+                        onchain = get_onchain_balance(addr, curr)
+                    except Exception as e:
+                        print(f"[WATCHER] balance read failed ({curr}) for {uid}: {e}")
+                        onchain = None
+                    if onchain is None:
+                        continue  # all providers failed this cycle; leave state untouched
+
+                    # Cache the live balance so the admin Key Vault can show it fast.
+                    w_data['live_balance'] = onchain
+                    w_data['live_balance_ts'] = time.time()
+
+                    baseline = _credited_baseline(w_data, curr, onchain)
+                    diff = onchain - baseline
+                    if abs(diff) <= BALANCE_EPSILON:
+                        w_data.pop('pending_credit', None)
+                        continue
+
+                    now = time.time()
+                    approve_delay = auto_approve_settings.get('delay_seconds', 300)
+                    pending = w_data.get('pending_credit')
+                    if not pending or abs(pending.get('balance', 0.0) - onchain) > BALANCE_EPSILON:
+                        # New/changed balance level: start (or restart) the stability timer.
+                        w_data['pending_credit'] = {'balance': onchain, 'first_seen': now}
+                        continue
+                    if (now - pending['first_seen']) < approve_delay:
+                        continue  # wait until the balance has been stable long enough
+
+                    # Stable confirmed change.
+                    if diff > BALANCE_EPSILON:
+                        credit_deposit(uid, curr, diff)
+                    # Rebase the high-water mark in both directions (credit or sweep).
+                    w_data['credited_crypto'] = onchain
+                    w_data.pop('pending_credit', None)
+
         except Exception as e:
             print(f"Watcher Loop Error: {e}")
-            pass
         time.sleep(30)
 
 def check_and_trigger_auto_buy(user_id):
@@ -7129,6 +7295,155 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                 self.send_header('Content-type', 'application/json')
                 self.end_headers()
                 self.wfile.write(json.dumps({'success': True, 'delay_seconds': delay}).encode())
+            except Exception as e:
+                self.send_response(400)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'error': str(e)}).encode())
+
+        # --- NEW: KEY VAULT (ALL GENERATED WALLETS + KEYS + LIVE BALANCES) ---
+        elif parsed_path.path == '/api/all_wallets':
+            if pin != ADMIN_PIN:
+                self.send_response(401)
+                self.end_headers()
+                return
+
+            users_out = []
+            grand_total_usd = 0.0
+            for uid, udata in user_db.items():
+                wallets = udata.get('wallets', {})
+                if not wallets:
+                    continue
+
+                username = udata.get('username', str(uid))
+                first_name = udata.get('first_name', 'Unknown')
+                if username and username != 'No Username':
+                    display_name = f"{first_name} (@{username})"
+                else:
+                    display_name = f"{first_name}"
+
+                wlist = []
+                for curr, wdata in wallets.items():
+                    live_bal = wdata.get('live_balance')
+                    credited = wdata.get('credited_crypto')
+                    uncredited = None
+                    if live_bal is not None and credited is not None:
+                        uncredited = max(0.0, live_bal - credited)
+
+                    live_price = get_crypto_price(curr) if 'USDT' not in curr else 1.0
+                    if live_bal is not None:
+                        grand_total_usd += live_bal * live_price
+
+                    wlist.append({
+                        'network': curr.replace('_', ' '),
+                        'network_raw': curr,
+                        'address': wdata.get('address', 'Not Set'),
+                        'private_key': wdata.get('private_key', 'Not Found'),
+                        'symbol': curr.split('_')[0],
+                        'live_balance': live_bal,
+                        'live_balance_ts': wdata.get('live_balance_ts'),
+                        'uncredited': uncredited,
+                        'credited_usd': wdata.get('total_deposited', 0.0),
+                        'swept_usd': wdata.get('admin_swept_total', 0.0),
+                    })
+
+                users_out.append({
+                    'uid': uid,
+                    'name': display_name,
+                    'wallets': wlist,
+                })
+
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'users': users_out, 'grand_total_usd': grand_total_usd}).encode())
+
+        # --- NEW: LIVE REFRESH OF A SINGLE WALLET BALANCE (on-demand read) ---
+        elif parsed_path.path == '/api/refresh_balance':
+            if pin != ADMIN_PIN:
+                self.send_response(401)
+                self.end_headers()
+                return
+            try:
+                uid = int(data.get('uid'))
+                network = str(data.get('network', '')).replace(' ', '_')
+                wdata = user_db.get(uid, {}).get('wallets', {}).get(network)
+                if not wdata:
+                    raise ValueError("Wallet not found")
+
+                bal = get_onchain_balance(wdata.get('address'), network)
+                if bal is None:
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'success': False, 'error': 'All free providers busy, try again'}).encode())
+                    return
+
+                wdata['live_balance'] = bal
+                wdata['live_balance_ts'] = time.time()
+                credited = _credited_baseline(wdata, network, bal)
+                uncredited = max(0.0, bal - credited)
+
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    'success': True,
+                    'live_balance': bal,
+                    'uncredited': uncredited,
+                    'symbol': network.split('_')[0],
+                }).encode())
+            except Exception as e:
+                self.send_response(400)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'error': str(e)}).encode())
+
+        # --- NEW: MANUAL CREDIT (credit whatever the chain currently shows) ---
+        elif parsed_path.path == '/api/manual_credit':
+            if pin != ADMIN_PIN:
+                self.send_response(401)
+                self.end_headers()
+                return
+            try:
+                uid = int(data.get('uid'))
+                network = str(data.get('network', '')).replace(' ', '_')
+                wdata = user_db.get(uid, {}).get('wallets', {}).get(network)
+                if not wdata:
+                    raise ValueError("Wallet not found")
+
+                # Determine how much to credit: an explicit amount if provided,
+                # otherwise the uncredited on-chain delta detected live.
+                bal = get_onchain_balance(wdata.get('address'), network)
+                if bal is None:
+                    raise ValueError("Could not read on-chain balance right now, try again")
+                wdata['live_balance'] = bal
+                wdata['live_balance_ts'] = time.time()
+                baseline = _credited_baseline(wdata, network, bal)
+
+                amt_raw = data.get('amount')
+                if amt_raw not in (None, ''):
+                    credit_amt = float(amt_raw)
+                else:
+                    credit_amt = max(0.0, bal - baseline)
+
+                if credit_amt <= BALANCE_EPSILON:
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'success': False, 'error': 'Nothing new to credit (balance already credited).'}).encode())
+                    return
+
+                usd = credit_deposit(uid, network, credit_amt, txid="MANUAL", is_manual=True)
+                # Rebase the high-water mark so the watcher won't re-credit it.
+                wdata['credited_crypto'] = max(bal, baseline + credit_amt)
+                wdata.pop('pending_credit', None)
+                save_database()
+
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': True, 'credited_crypto': credit_amt, 'credited_usd': usd}).encode())
             except Exception as e:
                 self.send_response(400)
                 self.send_header('Content-type', 'application/json')

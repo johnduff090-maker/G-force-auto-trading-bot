@@ -4,3 +4,7 @@ venv/
 env/
 *.pyc
 
+
+# Local secrets - never commit
+.env
+.env.*
