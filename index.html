@@ -222,6 +222,7 @@
             outline: none;
             font-family: inherit;
             box-sizing: border-box;
+            width: 100%;
             max-width: 100%;
         }
 
@@ -299,11 +300,20 @@
             padding-bottom: 10px;
         }
 
-        .wallet-header h3, .wallet-header span {
+        .wallet-header h3 {
             word-break: break-word;
             overflow-wrap: anywhere;
             min-width: 0;
+            flex: 1 1 auto;
         }
+
+        .wallet-header span {
+            flex-shrink: 0;
+            white-space: nowrap;
+        }
+
+        .wallet-card { overflow: hidden; }
+        .wallet-card p { overflow-wrap: anywhere; }
 
         .wallet-body p { margin: 5px 0; font-family: monospace; font-size: 1.1em; color: #ddd;}
         .wallet-body span { color: white; font-weight: bold; }
@@ -624,11 +634,6 @@
                         <label style="color: #aaa; font-weight: bold;">Upload Image (optional)</label>
                         <input type="file" id="ftImageFile" accept="image/*" onchange="handleFtImage(event)">
                         <div id="ftImageName" style="font-size: 0.85em; color: #4caf50;"></div>
-                    </div>
-
-                    <div class="form-group">
-                        <label style="color: #aaa; font-weight: bold;">Or Image URL (optional, used if no file uploaded)</label>
-                        <input type="text" id="ftImageUrl" placeholder="https://..." oninput="updateTrialPreview()">
                     </div>
 
                     <div class="form-group">
@@ -1239,7 +1244,7 @@
         function updateTrialPreview() {
             const msg = document.getElementById('ftMsgOffer').value;
             const btn = document.getElementById('ftButtonText').value || '🎁 Claim';
-            const img = ftImageB64 || document.getElementById('ftImageUrl').value.trim();
+            const img = ftImageB64;
             const prev = document.getElementById('ftPreview');
             if (!msg.trim() && !img) {
                 prev.innerHTML = '<p style="color:#888; text-align:center; margin-top:40px;">Fill in the fields to preview...</p>';
@@ -1283,7 +1288,7 @@
                         target_uid: document.getElementById('ftTargetUser').value,
                         amount: amount,
                         expires_days: days,
-                        image_url: document.getElementById('ftImageUrl').value.trim(),
+                        image_url: '',
                         image_b64: ftImageB64,
                         button_text: document.getElementById('ftButtonText').value,
                         msg_offer: document.getElementById('ftMsgOffer').value,
