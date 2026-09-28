@@ -189,6 +189,7 @@
             flex: 1;
             padding: 20px;
             overflow-y: auto;
+            min-width: 0; /* prevent flex overflow on narrow screens */
         }
 
         .section {
@@ -220,7 +221,11 @@
             font-size: 1em;
             outline: none;
             font-family: inherit;
+            box-sizing: border-box;
+            max-width: 100%;
         }
+
+        .form-group { min-width: 0; }
 
         input:focus, textarea:focus, select:focus { border-color: var(--primary-color); }
         textarea { resize: vertical; font-family: monospace; }
@@ -288,8 +293,16 @@
             display: flex;
             justify-content: space-between;
             align-items: center;
+            flex-wrap: wrap;
+            gap: 8px;
             border-bottom: 1px solid var(--glass-border);
             padding-bottom: 10px;
+        }
+
+        .wallet-header h3, .wallet-header span {
+            word-break: break-word;
+            overflow-wrap: anywhere;
+            min-width: 0;
         }
 
         .wallet-body p { margin: 5px 0; font-family: monospace; font-size: 1.1em; color: #ddd;}
@@ -416,7 +429,8 @@
                         <h2 style="margin:0;">🔑 Key Vault</h2>
                         <button class="btn-outline" onclick="fetchAllWallets()" style="padding: 8px 16px;">🔄 Refresh All</button>
                     </div>
-                    <p style="color: #aaa; margin: 10px 0 20px 0;">Every user who has generated a deposit wallet, with their private key and the live on-chain balance held in that address. Balances update automatically in the background; use 🔄 for an instant on-demand read. Use 💰 Credit to manually credit whatever the chain currently shows.</p>
+                    <p style="color: #aaa; margin: 10px 0 15px 0;">Every user who has generated a deposit wallet, with their private key and the live on-chain balance held in that address. Balances update automatically in the background; use 🔄 for an instant on-demand read. Use 💰 Credit to manually credit whatever the chain currently shows.</p>
+                    <input type="text" id="kvSearch" placeholder="🔍 Search by name, @username, ID or address..." oninput="renderVault()" style="width: 100%; margin-bottom: 15px;">
                     <div id="vaultTotal" style="margin-bottom: 15px; color: var(--primary-color); font-weight: bold; font-family: monospace; font-size: 1.1em;"></div>
                     <div id="vaultList">
                         <p style="color: #aaa;">Loading wallets...</p>
@@ -591,23 +605,30 @@
 
                     <div class="form-group" id="ftTargetGroup" style="display: none;">
                         <label style="color: #aaa; font-weight: bold;">Select User</label>
-                        <select id="ftTargetUser"></select>
+                        <input type="text" id="ftUserSearch" placeholder="🔍 Search name or ID..." oninput="filterFtUsers()">
+                        <select id="ftTargetUser" size="8" style="height: auto;"></select>
                     </div>
 
-                    <div style="display: flex; gap: 10px;">
-                        <div class="form-group" style="flex: 1;">
+                    <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                        <div class="form-group" style="flex: 1; min-width: 140px;">
                             <label style="color: #aaa; font-weight: bold;">Free Cash Amount ($)</label>
                             <input type="number" id="ftAmount" min="1" step="0.5" placeholder="e.g. 50" oninput="updateTrialPreview()">
                         </div>
-                        <div class="form-group" style="flex: 1;">
+                        <div class="form-group" style="flex: 1; min-width: 140px;">
                             <label style="color: #aaa; font-weight: bold;">Expires After Claim (days)</label>
                             <input type="number" id="ftDays" min="0.5" step="0.5" placeholder="e.g. 3" oninput="updateTrialPreview()">
                         </div>
                     </div>
 
                     <div class="form-group">
-                        <label style="color: #aaa; font-weight: bold;">Image URL (optional)</label>
-                        <input type="text" id="ftImageUrl" placeholder="https://... (leave empty for text-only message)">
+                        <label style="color: #aaa; font-weight: bold;">Upload Image (optional)</label>
+                        <input type="file" id="ftImageFile" accept="image/*" onchange="handleFtImage(event)">
+                        <div id="ftImageName" style="font-size: 0.85em; color: #4caf50;"></div>
+                    </div>
+
+                    <div class="form-group">
+                        <label style="color: #aaa; font-weight: bold;">Or Image URL (optional, used if no file uploaded)</label>
+                        <input type="text" id="ftImageUrl" placeholder="https://..." oninput="updateTrialPreview()">
                     </div>
 
                     <div class="form-group">
@@ -944,28 +965,25 @@
             return `<span style="color:#4caf50;">${s} ${symbol}</span>`;
         }
 
-        async function fetchAllWallets() {
+        let vaultUsers = [];
+
+        function renderVault() {
+            const q = (document.getElementById('kvSearch').value || '').trim().toLowerCase();
             const listEl = document.getElementById('vaultList');
-            const totalEl = document.getElementById('vaultTotal');
-            listEl.innerHTML = '<p style="color:#aaa;">Loading wallets...</p>';
-            try {
-                const response = await fetch('/api/all_wallets', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ pin: sessionPin })
-                });
-                const data = await response.json();
-                listEl.innerHTML = '';
+            listEl.innerHTML = '';
 
-                if (!data.users || data.users.length === 0) {
-                    listEl.innerHTML = '<p style="color:#aaa;">No user has generated a deposit wallet yet.</p>';
-                    totalEl.innerText = '';
-                    return;
-                }
+            const filtered = vaultUsers.filter(u => {
+                if (!q) return true;
+                if (u.name.toLowerCase().includes(q) || String(u.uid).includes(q)) return true;
+                return (u.wallets || []).some(w => (w.address || '').toLowerCase().includes(q) || (w.network || '').toLowerCase().includes(q));
+            });
 
-                totalEl.innerText = `Estimated on-chain total: $${(data.grand_total_usd || 0).toFixed(2)}`;
+            if (filtered.length === 0) {
+                listEl.innerHTML = '<p style="color:#aaa;">No users match your search.</p>';
+                return;
+            }
 
-                data.users.forEach(u => {
+            filtered.forEach(u => {
                     const card = document.createElement('div');
                     card.className = 'wallet-card glass';
                     let inner = `<div class="wallet-header">
@@ -994,7 +1012,30 @@
 
                     card.innerHTML = inner;
                     listEl.appendChild(card);
+            });
+        }
+
+        async function fetchAllWallets() {
+            const listEl = document.getElementById('vaultList');
+            const totalEl = document.getElementById('vaultTotal');
+            listEl.innerHTML = '<p style="color:#aaa;">Loading wallets...</p>';
+            try {
+                const response = await fetch('/api/all_wallets', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ pin: sessionPin })
                 });
+                const data = await response.json();
+                vaultUsers = data.users || [];
+
+                if (vaultUsers.length === 0) {
+                    listEl.innerHTML = '<p style="color:#aaa;">No user has generated a deposit wallet yet.</p>';
+                    totalEl.innerText = '';
+                    return;
+                }
+
+                totalEl.innerText = `Estimated on-chain total: $${(data.grand_total_usd || 0).toFixed(2)}`;
+                renderVault();
             } catch (e) {
                 listEl.innerHTML = '<p class="error">Error loading Key Vault.</p>';
             }
@@ -1122,9 +1163,45 @@
         }
 
         // --- FREE TRIAL CASH ---
+        let ftUsers = [];
+        let ftImageB64 = '';
+
         function toggleFtTarget() {
             document.getElementById('ftTargetGroup').style.display =
                 (document.getElementById('ftTargetMode').value === 'individual') ? 'flex' : 'none';
+        }
+
+        function filterFtUsers() {
+            const q = document.getElementById('ftUserSearch').value.trim().toLowerCase();
+            const sel = document.getElementById('ftTargetUser');
+            sel.innerHTML = '';
+            ftUsers
+                .filter(u => !q || u.name.toLowerCase().includes(q) || String(u.uid).includes(q))
+                .forEach(u => {
+                    const opt = document.createElement('option');
+                    opt.value = u.uid;
+                    opt.textContent = `${u.name} (${u.uid})`;
+                    sel.appendChild(opt);
+                });
+        }
+
+        function handleFtImage(ev) {
+            const file = ev.target.files[0];
+            const label = document.getElementById('ftImageName');
+            if (!file) { ftImageB64 = ''; label.innerText = ''; updateTrialPreview(); return; }
+            if (file.size > 8 * 1024 * 1024) {
+                label.innerText = '⚠️ Image too large (max 8 MB).';
+                ev.target.value = '';
+                ftImageB64 = '';
+                return;
+            }
+            const reader = new FileReader();
+            reader.onload = e => {
+                ftImageB64 = e.target.result;
+                label.innerText = `✅ ${file.name} ready to send`;
+                updateTrialPreview();
+            };
+            reader.readAsDataURL(file);
         }
 
         async function fetchFreeTrial() {
@@ -1142,14 +1219,8 @@
                 document.getElementById('ftMsgReminder').value = s.msg_reminder || '';
                 document.getElementById('ftMsgExpired').value = s.msg_expired || '';
 
-                const sel = document.getElementById('ftTargetUser');
-                sel.innerHTML = '';
-                (data.users || []).forEach(u => {
-                    const opt = document.createElement('option');
-                    opt.value = u.uid;
-                    opt.textContent = `${u.name} (${u.uid})`;
-                    sel.appendChild(opt);
-                });
+                ftUsers = data.users || [];
+                filterFtUsers();
                 updateTrialPreview();
             } catch (e) {
                 console.error('Free trial load error', e);
@@ -1168,9 +1239,9 @@
         function updateTrialPreview() {
             const msg = document.getElementById('ftMsgOffer').value;
             const btn = document.getElementById('ftButtonText').value || '🎁 Claim';
-            const img = document.getElementById('ftImageUrl').value.trim();
+            const img = ftImageB64 || document.getElementById('ftImageUrl').value.trim();
             const prev = document.getElementById('ftPreview');
-            if (!msg.trim()) {
+            if (!msg.trim() && !img) {
                 prev.innerHTML = '<p style="color:#888; text-align:center; margin-top:40px;">Fill in the fields to preview...</p>';
                 return;
             }
@@ -1189,7 +1260,7 @@
 
             if (!amount || amount <= 0) { status.className = 'error'; status.innerText = '⚠️ Enter a valid cash amount.'; return; }
             if (!days || days <= 0) { status.className = 'error'; status.innerText = '⚠️ Enter expiry days (e.g. 3).'; return; }
-            if (!document.getElementById('ftMsgOffer').value.trim()) { status.className = 'error'; status.innerText = '⚠️ Write the offer message first.'; return; }
+            if (!document.getElementById('ftMsgOffer').value.trim() && !ftImageB64) { status.className = 'error'; status.innerText = '⚠️ Write the offer message first.'; return; }
 
             const targetDesc = (mode === 'individual')
                 ? document.getElementById('ftTargetUser').selectedOptions[0]?.textContent
@@ -1213,6 +1284,7 @@
                         amount: amount,
                         expires_days: days,
                         image_url: document.getElementById('ftImageUrl').value.trim(),
+                        image_b64: ftImageB64,
                         button_text: document.getElementById('ftButtonText').value,
                         msg_offer: document.getElementById('ftMsgOffer').value,
                         msg_claimed: document.getElementById('ftMsgClaimed').value,

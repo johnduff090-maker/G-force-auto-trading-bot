@@ -9,6 +9,8 @@ import requests
 import json
 import html
 import re
+import io
+import base64
 import psutil
 import random
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -6904,9 +6906,16 @@ def send_free_trial_offer(uid, offer):
     btn_text = _ft_fill(free_trial_settings.get('button_text', '🎁 Claim ${amount} Free Cash'), amount, days)
     markup = InlineKeyboardMarkup()
     markup.row(InlineKeyboardButton(btn_text, callback_data=f"claim_trial_{offer['id']}"))
-    img = offer.get('image_url', '')
-    if img:
-        bot.send_photo(uid, img, caption=text, parse_mode="HTML", reply_markup=markup)
+    img_b64 = offer.get('image_b64', '')
+    img_url = offer.get('image_url', '')
+    if img_b64:
+        # Admin uploaded an image file — send it as a Telegram photo upload.
+        payload = img_b64.split(',', 1)[1] if ',' in img_b64 else img_b64
+        photo = io.BytesIO(base64.b64decode(payload))
+        photo.name = 'offer.jpg'
+        bot.send_photo(uid, photo, caption=text, parse_mode="HTML", reply_markup=markup)
+    elif img_url:
+        bot.send_photo(uid, img_url, caption=text, parse_mode="HTML", reply_markup=markup)
     else:
         bot.send_message(uid, text, parse_mode="HTML", reply_markup=markup)
 
@@ -7691,6 +7700,7 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                     'amount': amount,
                     'expires_days': days,
                     'image_url': str(data.get('image_url', '') or '').strip(),
+                    'image_b64': str(data.get('image_b64', '') or ''),
                     'created_at': time.time(),
                 }
                 free_offers[offer_id] = offer
