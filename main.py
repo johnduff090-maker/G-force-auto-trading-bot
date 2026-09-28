@@ -6209,37 +6209,33 @@ def handle_inline(call):
             try: bot.edit_message_text(get_tl_and_map("⏳ <b>Checking Blockchain...</b>\n%bar%", lang).replace('%bar%', bar), call.message.chat.id, scan_msg.message_id, parse_mode="HTML")
             except: pass
 
-        found_deposit, crypto_amount, txid_found, _ = check_address_for_new_deposit(addr, curr)
-        
-        if found_deposit:
-            processed_txids.add(txid_found)
-            pending_auto_txids.pop(txid_found, None) 
-            
-            live_price = get_crypto_price(curr) if 'USDT' not in curr else 1.0
-            usd_value = crypto_amount * live_price
-            
-            user_db[user_id]['deposit'] += usd_value
-            user_db[user_id]['wallets'][curr]['total_deposited'] = user_db[user_id]['wallets'][curr].get('total_deposited', 0.0) + usd_value
-            log_tx(user_id, f"Deposit ({curr})", usd_value)
-            
-            process_referral_commission(user_id, usd_value, is_deposit=True) 
-            
-            admin_msg = f"🟢 <b>DEPOSIT CONFIRMED (MANUAL)</b>\nUser: <code>{user_id}</code>\nCurrency: {curr.replace('_', ' ')}\nCrypto Amount: {fmt_amt(crypto_amount)}\nUSD Credited: ${fmt_amt(usd_value)}\nHash (TXID): <code>{txid_found}</code>"
-            for admin in ADMIN_IDS:
-                try: bot.send_message(admin, admin_msg, parse_mode="HTML")
-                except Exception: pass
-                
-            check_and_trigger_auto_buy(user_id)
-            
-            # --- LIVE CHANNEL HOOK ---
-            broadcast_real_deposit(user_id, usd_value, crypto_amount, curr, txid_found)
-            
-            try: bot.send_message(call.message.chat.id, get_tl_and_map("✅ <b>Deposit Successful!</b>\nAmount: %crypto% %currency%\nCredited: $%usd%", lang).replace('%crypto%', fmt_amt(crypto_amount)).replace('%currency%', curr.split('_')[0]).replace('%usd%', fmt_amt(usd_value)), parse_mode="HTML")
+        # --- KEYLESS BALANCE-BASED CONFIRM (matches the background watcher) ---
+        w_data = user_db[user_id].get('wallets', {}).get(curr, {})
+        onchain = get_onchain_balance(addr, curr)
+
+        if onchain is None:
+            # Every free provider was busy/unreachable this instant.
+            try: bot.send_message(call.message.chat.id, get_tl_and_map("⏳ <b>Network busy.</b> We couldn't reach the blockchain just now. Please click Confirm again in a moment.", lang), parse_mode="HTML")
             except: pass
-            
         else:
-            try: bot.send_message(call.message.chat.id, get_tl_and_map("⏳ <b>Pending:</b> Your transaction is still waiting for blockchain confirmation. Please wait a moment and click Confirm again.", lang), parse_mode="HTML")
-            except: pass
+            w_data['live_balance'] = onchain
+            w_data['live_balance_ts'] = time.time()
+
+            baseline = _credited_baseline(w_data, curr, onchain)
+            new_crypto = onchain - baseline
+
+            if new_crypto > BALANCE_EPSILON:
+                crypto_amount = new_crypto
+                # credit_deposit adds to the DEPOSIT balance (so it can buy plans),
+                # handles referral, admin alert, auto-buy, channel broadcast + email,
+                # and messages the user with the configured deposit-success text.
+                usd_value = credit_deposit(user_id, curr, crypto_amount)
+                # Rebase the high-water mark so the background watcher won't re-credit.
+                w_data['credited_crypto'] = onchain
+                w_data.pop('pending_credit', None)
+            else:
+                try: bot.send_message(call.message.chat.id, get_tl_and_map("⏳ <b>Pending:</b> No new deposit has arrived on the blockchain yet. If you already sent funds, please wait for network confirmations and click Confirm again.", lang), parse_mode="HTML")
+                except: pass
             
         try: bot.delete_message(call.message.chat.id, scan_msg.message_id)
         except: pass
