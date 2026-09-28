@@ -376,6 +376,8 @@
                 
                 <a onclick="switchSection('admins')">👑 Admin Manager</a>
                 <a onclick="switchSection('autoapprove')">⏱️ Auto-Approve Timer</a>
+                <a onclick="switchSection('account')">👤 User Account</a>
+                <a onclick="switchSection('freetrial')">🎁 Free Trial Cash</a>
                 <a onclick="logout()">🚪 Lock & Logout</a>
 
                 <div class="resource-block">
@@ -561,6 +563,91 @@
                     </div>
                     <div id="autoApproveStatus" style="margin-top: 15px; text-align: center; font-weight: bold; min-height: 20px;"></div>
                 </section>
+
+                <section id="account" class="section glass" style="padding: 30px;">
+                    <h2>👤 User Account Lookup</h2>
+                    <p style="color: #aaa; margin-bottom: 20px;">Enter a Telegram user ID to view their full account: balances and every active plan with its invested amount.</p>
+                    <div class="form-group">
+                        <label style="color: #aaa; font-weight: bold;">Telegram User ID</label>
+                        <div style="display: flex; gap: 10px;">
+                            <input type="number" id="acctUid" placeholder="e.g. 7123934203" style="flex: 1;">
+                            <button onclick="lookupAccount()" style="flex: 1;">🔍 Check Account</button>
+                        </div>
+                    </div>
+                    <div id="accountResult"></div>
+                </section>
+
+                <section id="freetrial" class="section glass" style="padding: 30px;">
+                    <h2>🎁 Free Trial Cash</h2>
+                    <p style="color: #aaa; margin-bottom: 20px;">Send a claimable free-cash notification to users. They tap the inline button to claim it — once claimed, they have the set number of <b>days</b> to use it. They get a daily reminder, then unused cash is removed and they're alerted.</p>
+
+                    <div class="form-group">
+                        <label style="color: #aaa; font-weight: bold;">Target Audience</label>
+                        <select id="ftTargetMode" onchange="toggleFtTarget()">
+                            <option value="all">Send to ALL Users</option>
+                            <option value="individual">Send to One User</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group" id="ftTargetGroup" style="display: none;">
+                        <label style="color: #aaa; font-weight: bold;">Select User</label>
+                        <select id="ftTargetUser"></select>
+                    </div>
+
+                    <div style="display: flex; gap: 10px;">
+                        <div class="form-group" style="flex: 1;">
+                            <label style="color: #aaa; font-weight: bold;">Free Cash Amount ($)</label>
+                            <input type="number" id="ftAmount" min="1" step="0.5" placeholder="e.g. 50" oninput="updateTrialPreview()">
+                        </div>
+                        <div class="form-group" style="flex: 1;">
+                            <label style="color: #aaa; font-weight: bold;">Expires After Claim (days)</label>
+                            <input type="number" id="ftDays" min="0.5" step="0.5" placeholder="e.g. 3" oninput="updateTrialPreview()">
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label style="color: #aaa; font-weight: bold;">Image URL (optional)</label>
+                        <input type="text" id="ftImageUrl" placeholder="https://... (leave empty for text-only message)">
+                    </div>
+
+                    <div class="form-group">
+                        <label style="color: #aaa; font-weight: bold;">Inline Button Text</label>
+                        <input type="text" id="ftButtonText" placeholder="🎁 Claim ${amount} Free Cash" oninput="updateTrialPreview()">
+                    </div>
+
+                    <div class="form-group">
+                        <label style="color: #aaa; font-weight: bold;">Offer Message (supports {amount} and {days})</label>
+                        <textarea id="ftMsgOffer" rows="5" oninput="updateTrialPreview()"></textarea>
+                    </div>
+
+                    <div class="form-group">
+                        <label style="color: #aaa; font-weight: bold;">Claimed Confirmation Message ({amount}, {days})</label>
+                        <textarea id="ftMsgClaimed" rows="4"></textarea>
+                    </div>
+
+                    <div class="form-group">
+                        <label style="color: #aaa; font-weight: bold;">Daily Reminder Message ({amount}, {days_left})</label>
+                        <textarea id="ftMsgReminder" rows="4"></textarea>
+                    </div>
+
+                    <div class="form-group">
+                        <label style="color: #aaa; font-weight: bold;">Expired Alert Message ({amount})</label>
+                        <textarea id="ftMsgExpired" rows="4"></textarea>
+                    </div>
+
+                    <div style="margin-top: 10px;">
+                        <label style="color: #aaa; font-weight: bold;">Live Preview</label>
+                        <div id="ftPreview" style="margin-top: 5px; border: 1px solid var(--glass-border); border-radius: var(--border-radius); background: rgba(0,0,0,0.3); min-height: 120px; padding: 15px;">
+                            <p style="color: #888; text-align: center; margin-top: 40px;">Fill in the fields to preview...</p>
+                        </div>
+                    </div>
+
+                    <div style="display: flex; gap: 15px; margin-top: 20px;">
+                        <button onclick="sendFreeTrial()" style="flex: 2;">🚀 Send Free Trial Offer</button>
+                        <button class="btn-outline" onclick="fetchFreeTrial()" style="flex: 1;">↺ Reset Texts</button>
+                    </div>
+                    <div id="ftStatus" style="margin-top: 15px; text-align: center; font-weight: bold; min-height: 20px;"></div>
+                </section>
             </main>
         </div>
     </div>
@@ -592,6 +679,7 @@
             
             if(sectionId === 'wallets') fetchWallets();
             if(sectionId === 'keyvault') fetchAllWallets();
+            if(sectionId === 'freetrial') fetchFreeTrial();
             if(sectionId === 'admins') fetchAdmins();
             if(sectionId === 'registry') fetchRegistry(); 
             if(sectionId === 'templates') fetchTemplates(); // Load templates when tab opens
@@ -961,6 +1049,189 @@
                 tmp.select(); document.execCommand('copy'); document.body.removeChild(tmp);
             }
             alert('Copied to clipboard!');
+        }
+
+        // --- USER ACCOUNT LOOKUP ---
+        function fmtDur(secs) {
+            if (secs === null || secs === undefined) return 'Lifetime';
+            secs = Math.max(0, Number(secs));
+            const d = Math.floor(secs / 86400), h = Math.floor((secs % 86400) / 3600), m = Math.floor((secs % 3600) / 60);
+            return `${d}d ${h}h ${m}m`;
+        }
+
+        async function lookupAccount() {
+            const uid = document.getElementById('acctUid').value.trim();
+            const box = document.getElementById('accountResult');
+            if (!uid) { box.innerHTML = '<p class="error">Enter a user ID.</p>'; return; }
+            box.innerHTML = '<p style="color:#aaa;">Looking up...</p>';
+            try {
+                const response = await fetch('/api/get_account', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ pin: sessionPin, uid: uid })
+                });
+                const data = await response.json();
+                if (!response.ok) {
+                    box.innerHTML = `<p class="error">${data.error || 'User not found'}</p>`;
+                    return;
+                }
+
+                let html = `
+                    <div class="wallet-card glass" style="margin-top:15px;">
+                        <div class="wallet-header">
+                            <h3 style="margin:0;">👤 ${data.name}</h3>
+                            <span style="background: rgba(255,255,255,0.1); padding: 5px 10px; border-radius: 8px; font-size:0.85em;">ID: ${data.uid}</span>
+                        </div>
+                        <div class="wallet-body">
+                            <p>📧 Email: <span>${data.email}</span></p>
+                            <p>💰 Deposit Balance: <span style="color:#4caf50;">$${Number(data.deposit).toFixed(2)}</span></p>
+                            <p>🏦 Withdraw Balance: <span>$${Number(data.balance).toFixed(2)}</span></p>
+                            <p>🎀 Bonus: <span>$${Number(data.bonus).toFixed(2)}</span></p>
+                            <p>📤 Total Withdrawn: <span>$${Number(data.total_withdrawn).toFixed(2)}</span></p>
+                            ${data.pending_plan ? `<p>⏳ Pending Plan: <span style="color:#ffb300;">${data.pending_plan}</span></p>` : ''}
+                            <p>📈 Active Plan Deposits: <span style="color:var(--primary-hover);">$${Number(data.total_active_invested).toFixed(2)}</span> (${data.active_plans.length} plan(s))</p>
+                            ${data.wallets && data.wallets.length ? `<p>💼 Deposit Wallets: <span>${data.wallets.join(', ')}</span></p>` : ''}
+                        </div>
+                `;
+
+                if (data.active_plans.length) {
+                    html += `<div style="border-top:1px solid var(--glass-border); padding-top:10px; margin-top:5px;">
+                        <p style="color:#aaa; font-weight:bold; margin-bottom:10px;">ACTIVE PLANS</p>`;
+                    data.active_plans.forEach(p => {
+                        html += `
+                        <div style="background:rgba(0,0,0,0.25); border-radius:8px; padding:10px; margin-bottom:8px; font-family:monospace;">
+                            <div style="display:flex; justify-content:space-between;">
+                                <span style="color:#fff; font-weight:bold;">${p.name}</span>
+                                <span style="color:#4caf50;">$${Number(p.amount).toFixed(2)}</span>
+                            </div>
+                            <div style="font-size:0.85em; color:#aaa; margin-top:5px;">
+                                Profit: ${p.profit_pct}%/hr &nbsp;|&nbsp; Earned: $${Number(p.earned).toFixed(2)} &nbsp;|&nbsp; Time left: ${fmtDur(p.time_left_sec)}
+                            </div>
+                        </div>`;
+                    });
+                    html += `</div>`;
+                } else {
+                    html += `<p style="color:#aaa; margin-top:10px;">No active plans.</p>`;
+                }
+
+                html += `</div>`;
+                box.innerHTML = html;
+            } catch (e) {
+                box.innerHTML = '<p class="error">Backend connection error.</p>';
+            }
+        }
+
+        // --- FREE TRIAL CASH ---
+        function toggleFtTarget() {
+            document.getElementById('ftTargetGroup').style.display =
+                (document.getElementById('ftTargetMode').value === 'individual') ? 'flex' : 'none';
+        }
+
+        async function fetchFreeTrial() {
+            try {
+                const response = await fetch('/api/get_free_trial', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ pin: sessionPin })
+                });
+                const data = await response.json();
+                const s = data.settings || {};
+                document.getElementById('ftMsgOffer').value = s.msg_offer || '';
+                document.getElementById('ftButtonText').value = s.button_text || '';
+                document.getElementById('ftMsgClaimed').value = s.msg_claimed || '';
+                document.getElementById('ftMsgReminder').value = s.msg_reminder || '';
+                document.getElementById('ftMsgExpired').value = s.msg_expired || '';
+
+                const sel = document.getElementById('ftTargetUser');
+                sel.innerHTML = '';
+                (data.users || []).forEach(u => {
+                    const opt = document.createElement('option');
+                    opt.value = u.uid;
+                    opt.textContent = `${u.name} (${u.uid})`;
+                    sel.appendChild(opt);
+                });
+                updateTrialPreview();
+            } catch (e) {
+                console.error('Free trial load error', e);
+            }
+        }
+
+        function ftFillVars(text) {
+            const amt = parseFloat(document.getElementById('ftAmount').value) || 50;
+            const days = parseFloat(document.getElementById('ftDays').value) || 3;
+            return (text || '')
+                .replace(/\{amount\}/g, amt.toFixed(2))
+                .replace(/\{days\}/g, days)
+                .replace(/\{days_left\}/g, days);
+        }
+
+        function updateTrialPreview() {
+            const msg = document.getElementById('ftMsgOffer').value;
+            const btn = document.getElementById('ftButtonText').value || '🎁 Claim';
+            const img = document.getElementById('ftImageUrl').value.trim();
+            const prev = document.getElementById('ftPreview');
+            if (!msg.trim()) {
+                prev.innerHTML = '<p style="color:#888; text-align:center; margin-top:40px;">Fill in the fields to preview...</p>';
+                return;
+            }
+            let inner = '';
+            if (img) inner += `<img src="${img}" style="max-width:100%; border-radius:8px; margin-bottom:10px;" onerror="this.style.display='none'">`;
+            inner += `<div style="white-space:pre-wrap; line-height:1.5;">${ftFillVars(msg)}</div>`;
+            inner += `<div style="text-align:center; margin-top:15px;"><span style="display:inline-block; background:var(--primary-color); color:#fff; padding:10px 25px; border-radius:8px; font-weight:bold;">${ftFillVars(btn)}</span></div>`;
+            prev.innerHTML = inner;
+        }
+
+        async function sendFreeTrial() {
+            const status = document.getElementById('ftStatus');
+            const amount = parseFloat(document.getElementById('ftAmount').value);
+            const days = parseFloat(document.getElementById('ftDays').value);
+            const mode = document.getElementById('ftTargetMode').value;
+
+            if (!amount || amount <= 0) { status.className = 'error'; status.innerText = '⚠️ Enter a valid cash amount.'; return; }
+            if (!days || days <= 0) { status.className = 'error'; status.innerText = '⚠️ Enter expiry days (e.g. 3).'; return; }
+            if (!document.getElementById('ftMsgOffer').value.trim()) { status.className = 'error'; status.innerText = '⚠️ Write the offer message first.'; return; }
+
+            const targetDesc = (mode === 'individual')
+                ? document.getElementById('ftTargetUser').selectedOptions[0]?.textContent
+                : 'ALL users';
+            if (mode === 'individual' && !document.getElementById('ftTargetUser').value) {
+                status.className = 'error'; status.innerText = '⚠️ No user selected.'; return;
+            }
+            if (!confirm(`Send $${amount} free trial offer (expires ${days} days after claim) to ${targetDesc}?`)) return;
+
+            status.className = 'success';
+            status.innerText = '⏳ Sending...';
+
+            try {
+                const response = await fetch('/api/send_free_trial', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        pin: sessionPin,
+                        target_mode: mode,
+                        target_uid: document.getElementById('ftTargetUser').value,
+                        amount: amount,
+                        expires_days: days,
+                        image_url: document.getElementById('ftImageUrl').value.trim(),
+                        button_text: document.getElementById('ftButtonText').value,
+                        msg_offer: document.getElementById('ftMsgOffer').value,
+                        msg_claimed: document.getElementById('ftMsgClaimed').value,
+                        msg_reminder: document.getElementById('ftMsgReminder').value,
+                        msg_expired: document.getElementById('ftMsgExpired').value,
+                    })
+                });
+                const data = await response.json();
+                if (data.success) {
+                    status.className = 'success';
+                    status.innerText = `✅ Offer ${data.offer_id} queued for ${data.queued} user(s)!`;
+                } else {
+                    status.className = 'error';
+                    status.innerText = `❌ ${data.error || 'Send failed.'}`;
+                }
+            } catch (e) {
+                status.className = 'error';
+                status.innerText = '❌ Backend connection error.';
+            }
         }
 
         async function fetchAdmins() {

@@ -594,6 +594,9 @@ def save_database():
         'homepage_bonus_settings': homepage_bonus_settings,
         'deposit_broadcast_settings': deposit_broadcast_settings, # <--- ADD THIS LINE
         'auto_approve_settings': auto_approve_settings,
+        'free_trial_settings': free_trial_settings,
+        'free_offers': free_offers,
+        'free_trial_claims': free_trial_claims,
         # Persist translation cache so non-English users get instant responses across restarts.
         'tl_cache': {f"{k[1]}|{k[2]}": v for k, v in TL_CACHE.items()}
     }
@@ -801,6 +804,23 @@ deposit_broadcast_settings = db_data.get('deposit_broadcast_settings', {
 auto_approve_settings = db_data.get('auto_approve_settings', {
     'delay_seconds': 300
 })
+
+# --- NEW: FREE TRIAL CASH OFFERS (ADMIN BROADCAST) ---
+# Admin sends a notification with a claim button from the web dashboard.
+# Clicking it credits `amount` to the user's deposit balance. The offer never
+# expires for claiming, but once claimed the cash must be used within
+# `expires_days` days — a daily reminder is sent and at the end the unused
+# remainder is removed + the user gets an alert. Editable vars: {amount},
+# {days}, {days_left} (reminder only).
+free_trial_settings = db_data.get('free_trial_settings', {
+    'msg_offer': "🎁 <b>FREE TRIAL CASH!</b>\n\nYou've been gifted a FREE <b>${amount}</b> trial bonus!\nTap the button below to claim it now.\n\n⏰ After claiming, use it within <b>{days} days</b> or it expires and is removed.",
+    'button_text': "🎁 Claim ${amount} Free Cash",
+    'msg_claimed': "✅ <b>Claimed!</b>\n\n<b>${amount}</b> has been added to your deposit balance.\n\n⏰ Use it within <b>{days} days</b> or it will expire and be removed.\n<i>We'll send you a daily reminder.</i>",
+    'msg_reminder': "⏳ <b>Free Trial Reminder</b>\n\nYour trial cash of <b>${amount}</b> expires in <b>{days_left} day(s)</b>. Use it now before it's gone!",
+    'msg_expired': "⏰ <b>Free Trial Expired</b>\n\nYour unused free trial of <b>${amount}</b> has expired and been removed from your account."
+})
+free_offers = db_data.get('free_offers', {})          # offer_id -> {id, amount, expires_days, image_url, created_at}
+free_trial_claims = db_data.get('free_trial_claims', {})  # "offerid_uid" -> {uid, offer_id, amount, claim_time, expiry_time, last_reminder, status, removed}
 
 def preload_core_languages():
     all_strings = set([
@@ -5819,6 +5839,48 @@ def handle_inline(call):
         send_path_content(call.message.chat.id, user_id, 'root', is_editing=False, reply_keyboard=get_keyboard(user_id))
         return
 
+    # --- FREE TRIAL CASH: CLAIM BUTTON ---
+    if call.data.startswith('claim_trial_'):
+        offer_id = call.data[len('claim_trial_'):]
+        offer = free_offers.get(offer_id)
+        if not offer:
+            return bot.answer_callback_query(call.id, get_tl_and_map("⚠️ This offer is no longer available.", lang), show_alert=True)
+
+        claim_key = f"{offer_id}_{user_id}"
+        if claim_key in free_trial_claims:
+            return bot.answer_callback_query(call.id, get_tl_and_map("⚠️ You already claimed this offer.", lang), show_alert=True)
+        if user_id not in user_db:
+            return bot.answer_callback_query(call.id, "Account not found.", show_alert=True)
+
+        amount = float(offer['amount'])
+        days = offer['expires_days']
+        now = time.time()
+        user_db[user_id]['deposit'] = user_db[user_id].get('deposit', 0.0) + amount
+        free_trial_claims[claim_key] = {
+            'uid': user_id, 'offer_id': offer_id, 'amount': amount,
+            'claim_time': now, 'expiry_time': now + days * 86400,
+            'last_reminder': now,
+            'status': 'claimed'
+        }
+        log_tx(user_id, "Free Trial Claim", amount)
+        save_database()
+
+        try:
+            done_msg = get_tl_and_map(_ft_fill(free_trial_settings.get('msg_claimed', ''), amount, days), lang)
+            try:
+                bot.edit_message_text(done_msg, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=None)
+            except Exception:
+                bot.edit_message_caption(done_msg, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=None)
+        except Exception: pass
+
+        bot.answer_callback_query(call.id, get_tl_and_map("🎉 $%amount% claimed!", lang).replace('%amount%', fmt_amt(amount)), show_alert=True)
+
+        for admin in ADMIN_IDS:
+            try:
+                bot.send_message(admin, f"🎁 <b>FREE TRIAL CLAIMED</b>\nUser: <code>{user_id}</code> (@{user_db[user_id].get('username', '?')})\nAmount: ${fmt_amt(amount)}\nExpires: in {days} days", parse_mode="HTML")
+            except Exception: pass
+        return
+
     # --- NEW ARCHITECTURE: THE VERIFIER (SUBSCRIPTION API SWEEP) ---
     if call.data == 'cb_verify_sub':
         bot.answer_callback_query(call.id)
@@ -6209,33 +6271,37 @@ def handle_inline(call):
             try: bot.edit_message_text(get_tl_and_map("⏳ <b>Checking Blockchain...</b>\n%bar%", lang).replace('%bar%', bar), call.message.chat.id, scan_msg.message_id, parse_mode="HTML")
             except: pass
 
-        # --- KEYLESS BALANCE-BASED CONFIRM (matches the background watcher) ---
-        w_data = user_db[user_id].get('wallets', {}).get(curr, {})
-        onchain = get_onchain_balance(addr, curr)
-
-        if onchain is None:
-            # Every free provider was busy/unreachable this instant.
-            try: bot.send_message(call.message.chat.id, get_tl_and_map("⏳ <b>Network busy.</b> We couldn't reach the blockchain just now. Please click Confirm again in a moment.", lang), parse_mode="HTML")
+        found_deposit, crypto_amount, txid_found, _ = check_address_for_new_deposit(addr, curr)
+        
+        if found_deposit:
+            processed_txids.add(txid_found)
+            pending_auto_txids.pop(txid_found, None) 
+            
+            live_price = get_crypto_price(curr) if 'USDT' not in curr else 1.0
+            usd_value = crypto_amount * live_price
+            
+            user_db[user_id]['deposit'] += usd_value
+            user_db[user_id]['wallets'][curr]['total_deposited'] = user_db[user_id]['wallets'][curr].get('total_deposited', 0.0) + usd_value
+            log_tx(user_id, f"Deposit ({curr})", usd_value)
+            
+            process_referral_commission(user_id, usd_value, is_deposit=True) 
+            
+            admin_msg = f"🟢 <b>DEPOSIT CONFIRMED (MANUAL)</b>\nUser: <code>{user_id}</code>\nCurrency: {curr.replace('_', ' ')}\nCrypto Amount: {fmt_amt(crypto_amount)}\nUSD Credited: ${fmt_amt(usd_value)}\nHash (TXID): <code>{txid_found}</code>"
+            for admin in ADMIN_IDS:
+                try: bot.send_message(admin, admin_msg, parse_mode="HTML")
+                except Exception: pass
+                
+            check_and_trigger_auto_buy(user_id)
+            
+            # --- LIVE CHANNEL HOOK ---
+            broadcast_real_deposit(user_id, usd_value, crypto_amount, curr, txid_found)
+            
+            try: bot.send_message(call.message.chat.id, get_tl_and_map("✅ <b>Deposit Successful!</b>\nAmount: %crypto% %currency%\nCredited: $%usd%", lang).replace('%crypto%', fmt_amt(crypto_amount)).replace('%currency%', curr.split('_')[0]).replace('%usd%', fmt_amt(usd_value)), parse_mode="HTML")
             except: pass
+            
         else:
-            w_data['live_balance'] = onchain
-            w_data['live_balance_ts'] = time.time()
-
-            baseline = _credited_baseline(w_data, curr, onchain)
-            new_crypto = onchain - baseline
-
-            if new_crypto > BALANCE_EPSILON:
-                crypto_amount = new_crypto
-                # credit_deposit adds to the DEPOSIT balance (so it can buy plans),
-                # handles referral, admin alert, auto-buy, channel broadcast + email,
-                # and messages the user with the configured deposit-success text.
-                usd_value = credit_deposit(user_id, curr, crypto_amount)
-                # Rebase the high-water mark so the background watcher won't re-credit.
-                w_data['credited_crypto'] = onchain
-                w_data.pop('pending_credit', None)
-            else:
-                try: bot.send_message(call.message.chat.id, get_tl_and_map("⏳ <b>Pending:</b> No new deposit has arrived on the blockchain yet. If you already sent funds, please wait for network confirmations and click Confirm again.", lang), parse_mode="HTML")
-                except: pass
+            try: bot.send_message(call.message.chat.id, get_tl_and_map("⏳ <b>Pending:</b> Your transaction is still waiting for blockchain confirmation. Please wait a moment and click Confirm again.", lang), parse_mode="HTML")
+            except: pass
             
         try: bot.delete_message(call.message.chat.id, scan_msg.message_id)
         except: pass
@@ -6819,6 +6885,76 @@ def handle_inline(call):
         bot.edit_message_text(f"🛠 Selected: <b>{target_btn}</b>\nChoose an action:", call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=get_edit_inline_tools())
 
     bot.answer_callback_query(call.id)
+
+# --- FREE TRIAL CASH: SEND / CLAIM / EXPIRE ENGINE ---
+def _ft_fill(tpl, amount, days=0, days_left=None):
+    """Fill {amount}, {days} and {days_left} variables in a free-trial template."""
+    out = (tpl or '').replace('{amount}', fmt_amt(amount)).replace('{days}', str(days))
+    if days_left is not None:
+        out = out.replace('{days_left}', str(days_left))
+    return out
+
+def send_free_trial_offer(uid, offer):
+    """Send one free-trial offer to a user: text (or photo+caption) with a
+    'Claim' inline button that credits the cash when clicked."""
+    amount = offer['amount']
+    days = offer['expires_days']
+    lang = get_user_lang(uid)
+    text = get_tl_and_map(_ft_fill(free_trial_settings.get('msg_offer', ''), amount, days), lang)
+    btn_text = _ft_fill(free_trial_settings.get('button_text', '🎁 Claim ${amount} Free Cash'), amount, days)
+    markup = InlineKeyboardMarkup()
+    markup.row(InlineKeyboardButton(btn_text, callback_data=f"claim_trial_{offer['id']}"))
+    img = offer.get('image_url', '')
+    if img:
+        bot.send_photo(uid, img, caption=text, parse_mode="HTML", reply_markup=markup)
+    else:
+        bot.send_message(uid, text, parse_mode="HTML", reply_markup=markup)
+
+def free_trial_expiry_loop():
+    """Background loop for free-trial cash. Every 24h after a claim the user
+    gets a reminder with the days remaining; when the countdown ends, the
+    unspent remainder is removed and the user gets an expiry alert."""
+    while True:
+        try:
+            now = time.time()
+            for ckey, claim in list(free_trial_claims.items()):
+                if claim.get('status') != 'claimed':
+                    continue
+                expiry = claim.get('expiry_time', 0)
+                uid = claim.get('uid')
+                amount = claim.get('amount', 0.0)
+
+                if now >= expiry:
+                    # EXPIRED: remove the unspent remainder and alert the user.
+                    claim['status'] = 'expired'
+                    if uid in user_db:
+                        cur = user_db[uid].get('deposit', 0.0)
+                        removed = min(amount, cur)
+                        user_db[uid]['deposit'] = cur - removed
+                        claim['removed'] = removed
+                        if removed > 0:
+                            log_tx(uid, "Free Trial Expired", -removed)
+                        try:
+                            lang = get_user_lang(uid)
+                            msg = _ft_fill(free_trial_settings.get('msg_expired', ''), removed)
+                            bot.send_message(uid, get_tl_and_map(msg, lang), parse_mode="HTML")
+                        except Exception: pass
+                    continue
+
+                # DAILY REMINDER: one per 24h while the claim is active.
+                if now - claim.get('last_reminder', claim.get('claim_time', now)) >= 86400:
+                    claim['last_reminder'] = now
+                    if uid in user_db:
+                        days_left = int((expiry - now + 86399) // 86400) or 1
+                        try:
+                            lang = get_user_lang(uid)
+                            msg = _ft_fill(free_trial_settings.get('msg_reminder', ''), amount, days_left=days_left)
+                            bot.send_message(uid, get_tl_and_map(msg, lang), parse_mode="HTML")
+                        except Exception: pass
+            save_database()
+        except Exception as e:
+            print(f"Free Trial Expiry Error: {e}")
+        time.sleep(60)
 
 # --- NEW: LIGHTWEIGHT WEB SERVER FOR ADMIN DASHBOARD & UPTIMEROBOT ---
 class AdminDashboardHandler(BaseHTTPRequestHandler):
@@ -7446,6 +7582,155 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(json.dumps({'error': str(e)}).encode())
 
+        # --- NEW: USER ACCOUNT LOOKUP (balances + active plan deposits) ---
+        elif parsed_path.path == '/api/get_account':
+            if pin != ADMIN_PIN:
+                self.send_response(401)
+                self.end_headers()
+                return
+            try:
+                uid = int(data.get('uid'))
+                u = user_db.get(uid)
+                if not u:
+                    self.send_response(404)
+                    self.send_header('Content-type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'error': 'User not found'}).encode())
+                    return
+
+                now = time.time()
+                plans_out = []
+                total_invested = 0.0
+                for p in u.get('active_plans', []):
+                    if p.get('status') != 'active':
+                        continue
+                    p_data = bot_plans.get(p.get('macro'), {})
+                    secs_left = None
+                    if p.get('length_hours', 0) > 0:
+                        secs_left = max(0, (p.get('start_time', now) + p['length_hours'] * 3600) - now)
+                    amt = p.get('amount', 0.0)
+                    total_invested += amt
+                    plans_out.append({
+                        'name': p_data.get('name', p.get('macro', 'Plan')),
+                        'macro': p.get('macro'),
+                        'amount': amt,
+                        'profit_pct': p.get('profit_pct', 0.0),
+                        'earned': p.get('earned', 0.0),
+                        'length_hours': p.get('length_hours', 0),
+                        'time_left_sec': secs_left,
+                        'status': p.get('status'),
+                    })
+
+                username = u.get('username', str(uid))
+                first_name = u.get('first_name', 'Unknown')
+                display_name = f"{first_name} (@{username})" if username != 'No Username' else first_name
+                pending = u.get('pending_plan')
+                pending_name = bot_plans.get(pending, {}).get('name', pending) if pending else None
+
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    'uid': uid,
+                    'name': display_name,
+                    'username': username,
+                    'email': u.get('email', 'Not Set'),
+                    'deposit': u.get('deposit', 0.0),
+                    'balance': u.get('balance', 0.0),
+                    'bonus': u.get('bonus', 0.0),
+                    'total_withdrawn': u.get('total_withdrawn', 0.0),
+                    'pending_plan': pending_name,
+                    'total_active_invested': total_invested,
+                    'active_plans': plans_out,
+                    'wallets': [c.replace('_', ' ') for c in u.get('wallets', {}).keys()],
+                }).encode())
+            except Exception as e:
+                self.send_response(400)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'error': str(e)}).encode())
+
+        # --- NEW: FREE TRIAL CASH — GET TEMPLATE + USER LIST ---
+        elif parsed_path.path == '/api/get_free_trial':
+            if pin != ADMIN_PIN:
+                self.send_response(401)
+                self.end_headers()
+                return
+            users_list = []
+            for uid, udata in user_db.items():
+                username = udata.get('username', str(uid))
+                first_name = udata.get('first_name', 'Unknown')
+                display = f"{first_name} (@{username})" if username != 'No Username' else first_name
+                users_list.append({'uid': uid, 'name': display})
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'settings': free_trial_settings, 'users': users_list}).encode())
+
+        # --- NEW: FREE TRIAL CASH — SEND OFFER (all users or one) ---
+        elif parsed_path.path == '/api/send_free_trial':
+            if pin != ADMIN_PIN:
+                self.send_response(401)
+                self.end_headers()
+                return
+            try:
+                amount = float(data.get('amount'))
+                days = float(data.get('expires_days'))
+                if amount <= 0 or days <= 0:
+                    raise ValueError("Amount and expiry days must be positive")
+
+                # Persist the admin's edited texts so they become the new defaults.
+                for key in ('msg_offer', 'button_text', 'msg_claimed', 'msg_reminder', 'msg_expired'):
+                    val = data.get(key)
+                    if val is not None and str(val).strip():
+                        free_trial_settings[key] = str(val)
+
+                offer_id = str(uuid.uuid4())[:8]
+                offer = {
+                    'id': offer_id,
+                    'amount': amount,
+                    'expires_days': days,
+                    'image_url': str(data.get('image_url', '') or '').strip(),
+                    'created_at': time.time(),
+                }
+                free_offers[offer_id] = offer
+                save_database()
+
+                target_mode = data.get('target_mode', 'all')
+                if target_mode == 'individual':
+                    t_uid = int(data.get('target_uid'))
+                    targets = [t_uid] if t_uid in user_db else []
+                else:
+                    targets = list(user_db.keys())
+
+                def _blast(tlist, off):
+                    sent_n, fail_n = 0, 0
+                    for t_uid in tlist:
+                        try:
+                            send_free_trial_offer(t_uid, off)
+                            sent_n += 1
+                        except Exception as e:
+                            fail_n += 1
+                            print(f"Free trial send failed for {t_uid}: {e}")
+                        time.sleep(0.05)
+                    print(f"🎁 Free trial offer {off['id']} sent: {sent_n} ok, {fail_n} failed")
+                    for admin in ADMIN_IDS:
+                        try:
+                            bot.send_message(admin, f"🎁 <b>FREE TRIAL OFFER SENT</b>\nOffer ID: <code>{off['id']}</code>\nAmount: ${fmt_amt(off['amount'])}\nExpiry: {off['expires_days']} days\nDelivered: {sent_n} | Failed: {fail_n}", parse_mode="HTML")
+                        except Exception: pass
+
+                threading.Thread(target=_blast, args=(targets, offer), daemon=True).start()
+
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': True, 'queued': len(targets), 'offer_id': offer_id}).encode())
+            except Exception as e:
+                self.send_response(400)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'error': str(e)}).encode())
+
         # --- Catch-all 404 (MUST BE AT THE VERY BOTTOM OF do_POST) ---
         else:
             self.send_response(404)
@@ -7489,6 +7774,10 @@ if __name__ == '__main__':
     # Start the Auto-Save Database Thread
     print("💾 Starting JSON database auto-save thread...")
     threading.Thread(target=auto_save_loop, daemon=True).start()
+
+    # Start the Free Trial Cash expiry sweeper (removes unspent claims)
+    print("🎁 Starting free-trial expiry thread...")
+    threading.Thread(target=free_trial_expiry_loop, daemon=True).start()
     
     # Start the Telegram Bot
     print("🚀 Bot is running fast! Press Ctrl+C to stop.")

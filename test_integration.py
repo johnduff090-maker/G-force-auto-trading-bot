@@ -160,6 +160,103 @@ check("manual_credit moved balance up", main.user_db[111]['deposit'] > before, f
 r2 = post('/api/manual_credit', {'pin': PIN, 'uid': 111, 'network': 'USDT_BEP20'})
 check("manual_credit idempotent (no double credit)", r2.json().get('success') is False, f"= {r2.json()}")
 
+
+print("\n[5] User Account Lookup + Free Trial Cash")
+
+# --- extra stubs needed by the claim/expiry paths ---
+SENT, ANSWERS = [], []
+main.bot.send_message = lambda uid, text, **kw: SENT.append((uid, str(text)))
+main.bot.send_photo = lambda uid, img, **kw: SENT.append((uid, 'PHOTO:' + str(kw.get('caption', ''))))
+main.bot.answer_callback_query = lambda cid, text=None, **kw: ANSWERS.append(str(text))
+main.bot.edit_message_text = lambda *a, **k: None
+main.bot.edit_message_caption = lambda *a, **k: None
+main.requires_subscription_wall = lambda *a, **k: False
+main.subscription_settings['enabled'] = False
+
+# Give Alice an active plan + pending plan so the lookup has data
+main.bot_plans['plan1'] = {'name': 'Starter Plan', 'min': 10, 'max': 1000, 'profit': 2.0, 'length': 48}
+main.user_db[111]['active_plans'] = [{
+    'id': 'x1', 'macro': 'plan1', 'amount': 75.0, 'profit_pct': 2.0,
+    'length_hours': 48, 'start_time': time.time(), 'last_accrual': time.time(),
+    'earned': 1.5, 'status': 'active'
+}]
+
+# /api/get_account
+r = post('/api/get_account', {'pin': PIN, 'uid': 111})
+check("get_account 200", r.status_code == 200)
+acct = r.json()
+check("get_account name", acct.get('name') == 'Alice (@alice)', f"= {acct.get('name')}")
+check("get_account plan name", acct['active_plans'][0]['name'] == 'Starter Plan')
+check("get_account invested amount", acct['active_plans'][0]['amount'] == 75.0)
+check("get_account total invested", acct['total_active_invested'] == 75.0)
+check("get_account 404 unknown", post('/api/get_account', {'pin': PIN, 'uid': 999999}).status_code == 404)
+
+# /api/get_free_trial
+r = post('/api/get_free_trial', {'pin': PIN})
+check("get_free_trial 200", r.status_code == 200)
+ft = r.json()
+check("get_free_trial has settings", 'msg_offer' in ft.get('settings', {}))
+check("get_free_trial lists users", len(ft.get('users', [])) == 2)
+
+# /api/send_free_trial to one user -> creates offer + sends message in thread
+r = post('/api/send_free_trial', {'pin': PIN, 'target_mode': 'individual', 'target_uid': 111,
+                                  'amount': 50, 'expires_days': 3, 'image_url': '',
+                                  'button_text': 'Claim Now', 'msg_offer': 'FREE {amount} for {days}d!',
+                                  'msg_claimed': 'got it', 'msg_reminder': 'remind {days_left}', 'msg_expired': 'expired {amount}'})
+check("send_free_trial 200", r.status_code == 200)
+offer_id = r.json().get('offer_id')
+check("send_free_trial offer created", offer_id in main.free_offers)
+check("send_free_trial no claim_deadline (unlimited claim)", 'claim_deadline' not in main.free_offers.get(offer_id, {}))
+check("send_free_trial persisted edited texts", main.free_trial_settings.get('button_text') == 'Claim Now')
+time.sleep(1.5)  # let the sender thread finish
+check("offer delivered to user", any(uid == 111 and 'FREE 50.00 for 3' in t for uid, t in SENT),
+      f"= {[t for uid, t in SENT if uid == 111][-1:]}")
+
+# simulate the user pressing the claim button via the real callback handler
+class FakeCall:
+    def __init__(self, data, uid):
+        self.data = data
+        self.from_user = types.SimpleNamespace(id=uid)
+        self.message = types.SimpleNamespace(chat=types.SimpleNamespace(id=uid), message_id=1)
+        self.id = 'cb1'
+
+dep_before = main.user_db[111]['deposit']
+main.handle_inline(FakeCall(f'claim_trial_{offer_id}', 111))
+check("claim credits deposit", abs(main.user_db[111]['deposit'] - (dep_before + 50.0)) < 1e-9,
+      f"= {main.user_db[111]['deposit']}")
+ckey = f"{offer_id}_111"
+check("claim recorded", ckey in main.free_trial_claims)
+check("claim expiry ~3 days", abs(main.free_trial_claims[ckey]['expiry_time'] - (time.time() + 3 * 86400)) < 60)
+
+# double claim is rejected
+main.handle_inline(FakeCall(f'claim_trial_{offer_id}', 111))
+check("double claim rejected", any('already claimed' in a for a in ANSWERS))
+
+# expiry pass: make the claim overdue, run one sweep iteration
+main.free_trial_claims[ckey]['expiry_time'] = time.time() - 1
+threading.Thread(target=main.free_trial_expiry_loop, daemon=True).start()
+time.sleep(2)
+check("claim marked expired", main.free_trial_claims[ckey]['status'] == 'expired')
+check("unused cash removed", abs(main.user_db[111]['deposit'] - dep_before) < 1e-9,
+      f"= {main.user_db[111]['deposit']}")
+check("expiry alert sent", any(uid == 111 and 'expired' in t.lower() for uid, t in SENT))
+
+# daily reminder: fresh claim for Bob with an overdue reminder timestamp
+offer2 = {'id': 'off2', 'amount': 25.0, 'expires_days': 3, 'image_url': '', 'created_at': time.time()}
+main.free_offers['off2'] = offer2
+main.handle_inline(FakeCall('claim_trial_off2', 222))
+ck2 = 'off2_222'
+main.free_trial_claims[ck2]['last_reminder'] = time.time() - 90000  # overdue for daily reminder
+threading.Thread(target=main.free_trial_expiry_loop, daemon=True).start()
+time.sleep(2)
+check("daily reminder sent", any(uid == 222 and 'remind' in t.lower() for uid, t in SENT))
+check("reminder updates timestamp", main.free_trial_claims[ck2]['last_reminder'] > time.time() - 60)
+check("claim still active (not expired)", main.free_trial_claims[ck2]['status'] == 'claimed')
+
+# broadcast to ALL users
+r = post('/api/send_free_trial', {'pin': PIN, 'target_mode': 'all', 'amount': 10, 'expires_days': 1})
+check("send_free_trial all queued", r.json().get('queued') == 2)
+
 server.shutdown()
 
 print(f"\n==== RESULT: {PASS} passed, {FAIL} failed ====")
