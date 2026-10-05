@@ -757,8 +757,8 @@
                                     </div>
                                     <div style="display:flex; gap:8px;">
                                         <select id="rentDur" onchange="quoteRent()" style="flex:0 0 68px; width:68px; min-width:0; padding:12px 6px;">
-                                            <option value="1">1h</option>
-                                            <option value="24" selected>24h</option>
+                                            <option value="1" selected>1h</option>
+                                            <option value="24">24h</option>
                                             <option value="72">3d</option>
                                         </select>
                                         <input id="rentAmt" type="number" min="0" placeholder="Energy (65000 ≈ 1 send)" oninput="quoteRent()" style="flex:1; min-width:0;">
@@ -824,7 +824,7 @@
                             <div class="form-group" id="feeModeRow" style="display:none;">
                                 <label>Fee mode</label>
                                 <select id="sndFeeMode" onchange="onSendInput()">
-                                    <option value="trx">⚡ TRX / staked energy (cheapest)</option>
+                                    <option value="trx">⚡ TRX / energy — auto cheapest (stake → rent)</option>
                                     <option value="rent">⚡💰 Rent energy (~4 TRX via TronSave)</option>
                                     <option value="usdt">💵 Pay fee in USDT (GasFree — no TRX needed)</option>
                                 </select>
@@ -1083,10 +1083,10 @@
                 document.getElementById('sndFee').innerHTML = `~${fmtCrypto(est.fee_crypto, 'TRX')} ${est.gas_asset} <span style="color:#888;">($${Number(est.fee_usd).toFixed(2)})</span>`;
                 if (est.gasfree) {
                     document.getElementById('sndGas').innerHTML = `<span class="fee-ok">GasFree relayer · ${est.note || ''}</span>`;
-                } else if (est.rented) {
+                } else if (est.rented || est.auto_rent) {
                     document.getElementById('sndGas').innerHTML = est.charged
                         ? `<span class="fee-ok">⚡💰 Charged wallet — ${est.note || 'burns its own energy'}</span>`
-                        : `<span class="${est.gas_ok ? 'fee-ok' : 'fee-bad'}">TronSave rental · ${est.note || ''}${est.gas_ok ? '' : ' — insufficient gas wallet TRX'}</span>`;
+                        : `<span class="${est.gas_ok ? 'fee-ok' : 'fee-bad'}">${est.auto_rent ? 'Auto-rent' : 'TronSave rental'} · ${est.note || ''}${est.gas_ok ? '' : ' — insufficient gas wallet TRX'}</span>`;
                 } else if (est.gas_needed_crypto > 0) {
                     const okGas = est.gas_ok;
                     document.getElementById('sndGas').innerHTML = `<span class="${okGas ? 'fee-ok' : 'fee-bad'}">${est.gas_balance === null ? 'not configured' : fmtCrypto(est.gas_balance, 'TRX') + ' ' + est.gas_asset} ${okGas ? '✓' : '· insufficient — top up gas wallet'}</span>`;

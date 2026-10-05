@@ -2352,7 +2352,32 @@ def execute_treasury_send(task_id):
                                                                  min(delegate_sun, remaining))
                             t['txids'] = [t['gas_txid']]
                             delegated = True
-                topup = 0.0 if src_free else (0.7 if delegated else gas_needed + 1.0)
+                # trx mode last resort before burning: auto-rent when cheaper
+                if not delegated and not src_free and t.get('fee_mode') == 'trx':
+                    try:
+                        est_r = tronsave_estimate(from_addr, need_energy)
+                        gtrx = _tron_balance(gas_addr, 'TRX') or 0.0
+                        if est_r['trx'] + 1.1 < gas_needed and gtrx >= est_r['trx'] + 1.5:
+                            t['step'] = f'Auto-renting {need_energy:,} energy (cheaper than a TRX burn)...'
+                            res_r = tronsave_rent(from_addr, need_energy, gas_addr, gas_key)
+                            t['rent_cost_trx'] = res_r.get('trx')
+                            if res_r.get('order'): t['rent_order'] = res_r['order']
+                            if res_r.get('pay_txid'): t.setdefault('txids', []).append(res_r['pay_txid'])
+                            tronsave_wait(res_r.get('order'))
+                            if not _wait_for_energy(from_addr, need_energy * 0.8):
+                                raise RuntimeError('Rented energy did not arrive in time')
+                            delegated = True
+                    except Exception as e:
+                        print(f"[TREASURY] auto-rent skipped/failed: {e}")
+                if src_free:
+                    topup = 0.0
+                elif delegated:
+                    # skip the bandwidth top-up when the wallet's free daily
+                    # bandwidth already covers the transfer — saves ~30s
+                    res_bw = _tron_account_resources(from_addr) or {}
+                    topup = 0.0 if (res_bw.get('freenet', 0) + res_bw.get('net', 0)) >= 400 else 0.7
+                else:
+                    topup = gas_needed + 1.0
                 if topup > 0:
                     if trx_w:
                         # pre-count the incoming TRX so the watcher can't treat it as a deposit
@@ -2365,6 +2390,10 @@ def execute_treasury_send(task_id):
                         raise RuntimeError("Delegated energy did not arrive in time; retry")
                     if not _wait_for_native(from_addr, 'TRX', topup * 0.9):
                         raise RuntimeError("Gas top-up did not confirm in time; check the gas tx then retry")
+                elif delegated and not src_free:
+                    # no top-up needed — just confirm the delegated energy landed
+                    if not _wait_for_energy(from_addr, need_energy * 0.8):
+                        raise RuntimeError("Delegated energy did not arrive in time; retry")
             else:
                 t['step'] = f'Funding gas ({gas_asset} from your gas wallet)...'
                 t['gas_txid'] = evm_send_native(gas_asset, gas_key, from_addr, gas_needed)
@@ -8877,6 +8906,28 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                     est = {'error': str(e)}
             else:
                 est = estimate_network_fee(net, data.get('to_addr') or None)
+                # TRC20 trx mode: mirror the executor — free if the wallet is
+                # already charged, else auto-rent if it beats a TRX burn
+                if net == 'USDT_TRC20' and 'error' not in est and not est.get('delegated'):
+                    try:
+                        uid2 = int(data.get('uid', 0))
+                        w2 = user_db.get(uid2, {}).get('wallets', {}).get(net) if uid2 else None
+                        if w2:
+                            need_e = _tron_energy_needed(data.get('to_addr') or w2['address'])
+                            if _tron_self_sufficient(w2['address'], need_e):
+                                est.update({'fee_crypto': 0.0, 'fee_usd': 0.0,
+                                            'gas_needed_crypto': 0.0, 'charged': True,
+                                            'note': 'wallet already holds energy — ~0 TRX'})
+                            else:
+                                est_r = tronsave_estimate(w2['address'], need_e)
+                                if est_r['trx'] + 1.1 < float(est.get('gas_needed_crypto') or 999):
+                                    est.update({'fee_crypto': est_r['trx'] + 1.1,
+                                                'fee_usd': (est_r['trx'] + 1.1) * get_crypto_price('TRX'),
+                                                'gas_needed_crypto': est_r['trx'] + 1.1,
+                                                'auto_rent': True,
+                                                'note': 'auto-rented energy — cheaper than burning TRX'})
+                    except Exception:
+                        pass
                 if 'error' not in est:
                     gas = get_gas_balances()
                     have = gas.get(est['gas_asset'])
