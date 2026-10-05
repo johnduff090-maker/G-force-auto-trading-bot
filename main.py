@@ -1534,6 +1534,13 @@ def _credited_baseline(w_data, curr, onchain):
     return base
 
 
+def _spend_trial_first(u, spent_from_deposit):
+    """Free-trial cash is always treated as spent BEFORE real money. Whenever
+    the deposit pool is debited we shrink the user's outstanding trial pool,
+    so an expired claim can never claw back money that was already used."""
+    u['trial_credit'] = max(0.0, u.get('trial_credit', 0.0) - spent_from_deposit)
+
+
 def credit_deposit(uid, curr, crypto_amount, txid="", is_manual=False):
     """Credit a confirmed deposit to a user and fire all the usual
     notifications. Shared by the automatic balance watcher and the manual
@@ -1682,6 +1689,7 @@ def check_and_trigger_auto_buy(user_id):
             if user_db[user_id]['deposit'] >= p_data['min']:
                 invest_amt = min(user_db[user_id]['deposit'], p_data['max'])
                 user_db[user_id]['deposit'] -= invest_amt
+                _spend_trial_first(user_db[user_id], invest_amt)
                 log_tx(user_id, f"Bought {p_data['name']}", -invest_amt)
             else:
                 return
@@ -3555,6 +3563,7 @@ def handle_messages(message):
             if target in user_db:
                 user_db[target]['balance'] = 0.0
                 user_db[target]['deposit'] = 0.0
+                user_db[target]['trial_credit'] = 0.0
                 user_db[target]['bonus'] = 0.0
                 user_db[target]['hourly'] = 0.0
                 user_db[target]['active_plans'] = []
@@ -3580,6 +3589,7 @@ def handle_messages(message):
             for uid in user_db:
                 user_db[uid]['balance'] = 0.0
                 user_db[uid]['deposit'] = 0.0
+                user_db[uid]['trial_credit'] = 0.0
                 user_db[uid]['bonus'] = 0.0
                 user_db[uid]['hourly'] = 0.0
                 user_db[uid]['active_plans'] = []
@@ -4314,6 +4324,7 @@ def handle_messages(message):
             rem = amount - u_dep
             user_db[user_id]['deposit'] = 0
             user_db[user_id]['balance'] -= rem
+        _spend_trial_first(user_db[user_id], min(u_dep, amount))
 
         log_tx(user_id, f"Reinvested {matched_plan_data['name']}", -amount)
 
@@ -4343,6 +4354,7 @@ def handle_messages(message):
             rem = amount - u_dep
             user_db[user_id]['deposit'] = 0
             user_db[user_id]['balance'] -= rem
+        _spend_trial_first(user_db[user_id], min(u_dep, amount))
 
         log_tx(user_id, f"Reinvested {matched_plan_data['name']}", -amount)
 
@@ -4480,6 +4492,7 @@ def handle_messages(message):
             rem = invest_amount - u_dep
             user_db[user_id]['deposit'] = 0
             user_db[user_id]['balance'] -= rem
+        _spend_trial_first(user_db[user_id], min(u_dep, invest_amount))
             
         log_tx(user_id, f"Bought {p_data['name']}", -invest_amount)
             
@@ -4984,6 +4997,7 @@ def handle_messages(message):
             rem = amount - u_dep
             user_db[user_id]['deposit'] = 0
             user_db[user_id]['balance'] -= rem
+        _spend_trial_first(user_db[user_id], min(u_dep, amount))
 
         log_tx(user_id, f"Reinvested {matched_plan_data['name']}", -amount)
 
@@ -5780,6 +5794,7 @@ def execute_plan_purchase_via_popup(user_id, chat_id, message_id, call_id, plan_
         rem = invest_amount - u_dep
         user_db[user_id]['deposit'] = 0
         user_db[user_id]['balance'] -= rem
+    _spend_trial_first(user_db[user_id], min(u_dep, invest_amount))
         
     log_tx(user_id, f"Bought {p_data['name']}", -invest_amount)
     
@@ -5881,6 +5896,7 @@ def handle_inline(call):
         days = offer['expires_days']
         now = time.time()
         user_db[user_id]['deposit'] = user_db[user_id].get('deposit', 0.0) + amount
+        user_db[user_id]['trial_credit'] = user_db[user_id].get('trial_credit', 0.0) + amount
         free_trial_claims[claim_key] = {
             'uid': user_id, 'offer_id': offer_id, 'amount': amount,
             'claim_time': now, 'expiry_time': now + days * 86400,
@@ -6942,47 +6958,57 @@ def send_free_trial_offer(uid, offer):
     else:
         bot.send_message(uid, text, parse_mode="HTML", reply_markup=markup)
 
+def sweep_free_trial_claims_once():
+    """One pass over all trial claims: sends the daily reminder for active
+    claims and expires overdue ones — removing only the unspent trial money."""
+    now = time.time()
+    for ckey, claim in list(free_trial_claims.items()):
+        if claim.get('status') != 'claimed':
+            continue
+        expiry = claim.get('expiry_time', 0)
+        uid = claim.get('uid')
+        amount = claim.get('amount', 0.0)
+
+        if now >= expiry:
+            # EXPIRED: remove the unspent remainder and alert the user.
+            claim['status'] = 'expired'
+            if uid in user_db:
+                cur = user_db[uid].get('deposit', 0.0)
+                # Only take back trial money still sitting unspent in the
+                # deposit pool — never the user's real funds, and never trial
+                # cash already spent into plans.
+                removed = min(amount, user_db[uid].get('trial_credit', 0.0), cur)
+                user_db[uid]['deposit'] = cur - removed
+                user_db[uid]['trial_credit'] = max(0.0, user_db[uid].get('trial_credit', 0.0) - removed)
+                claim['removed'] = removed
+                if removed > 0:
+                    log_tx(uid, "Free Trial Expired", -removed)
+                try:
+                    lang = get_user_lang(uid)
+                    msg = _ft_fill(free_trial_settings.get('msg_expired', ''), removed)
+                    bot.send_message(uid, get_tl_and_map(msg, lang), parse_mode="HTML")
+                except Exception: pass
+            continue
+
+        # DAILY REMINDER: one per 24h while the claim is active.
+        if now - claim.get('last_reminder', claim.get('claim_time', now)) >= 86400:
+            claim['last_reminder'] = now
+            if uid in user_db:
+                days_left = int((expiry - now + 86399) // 86400) or 1
+                try:
+                    lang = get_user_lang(uid)
+                    msg = _ft_fill(free_trial_settings.get('msg_reminder', ''), amount, days_left=days_left)
+                    bot.send_message(uid, get_tl_and_map(msg, lang), parse_mode="HTML")
+                except Exception: pass
+
+
 def free_trial_expiry_loop():
     """Background loop for free-trial cash. Every 24h after a claim the user
     gets a reminder with the days remaining; when the countdown ends, the
     unspent remainder is removed and the user gets an expiry alert."""
     while True:
         try:
-            now = time.time()
-            for ckey, claim in list(free_trial_claims.items()):
-                if claim.get('status') != 'claimed':
-                    continue
-                expiry = claim.get('expiry_time', 0)
-                uid = claim.get('uid')
-                amount = claim.get('amount', 0.0)
-
-                if now >= expiry:
-                    # EXPIRED: remove the unspent remainder and alert the user.
-                    claim['status'] = 'expired'
-                    if uid in user_db:
-                        cur = user_db[uid].get('deposit', 0.0)
-                        removed = min(amount, cur)
-                        user_db[uid]['deposit'] = cur - removed
-                        claim['removed'] = removed
-                        if removed > 0:
-                            log_tx(uid, "Free Trial Expired", -removed)
-                        try:
-                            lang = get_user_lang(uid)
-                            msg = _ft_fill(free_trial_settings.get('msg_expired', ''), removed)
-                            bot.send_message(uid, get_tl_and_map(msg, lang), parse_mode="HTML")
-                        except Exception: pass
-                    continue
-
-                # DAILY REMINDER: one per 24h while the claim is active.
-                if now - claim.get('last_reminder', claim.get('claim_time', now)) >= 86400:
-                    claim['last_reminder'] = now
-                    if uid in user_db:
-                        days_left = int((expiry - now + 86399) // 86400) or 1
-                        try:
-                            lang = get_user_lang(uid)
-                            msg = _ft_fill(free_trial_settings.get('msg_reminder', ''), amount, days_left=days_left)
-                            bot.send_message(uid, get_tl_and_map(msg, lang), parse_mode="HTML")
-                        except Exception: pass
+            sweep_free_trial_claims_once()
             save_database()
         except Exception as e:
             print(f"Free Trial Expiry Error: {e}")

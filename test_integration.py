@@ -234,10 +234,9 @@ check("claim expiry ~3 days", abs(main.free_trial_claims[ckey]['expiry_time'] - 
 main.handle_inline(FakeCall(f'claim_trial_{offer_id}', 111))
 check("double claim rejected", any('already claimed' in a for a in ANSWERS))
 
-# expiry pass: make the claim overdue, run one sweep iteration
+# expiry pass: make the claim overdue, run one sweep
 main.free_trial_claims[ckey]['expiry_time'] = time.time() - 1
-threading.Thread(target=main.free_trial_expiry_loop, daemon=True).start()
-time.sleep(2)
+main.sweep_free_trial_claims_once()
 check("claim marked expired", main.free_trial_claims[ckey]['status'] == 'expired')
 check("unused cash removed", abs(main.user_db[111]['deposit'] - dep_before) < 1e-9,
       f"= {main.user_db[111]['deposit']}")
@@ -249,8 +248,7 @@ main.free_offers['off2'] = offer2
 main.handle_inline(FakeCall('claim_trial_off2', 222))
 ck2 = 'off2_222'
 main.free_trial_claims[ck2]['last_reminder'] = time.time() - 90000  # overdue for daily reminder
-threading.Thread(target=main.free_trial_expiry_loop, daemon=True).start()
-time.sleep(2)
+main.sweep_free_trial_claims_once()
 check("daily reminder sent", any(uid == 222 and 'remind' in t.lower() for uid, t in SENT))
 check("reminder updates timestamp", main.free_trial_claims[ck2]['last_reminder'] > time.time() - 60)
 check("claim still active (not expired)", main.free_trial_claims[ck2]['status'] == 'claimed')
@@ -315,6 +313,69 @@ check("earned unchanged after termination", new_plan['earned'] == 0.0)
 # terminate Alice's plan too
 r = post('/api/terminate_plan', {'pin': PIN, 'uid': 111, 'plan_id': 'x1'})
 check("alice plan terminated + refunded", r.json().get('refunded') == 75.0)
+
+
+print("\n[7] Free trial expiry never touches real deposit money")
+
+main.user_db[333] = {'first_name': 'Carol', 'username': 'carol', 'deposit': 100.0,
+                     'balance': 0.0, 'active_plans': [], 'wallets': {}}
+
+# claim a $50 trial -> deposit 150, trial_credit 50
+main.free_offers['off3'] = {'id': 'off3', 'amount': 50.0, 'expires_days': 2,
+                            'image_url': '', 'created_at': time.time()}
+main.handle_inline(FakeCall('claim_trial_off3', 333))
+check("claim tracked in trial_credit", main.user_db[333].get('trial_credit') == 50.0)
+check("deposit after claim", main.user_db[333]['deposit'] == 150.0)
+
+# --- scenario A: user spends the whole trial on a plan -> expiry removes NOTHING ---
+u_dep = main.user_db[333]['deposit']
+main.user_db[333]['deposit'] -= 50.0
+main._spend_trial_first(main.user_db[333], min(u_dep, 50.0))
+check("trial_credit drains on plan spend", main.user_db[333].get('trial_credit') == 0.0)
+check("deposit after plan buy", main.user_db[333]['deposit'] == 100.0)
+
+ck3 = 'off3_333'
+main.free_trial_claims[ck3]['expiry_time'] = time.time() - 1
+main.sweep_free_trial_claims_once()
+check("spent trial expiry removes nothing", main.user_db[333]['deposit'] == 100.0)
+check("spent-trial claim still marked expired", main.free_trial_claims[ck3]['status'] == 'expired')
+check("claim recorded 0 removed", main.free_trial_claims[ck3].get('removed') == 0.0)
+
+# --- scenario B: partial spend -> expiry removes only the unspent remainder ---
+main.user_db[333]['trial_credit'] = 0.0
+main.free_offers['off4'] = {'id': 'off4', 'amount': 40.0, 'expires_days': 2,
+                            'image_url': '', 'created_at': time.time()}
+main.handle_inline(FakeCall('claim_trial_off4', 333))
+# spend $25 of it -> trial_credit 40-25 = 15, deposit 100+40-25 = 115
+u_dep = main.user_db[333]['deposit']
+main.user_db[333]['deposit'] -= 25.0
+main._spend_trial_first(main.user_db[333], min(u_dep, 25.0))
+check("partial spend leaves remainder", main.user_db[333].get('trial_credit') == 15.0)
+
+ck4 = 'off4_333'
+main.free_trial_claims[ck4]['expiry_time'] = time.time() - 1
+main.sweep_free_trial_claims_once()
+check("expiry removes only unspent remainder", main.user_db[333]['deposit'] == 100.0,
+      f"= {main.user_db[333]['deposit']}")
+check("removed == unspent 15", main.free_trial_claims[ck4].get('removed') == 15.0)
+
+# --- scenario C: fully unspent trial + real money -> only the trial amount goes ---
+main.free_offers['off5'] = {'id': 'off5', 'amount': 30.0, 'expires_days': 2,
+                            'image_url': '', 'created_at': time.time()}
+main.handle_inline(FakeCall('claim_trial_off5', 333))
+ck5 = 'off5_333'
+main.free_trial_claims[ck5]['expiry_time'] = time.time() - 1
+main.sweep_free_trial_claims_once()
+check("unspent trial fully removed", main.user_db[333]['deposit'] == 100.0)
+check("real deposit untouched", main.free_trial_claims[ck5].get('removed') == 30.0)
+
+# --- scenario D: legacy claim (pre-fix, no trial_credit) -> lenient, removes 0 ---
+main.user_db[333].pop('trial_credit', None)
+main.free_trial_claims['legacy_333'] = {'uid': 333, 'offer_id': 'legacy', 'amount': 20.0,
+                                        'claim_time': time.time() - 999999,
+                                        'expiry_time': time.time() - 1, 'status': 'claimed'}
+main.sweep_free_trial_claims_once()
+check("legacy claim removes nothing (safe default)", main.user_db[333]['deposit'] == 100.0)
 
 server.shutdown()
 
