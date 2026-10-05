@@ -51,7 +51,7 @@ REAL_AUTO_BUY = main.check_and_trigger_auto_buy  # keep the real one for [6]
 main.check_and_trigger_auto_buy = lambda *a, **k: None
 main.save_database = lambda *a, **k: None
 main.log_tx = lambda *a, **k: None
-main.get_crypto_price = lambda c: 1.0 if 'USDT' in c else (0.12 if c == 'TRX' else 65000.0)
+main.get_crypto_price = lambda c: 1.0 if 'USDT' in c else (0.34 if c == 'TRX' else 97000.0)
 
 # Real public holder addresses (read-only; we never move funds).
 BEP20_ADDR = "0x8894E0a0c962CB723c1976a4421c95949bE2D4E3"   # Binance BSC hot

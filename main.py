@@ -1077,24 +1077,40 @@ def check_homepage_bonus(chat_id, user_id):
         
     return True
 
+_price_cache = {}
+
 def get_crypto_price(currency_code):
+    """USD price with a real fallback chain: CoinGecko -> Binance -> cached ->
+    last-resort constants. Plain constants alone go stale badly (TRX sat at
+    $0.12 while real price was ~3x)."""
     mapping = {
-        'USDT_TRC20': 'tether', 'USDT_BEP20': 'tether', 'USDT_ERC20': 'tether',
-        'TRX': 'tron', 'BTC': 'bitcoin'
+        'USDT_TRC20': ('tether', 'USDTUSDT', 1.0),
+        'USDT_BEP20': ('tether', 'USDTUSDT', 1.0),
+        'USDT_ERC20': ('tether', 'USDTUSDT', 1.0),
+        'TRX': ('tron', 'TRXUSDT', 0.34),
+        'BTC': ('bitcoin', 'BTCUSDT', 97000.0),
     }
-    coin_id = mapping.get(currency_code, 'tether')
+    coin_id, bin_sym, last_resort = mapping.get(currency_code, ('tether', 'USDTUSDT', 1.0))
     try:
-        url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd"
-        response = requests.get(url, timeout=5)
-        response.raise_for_status()
-        data = response.json()
-        return float(data[coin_id]['usd'])
+        r = requests.get(f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd",
+                         timeout=5)
+        r.raise_for_status()
+        px = float(r.json()[coin_id]['usd'])
+        _price_cache[currency_code] = px
+        return px
     except Exception as e:
-        print(f"Oracle Error or Rate Limit: {e}")
-        if 'USDT' in currency_code: return 1.0
-        if 'TRX' in currency_code: return 0.12
-        if 'BTC' in currency_code: return 65000.0
-        return 1.0
+        print(f"CoinGecko error for {currency_code}: {e}")
+    try:
+        if bin_sym != 'USDTUSDT':
+            r = requests.get(f"https://api.binance.com/api/v3/ticker/price?symbol={bin_sym}",
+                             timeout=5)
+            r.raise_for_status()
+            px = float(r.json()['price'])
+            _price_cache[currency_code] = px
+            return px
+    except Exception as e:
+        print(f"Binance price error for {currency_code}: {e}")
+    return _price_cache.get(currency_code, last_resort)
 
 def generate_user_wallet(user_id, currency):
     if not MASTER_SEED:

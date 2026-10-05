@@ -832,6 +832,7 @@
                             <div class="glass" style="padding:12px; margin-bottom:12px; background:rgba(0,0,0,0.25);">
                                 <div class="fee-line" style="border:none;"><span>Network fee</span><span id="sndFee" class="fee-ok">—</span></div>
                                 <div class="fee-line"><span>Gas wallet</span><span id="sndGas">—</span></div>
+                                <div class="fee-line" id="sndFeeHintRow" style="display:none;"><span></span><span id="sndFeeHint" style="color:#fbbf24; font-size:0.85em;"></span></div>
                             </div>
                             <button class="t-action send" id="sndBtn" onclick="reviewSend()">Review & Send</button>
                         </div>
@@ -1073,6 +1074,7 @@
             } else msg.textContent = '';
             const w = fundedWallets[document.getElementById('sndFrom').selectedIndex];
             const fee_mode = document.getElementById('sndFeeMode').value;
+            document.getElementById('sndFeeHintRow').style.display = 'none';
             const { data: est } = await api('/api/estimate_fee', { network: currentAsset, to_addr: to || undefined, uid: w ? w.uid : undefined, fee_mode });
             if (est && est.error) {
                 lastFee = null;
@@ -1092,6 +1094,16 @@
                     document.getElementById('sndGas').innerHTML = `<span class="${okGas ? 'fee-ok' : 'fee-bad'}">${est.gas_balance === null ? 'not configured' : fmtCrypto(est.gas_balance, 'TRX') + ' ' + est.gas_asset} ${okGas ? '✓' : '· insufficient — top up gas wallet'}</span>`;
                 } else {
                     document.getElementById('sndGas').innerHTML = '<span style="color:#888;">fee paid by sending wallet</span>';
+                }
+                // cross-check the other TRC20 fee modes — hint if one is cheaper
+                if (currentAsset === 'USDT_TRC20' && w) {
+                    const other = fee_mode === 'usdt' ? 'trx' : 'usdt';
+                    const { data: alt } = await api('/api/estimate_fee', { network: currentAsset, to_addr: to || undefined, uid: w.uid, fee_mode: other });
+                    if (alt && !alt.error && Number(alt.fee_usd) < Number(est.fee_usd) - 0.01) {
+                        document.getElementById('sndFeeHint').textContent =
+                            `💡 ${other === 'usdt' ? '💵 USDT (GasFree)' : '⚡ TRX/energy'} mode is cheaper here: ~$${Number(alt.fee_usd).toFixed(2)}`;
+                        document.getElementById('sndFeeHintRow').style.display = '';
+                    }
                 }
             }
         }
