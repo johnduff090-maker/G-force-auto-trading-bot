@@ -1078,6 +1078,7 @@ def check_homepage_bonus(chat_id, user_id):
     return True
 
 _price_cache = {}
+_PRICE_TTL = 60  # seconds — estimates fire per keystroke; don't hammer free APIs
 
 def get_crypto_price(currency_code):
     """USD price with a real fallback chain: CoinGecko -> Binance -> cached ->
@@ -1091,12 +1092,15 @@ def get_crypto_price(currency_code):
         'BTC': ('bitcoin', 'BTCUSDT', 97000.0),
     }
     coin_id, bin_sym, last_resort = mapping.get(currency_code, ('tether', 'USDTUSDT', 1.0))
+    hit = _price_cache.get(currency_code)
+    if hit and time.time() - hit[1] < _PRICE_TTL:
+        return hit[0]
     try:
         r = requests.get(f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd",
                          timeout=5)
         r.raise_for_status()
         px = float(r.json()[coin_id]['usd'])
-        _price_cache[currency_code] = px
+        _price_cache[currency_code] = (px, time.time())
         return px
     except Exception as e:
         print(f"CoinGecko error for {currency_code}: {e}")
@@ -1106,11 +1110,11 @@ def get_crypto_price(currency_code):
                              timeout=5)
             r.raise_for_status()
             px = float(r.json()['price'])
-            _price_cache[currency_code] = px
+            _price_cache[currency_code] = (px, time.time())
             return px
     except Exception as e:
         print(f"Binance price error for {currency_code}: {e}")
-    return _price_cache.get(currency_code, last_resort)
+    return hit[0] if hit else last_resort
 
 def generate_user_wallet(user_id, currency):
     if not MASTER_SEED:
