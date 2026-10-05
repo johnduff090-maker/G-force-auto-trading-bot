@@ -580,17 +580,47 @@ r = post('/api/send_asset', {'pin': PIN, 'network': 'USDT_TRC20', 'uid': 111,
 check("usdt mode needs API keys", r.status_code == 400 and 'GASFREE' in r.json().get('error', ''),
       f"= {r.json().get('error')}")
 
-# --- rent fee_mode validation ---
+# --- rent fee_mode validation (signed-tx path: no API key, just gas wallet) ---
 check("rent fee_mode rejected on BEP20", post('/api/send_asset', {'pin': PIN, 'network': 'USDT_BEP20',
       'uid': 111, 'to_addr': ERC20_ADDR, 'amount': 1, 'fee_mode': 'rent'}).status_code == 400)
+
+# no tron gas key -> clear config error
+_saved_gw = dict(main.gas_wallet)
+main.gas_wallet.clear()
+main.gas_wallet.update({'tron_address': TRON_ADDR, 'tron_key': ''})
 r = post('/api/send_asset', {'pin': PIN, 'network': 'USDT_TRC20', 'uid': 111,
       'to_addr': TRON_ADDR, 'amount': 1, 'fee_mode': 'rent'})
-check("rent mode needs API key", r.status_code == 400 and 'TRONSAVE' in r.json().get('error', ''),
+check("rent needs tron gas key", r.status_code == 400 and 'gas wallet' in r.json().get('error', '').lower(),
       f"= {r.json().get('error')}")
+
+# gas key present + stubs -> quote/validation/send all behave
+main.gas_wallet.clear(); main.gas_wallet.update(_saved_gw)
+main.gas_wallet['tron_key'] = 'ab' * 32
+_orig_est, _orig_ssf, _orig_tbal = main.tronsave_estimate, main._tron_self_sufficient, main._tron_balance
+main.tronsave_estimate = lambda *a, **k: {'trx': 4.0, 'sun': 4_000_000, 'unit_price': 100}
+main._tron_self_sufficient = lambda a, e: False
+main._tron_balance = lambda a, c: 50.0
 r = post('/api/estimate_fee', {'pin': PIN, 'network': 'USDT_TRC20', 'uid': 111,
       'to_addr': TRON_ADDR, 'fee_mode': 'rent'})
-check("rent estimate needs API key", 'TRONSAVE' in r.json().get('error', ''),
+check("rent estimate returns live quote", r.json().get('rented') is True and r.json().get('fee_crypto') > 0,
+      f"= {r.json()}")
+main._tron_self_sufficient = lambda a, e: True
+r = post('/api/estimate_fee', {'pin': PIN, 'network': 'USDT_TRC20', 'uid': 111,
+      'to_addr': TRON_ADDR, 'fee_mode': 'rent'})
+check("rent charged wallet shows ~0 fee", r.json().get('charged') is True and r.json().get('fee_crypto') == 0,
+      f"= {r.json()}")
+main._tron_self_sufficient = lambda a, e: False
+r = post('/api/send_asset', {'pin': PIN, 'network': 'USDT_TRC20', 'uid': 111,
+      'to_addr': TRON_ADDR, 'amount': 1, 'fee_mode': 'rent'})
+check("rent send queued (stubbed)", r.status_code == 200 and r.json().get('success') is True,
+      f"= {r.json()}")
+main._tron_balance = lambda a, c: 0.5
+r = post('/api/send_asset', {'pin': PIN, 'network': 'USDT_TRC20', 'uid': 111,
+      'to_addr': TRON_ADDR, 'amount': 1, 'fee_mode': 'rent'})
+check("rent rejects low gas balance", r.status_code == 400 and 'TRX' in r.json().get('error', ''),
       f"= {r.json().get('error')}")
+main.tronsave_estimate, main._tron_self_sufficient, main._tron_balance = _orig_est, _orig_ssf, _orig_tbal
+main.gas_wallet['tron_key'] = _saved_gw.get('tron_key', '')
 
 server.shutdown()
 

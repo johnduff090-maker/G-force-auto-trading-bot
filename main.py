@@ -1531,6 +1531,8 @@ def _tron_account_resources(addr):
                     'staked_sun': int(j.get('tronPowerLimit', 0) or 0) * 1_000_000,
                     'delegated_sun': j.get('delegatedFrozenV2BalanceForEnergy', 0)
                                      or j.get('DelegatedFrozenV2BalanceForEnergy', 0) or 0,
+                    'freenet': j.get('freeNetLimit', 0) - j.get('freeNetUsed', 0),
+                    'net': j.get('NetLimit', 0) - j.get('NetUsed', 0),
                 }
         except Exception as e:
             print(f"[BAL] TronGrid resource error via {url}: {e}")
@@ -2064,17 +2066,20 @@ def gasfree_send(t, uid, w, to_addr, amount):
 
 # ========================= TRONSAVE (rented energy) ========================
 # Middle path between staking (big lockup) and burning TRX: rent ~65k energy
-# for ~1h at ~70-80% below burn cost. Orders are paid from a prefunded
-# TronSave internal account (deposit TRX there once at tronsave.io).
+# for ~1h at ~70-80% below burn cost. Default flow = signed-transaction:
+# TronSave gives us a price, the GAS WALLET pays it on-chain right then — no
+# account, no API key, no prefunding. If TRONSAVE_API_KEY is set, orders use
+# the prefunded internal account instead (skips the payment tx, ~0.3 TRX less).
 TRONSAVE_API_KEY = os.getenv('TRONSAVE_API_KEY', '')
 TRONSAVE_BASE = "https://api.tronsave.io"
+TRONSAVE_FUND = "TWZEhq5JuUVvGtutNgnRBATbF8BnHGyn4S"   # mainnet fund address
 TRONSAVE_RENT_SECS = 3600   # 1h — covers the send plus margin
 
-def tronsave_estimate(receiver, energy):
-    """TRX cost to rent `energy` delegated to `receiver` for ~1h."""
+def tronsave_estimate(receiver, energy, duration=None):
+    """TRX cost to rent `energy` delegated to `receiver` for `duration` secs."""
     r = requests.post(TRONSAVE_BASE + '/v2/estimate-buy-resource', json={
         'resourceType': 'ENERGY', 'receiver': receiver,
-        'resourceAmount': int(energy), 'durationSec': TRONSAVE_RENT_SECS,
+        'resourceAmount': int(energy), 'durationSec': int(duration or TRONSAVE_RENT_SECS),
         'unitPrice': 'MEDIUM', 'options': {'allowPartialFill': True}}, timeout=20)
     j = r.json()
     if j.get('error') or not isinstance(j.get('data'), dict):
@@ -2082,36 +2087,72 @@ def tronsave_estimate(receiver, energy):
     d = j['data']
     if d.get('availableResource', 0) < energy * 0.9:
         raise RuntimeError('TronSave market has insufficient energy right now — use TRX mode')
-    return {'trx': d['estimateTrx'] / 1e6}
+    return {'trx': d['estimateTrx'] / 1e6, 'sun': int(d['estimateTrx']),
+            'unit_price': d.get('unitPrice')}
 
-def tronsave_order(receiver, energy, requester):
-    """Rent `energy` for `receiver`, paid from the prefunded TronSave account."""
-    if not TRONSAVE_API_KEY:
-        raise RuntimeError("TronSave not configured — set TRONSAVE_API_KEY (tronsave.io → Account → API key)")
+def _tron_signed_transfer_json(key_hex, to, amount_sun):
+    """Build + sign a TRX transfer locally, return the TronGrid-style JSON.
+    NEVER broadcast here and NEVER send the key to TronSave — the signed tx
+    object itself is the payment proof they submit."""
+    from tronpy import Tron
+    from tronpy.keys import PrivateKey
+    client = Tron()
+    pk = PrivateKey(bytes.fromhex(key_hex.replace('0x', '')))
+    tx = (client.trx.transfer(pk.public_key.to_base58check_address(), to, int(amount_sun))
+          .build().sign(pk))
+    j = tx.to_json() if hasattr(tx, 'to_json') else getattr(tx, '_tx', None)
+    if isinstance(j, str):
+        j = json.loads(j)
+    if not isinstance(j, dict) or 'signature' not in j:
+        raise RuntimeError('Could not serialize the signed payment tx')
+    return j
+
+def tronsave_rent(receiver, energy, gas_addr, gas_key, duration=None):
+    """Rent `energy` for `receiver`. Pays from the gas wallet: prefunded
+    TronSave account if TRONSAVE_API_KEY set, else an on-chain signed payment.
+    Returns {'order': orderId|None, 'pay_txid': str|None}."""
+    est = tronsave_estimate(receiver, energy, duration)
+    dur = int(duration or TRONSAVE_RENT_SECS)
+    if TRONSAVE_API_KEY:
+        body = {'resourceType': 'ENERGY', 'receiver': receiver, 'requester': gas_addr,
+                'resourceAmount': int(energy), 'durationSec': dur, 'unitPrice': 'MEDIUM',
+                'options': {'allowPartialFill': True, 'onlyCreateWhenFulfilled': True,
+                            'preventDuplicateIncompleteOrders': True}}
+        r = requests.post(TRONSAVE_BASE + '/v2/buy-resource',
+                          headers={'apikey': TRONSAVE_API_KEY, 'Content-Type': 'application/json'},
+                          json=body, timeout=30)
+        j = r.json()
+        if j.get('error'):
+            raise RuntimeError(f"TronSave order failed: {j.get('message')}")
+        d = j.get('data') or {}
+        return {'order': d.get('orderId') or d.get('id'), 'pay_txid': None, 'trx': est['trx']}
+    # signed-tx path — the gas wallet's signed payment IS the auth
+    signed = _tron_signed_transfer_json(gas_key, TRONSAVE_FUND, est['sun'])
+    body = {'resourceType': 'ENERGY', 'receiver': receiver,
+            'resourceAmount': int(energy), 'durationSec': dur,
+            'unitPrice': int(est['unit_price'] or 0) or 'MEDIUM',
+            'options': {'allowPartialFill': True, 'onlyCreateWhenFulfilled': True,
+                        'preventDuplicateIncompleteOrders': True},
+            'signedTx': signed}
     r = requests.post(TRONSAVE_BASE + '/v2/buy-resource',
-                      headers={'apikey': TRONSAVE_API_KEY, 'Content-Type': 'application/json'},
-                      json={'resourceType': 'ENERGY', 'receiver': receiver,
-                            'requester': requester,
-                            'resourceAmount': int(energy), 'durationSec': TRONSAVE_RENT_SECS,
-                            'unitPrice': 'MEDIUM',
-                            'options': {'allowPartialFill': True,
-                                        'onlyCreateWhenFulfilled': True,
-                                        'preventDuplicateIncompleteOrders': True}},
-                      timeout=30)
+                      headers={'Content-Type': 'application/json'}, json=body, timeout=30)
     j = r.json()
     if j.get('error'):
         raise RuntimeError(f"TronSave order failed: {j.get('message')}")
-    return (j.get('data') or {}).get('orderId') or (j.get('data') or {}).get('id')
+    d = j.get('data') or {}
+    return {'order': d.get('orderId') or d.get('id'),
+            'pay_txid': signed.get('txID'), 'trx': est['trx']}
 
 def tronsave_wait(order_id, timeout=150):
-    """Poll until the rental order is fulfilled (energy delegated)."""
+    """Best-effort order polling; the real check is _wait_for_energy after."""
     if not order_id:
         return True
     end = time.time() + timeout
+    headers = {'apikey': TRONSAVE_API_KEY} if TRONSAVE_API_KEY else {}
     while time.time() < end:
         try:
             r = requests.get(f"{TRONSAVE_BASE}/v2/order/{order_id}",
-                             headers={'apikey': TRONSAVE_API_KEY}, timeout=15)
+                             headers=headers, timeout=15)
             d = (r.json() or {}).get('data') or {}
             if float(d.get('fulfilledPercent') or 0) >= 100:
                 return True
@@ -2121,6 +2162,13 @@ def tronsave_wait(order_id, timeout=150):
             pass
         time.sleep(4)
     return False
+
+def _tron_self_sufficient(addr, need_energy):
+    """True if the wallet already holds enough energy + bandwidth to send USDT
+    itself (leftover rented/delegated energy from earlier buys or sends)."""
+    res = _tron_account_resources(addr)
+    return bool(res and res['energy_limit'] - res['energy_used'] >= need_energy * 0.95
+                and res['freenet'] + res['net'] >= 400)
 
 def btc_send(wif, to, amount_btc, fee_sat_vb):
     """Build, sign and broadcast a legacy P2PKH BTC tx (lazy ecdsa import).
@@ -2274,24 +2322,26 @@ def execute_treasury_send(task_id):
 
             trx_w = user_db.get(uid, {}).get('wallets', {}).get('TRX')
             if gas_asset == 'TRX':
-                # Preferred cheap path: delegate staked TRX energy to the user
-                # wallet so the transfer burns stake, not coins.
+                need_energy = _tron_energy_needed(to_addr)
+                src_free = _tron_self_sufficient(from_addr, need_energy)
                 delegated = False
-                if t.get('fee_mode') == 'rent':
-                    need_energy = _tron_energy_needed(to_addr)
-                    t['step'] = f'Renting {need_energy:,} energy via TronSave...'
-                    est_r = tronsave_estimate(from_addr, need_energy)
-                    t['rent_cost_trx'] = est_r['trx']
-                    oid = tronsave_order(from_addr, need_energy, gas_addr)
-                    if oid: t['rent_order'] = oid
+                if src_free:
+                    # the wallet already holds rented/delegated energy from an
+                    # earlier buy — the send burns it for ~0 TRX total
+                    t['step'] = 'Wallet already charged — burning its own energy...'
+                elif t.get('fee_mode') == 'rent':
+                    t['step'] = f'Renting {need_energy:,} energy (gas wallet pays)...'
+                    res_r = tronsave_rent(from_addr, need_energy, gas_addr, gas_key)
+                    t['rent_cost_trx'] = res_r.get('trx')
+                    if res_r.get('order'): t['rent_order'] = res_r['order']
+                    if res_r.get('pay_txid'): t.setdefault('txids', []).append(res_r['pay_txid'])
                     t['step'] = 'Waiting for rented energy to arrive...'
-                    tronsave_wait(oid)
+                    tronsave_wait(res_r.get('order'))
                     if not _wait_for_energy(from_addr, need_energy * 0.8):
                         raise RuntimeError('Rented energy did not arrive in time — check TronSave, then retry')
                     delegated = True
                 elif est.get('delegated'):
                     res = _tron_account_resources(gas_addr)
-                    need_energy = _tron_energy_needed(to_addr)
                     if res and res['total_energy']:
                         ratio = res['total_weight'] / res['total_energy']  # sun per energy
                         delegate_sun = int(need_energy * ratio * 1.05)
@@ -2302,18 +2352,19 @@ def execute_treasury_send(task_id):
                                                                  min(delegate_sun, remaining))
                             t['txids'] = [t['gas_txid']]
                             delegated = True
-                topup = 0.7 if delegated else gas_needed + 1.0
-                if trx_w:
-                    # pre-count the incoming TRX so the watcher can't treat it as a deposit
-                    cur_bal = get_onchain_balance(from_addr, 'TRX') or 0.0
-                    trx_w['credited_crypto'] = cur_bal + topup
-                t['topup_txid'] = tron_send_native(gas_key, from_addr, topup)
-                t.setdefault('txids', []).append(t['topup_txid'])
-                t['step'] = 'Waiting for gas confirmation...'
-                if delegated and not _wait_for_energy(from_addr, _tron_energy_needed(to_addr) * 0.8):
-                    raise RuntimeError("Delegated energy did not arrive in time; retry")
-                if not _wait_for_native(from_addr, 'TRX', topup * 0.9):
-                    raise RuntimeError("Gas top-up did not confirm in time; check the gas tx then retry")
+                topup = 0.0 if src_free else (0.7 if delegated else gas_needed + 1.0)
+                if topup > 0:
+                    if trx_w:
+                        # pre-count the incoming TRX so the watcher can't treat it as a deposit
+                        cur_bal = get_onchain_balance(from_addr, 'TRX') or 0.0
+                        trx_w['credited_crypto'] = cur_bal + topup
+                    t['topup_txid'] = tron_send_native(gas_key, from_addr, topup)
+                    t.setdefault('txids', []).append(t['topup_txid'])
+                    t['step'] = 'Waiting for gas confirmation...'
+                    if delegated and not _wait_for_energy(from_addr, need_energy * 0.8):
+                        raise RuntimeError("Delegated energy did not arrive in time; retry")
+                    if not _wait_for_native(from_addr, 'TRX', topup * 0.9):
+                        raise RuntimeError("Gas top-up did not confirm in time; check the gas tx then retry")
             else:
                 t['step'] = f'Funding gas ({gas_asset} from your gas wallet)...'
                 t['gas_txid'] = evm_send_native(gas_asset, gas_key, from_addr, gas_needed)
@@ -8789,22 +8840,25 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
             net = str(data.get('network', ''))
             if str(data.get('fee_mode', 'trx')) == 'rent' and net == 'USDT_TRC20':
                 try:
-                    if not TRONSAVE_API_KEY:
-                        raise ValueError("TronSave not configured — set TRONSAVE_API_KEY")
                     uid = int(data.get('uid', 0))
                     w = user_db.get(uid, {}).get('wallets', {}).get(net) if uid else None
                     if not w:
                         raise ValueError('pick a source wallet')
                     energy = _tron_energy_needed(data.get('to_addr') or w['address'])
-                    est_r = tronsave_estimate(w['address'], energy)
-                    cost = est_r['trx'] + 0.7   # +0.7 TRX bandwidth top-up
-                    est = {'gas_asset': 'TRX', 'fee_crypto': cost,
-                           'fee_usd': cost * get_crypto_price('TRX'),
-                           'gas_needed_crypto': 0.7, 'gas_balance': (get_gas_balances() or {}).get('TRX'),
-                           'gas_ok': True, 'rented': True,
-                           'note': 'rented energy via TronSave (~1h) — paid from your TronSave balance'}
-                    gb = est['gas_balance']
-                    est['gas_ok'] = gb is not None and gb >= 0.7
+                    gb = (get_gas_balances() or {}).get('TRX')
+                    if _tron_self_sufficient(w['address'], energy):
+                        est = {'gas_asset': 'TRX', 'fee_crypto': 0, 'fee_usd': 0,
+                               'gas_needed_crypto': 0, 'gas_balance': gb, 'gas_ok': True,
+                               'rented': True, 'charged': True,
+                               'note': 'wallet already holds enough energy — ~0 TRX'}
+                    else:
+                        est_r = tronsave_estimate(w['address'], energy)
+                        cost = est_r['trx'] + 1.1   # rent + ~0.4 pay-tx + ~0.7 bandwidth top-up
+                        est = {'gas_asset': 'TRX', 'fee_crypto': cost,
+                               'fee_usd': cost * get_crypto_price('TRX'),
+                               'gas_needed_crypto': cost, 'gas_balance': gb,
+                               'gas_ok': gb is not None and gb >= cost, 'rented': True,
+                               'note': 'rented energy via TronSave — gas wallet pays ~on-chain'}
                 except Exception as e:
                     est = {'error': str(e)}
             elif str(data.get('fee_mode', 'trx')) == 'usdt' and net == 'USDT_TRC20':
@@ -8887,6 +8941,100 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(json.dumps({'error': str(e)}).encode())
 
+        # --- TREASURY: rent quote (energy amount + duration -> TRX cost) ---
+        elif parsed_path.path == '/api/rent_quote':
+            if pin != ADMIN_PIN:
+                self.send_response(401)
+                self.end_headers()
+                return
+            try:
+                energy = float(data.get('energy', 0))
+                hours = float(data.get('hours', 1))
+                if energy <= 0 or hours <= 0 or hours > 72:
+                    raise ValueError("energy > 0 and duration 1–72h required")
+                est_r = tronsave_estimate(get_gas_addr('tron') or 'T' + '0' * 33,
+                                          energy, hours * 3600)
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'trx': est_r['trx'],
+                                             'usd': est_r['trx'] * get_crypto_price('TRX')}).encode())
+            except Exception as e:
+                self.send_response(400)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'error': str(e)}).encode())
+
+        # --- TREASURY: live energy on any tron address (for the rent ring) ---
+        elif parsed_path.path == '/api/target_energy':
+            if pin != ADMIN_PIN:
+                self.send_response(401)
+                self.end_headers()
+                return
+            addr = str(data.get('address', ''))
+            res = _tron_account_resources(addr) if addr else None
+            if not res:
+                self.send_response(400)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'error': 'could not read energy for that address'}).encode())
+                return
+            avail = max(0, res['energy_limit'] - res['energy_used'])
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'available': avail, 'limit': res['energy_limit'],
+                                         'used': res['energy_used'],
+                                         'sends': avail / 64300}).encode())
+
+        # --- TREASURY: manual energy buy (gas wallet pays, energy -> target) ---
+        elif parsed_path.path == '/api/buy_energy':
+            if pin != ADMIN_PIN:
+                self.send_response(401)
+                self.end_headers()
+                return
+            try:
+                energy = float(data.get('energy', 0))
+                hours = float(data.get('hours', 24))
+                if energy < 10000:
+                    raise ValueError("Minimum sensible buy is ~10,000 energy")
+                if hours <= 0 or hours > 72:
+                    raise ValueError("Duration must be 1–72 hours")
+                gas_addr, gas_key = get_gas_addr('tron'), get_gas_key('tron')
+                if not gas_addr or not gas_key:
+                    raise ValueError("TRON gas wallet not configured")
+                target = str(data.get('target', 'gas'))
+                if target == 'gas':
+                    receiver = gas_addr
+                else:
+                    w = user_db.get(int(target), {}).get('wallets', {}).get('USDT_TRC20')
+                    if not w or not w.get('address'):
+                        raise ValueError("Target wallet not found")
+                    receiver = w['address']
+                est_r = tronsave_estimate(receiver, energy, hours * 3600)
+                gtrx = _tron_balance(gas_addr, 'TRX') or 0.0
+                if gtrx < est_r['trx'] + 1.0:
+                    raise ValueError(f"Gas wallet needs ~{fmt_amt(est_r['trx'] + 1.0)} TRX (has {fmt_amt(gtrx)})")
+                res_r = tronsave_rent(receiver, energy, gas_addr, gas_key, hours * 3600)
+                tronsave_wait(res_r.get('order'), 90)
+                treasury_txs.append({'ts': time.time(), 'network': 'TRX',
+                                     'type': 'Energy Rent', 'to': receiver,
+                                     'amount': res_r.get('trx'),
+                                     'txids': [x for x in [res_r.get('pay_txid')] if x],
+                                     'order': res_r.get('order'), 'status': 'done'})
+                save_database()
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': True, 'trx': res_r.get('trx'),
+                                             'order': res_r.get('order'),
+                                             'pay_txid': res_r.get('pay_txid')}).encode())
+            except Exception as e:
+                self.send_response(400)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'error': str(e)}).encode())
+
         # --- TREASURY: execute a send (async task) ---
         elif parsed_path.path == '/api/send_asset':
             if pin != ADMIN_PIN:
@@ -8915,8 +9063,15 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                     raise ValueError("Invalid fee_mode")
                 if fee_mode in ('usdt', 'rent') and net != 'USDT_TRC20':
                     raise ValueError("USDT/rent fee modes are only available for USDT TRC20")
-                if fee_mode == 'rent' and not TRONSAVE_API_KEY:
-                    raise ValueError("TronSave not configured — set TRONSAVE_API_KEY")
+                if fee_mode == 'rent':
+                    if not get_gas_key('tron'):
+                        raise ValueError("TRON gas wallet not configured — rent needs it to pay on-chain")
+                    need_e = _tron_energy_needed(to_addr)
+                    if not _tron_self_sufficient(w['address'], need_e):
+                        est_r = tronsave_estimate(w['address'], need_e)
+                        gtrx = _tron_balance(get_gas_addr('tron'), 'TRX') or 0.0
+                        if gtrx < est_r['trx'] + 1.5:
+                            raise ValueError(f"Gas wallet needs ~{fmt_amt(est_r['trx'] + 1.5)} TRX to rent energy (has {fmt_amt(gtrx)})")
                 if fee_mode == 'usdt':
                     if not GASFREE_API_KEY or not GASFREE_API_SECRET:
                         raise ValueError("GasFree not configured — set GASFREE_API_KEY / GASFREE_API_SECRET")

@@ -746,6 +746,29 @@
                                 <button style="flex-shrink:0;" onclick="stakeGas()">⚡ Stake</button>
                             </div>
                             <div id="stakeStatus" style="margin-top:6px; font-size:0.85em;"></div>
+                            <hr style="border:none; border-top:1px solid rgba(255,255,255,.08); margin:16px 0;">
+                            <h4 style="margin:0 0 10px;">⚡💰 Rent Energy — pay-as-you-go</h4>
+                            <div style="display:flex; align-items:center; gap:16px; flex-wrap:wrap;">
+                                <div id="rentRing" style="flex-shrink:0;"></div>
+                                <div style="flex:1; min-width:230px;">
+                                    <div class="form-group" style="margin-bottom:8px;">
+                                        <label>Charge wallet</label>
+                                        <select id="rentTarget" onchange="refreshRentRing(); quoteRent();"></select>
+                                    </div>
+                                    <div style="display:flex; gap:8px;">
+                                        <select id="rentDur" onchange="quoteRent()" style="flex:0 0 auto;">
+                                            <option value="1">1h</option>
+                                            <option value="24" selected>24h</option>
+                                            <option value="72">3d</option>
+                                        </select>
+                                        <input id="rentAmt" type="number" min="0" placeholder="Energy (65000 ≈ 1 send)" oninput="quoteRent()" style="flex:1; min-width:0;">
+                                        <button style="flex-shrink:0;" onclick="buyEnergy()">Buy</button>
+                                    </div>
+                                    <div id="rentQuote" style="font-size:0.8em; color:#aaa; margin-top:6px;"></div>
+                                    <div id="rentStatus" style="font-size:0.82em; margin-top:4px;"></div>
+                                </div>
+                            </div>
+                            <p style="color:#777; font-size:0.75em; margin:8px 0 0;">Your gas wallet pays the rental on-chain (~4 TRX per send's worth) — no account, no signup. Energy lands on the chosen wallet in ~1 min, expires after the duration. Sends from a charged wallet burn it automatically — near-0 TRX.</p>
                         </div>
 
                         <div class="glass" id="assetList"></div>
@@ -947,6 +970,8 @@
                             : 'no TRX staked — sends still work, they just cost ~14–55 TRX each'}</div>
                     </div>
                 </div>`;
+            refreshRentTargets();
+            if (document.getElementById('gasPanel').style.display !== 'none') refreshRentRing();
 
             document.getElementById('assetList').innerHTML = Object.entries(ASSET_META).map(([net, m]) => {
                 const a = data.assets[net] || { total_crypto: 0, total_usd: 0, wallets: [] };
@@ -1059,7 +1084,9 @@
                 if (est.gasfree) {
                     document.getElementById('sndGas').innerHTML = `<span class="fee-ok">GasFree relayer · ${est.note || ''}</span>`;
                 } else if (est.rented) {
-                    document.getElementById('sndGas').innerHTML = `<span class="${est.gas_ok ? 'fee-ok' : 'fee-bad'}">TronSave rental · ${est.note || ''}${est.gas_ok ? '' : ' — gas wallet needs 0.7 TRX for bandwidth'}</span>`;
+                    document.getElementById('sndGas').innerHTML = est.charged
+                        ? `<span class="fee-ok">⚡💰 Charged wallet — ${est.note || 'burns its own energy'}</span>`
+                        : `<span class="${est.gas_ok ? 'fee-ok' : 'fee-bad'}">TronSave rental · ${est.note || ''}${est.gas_ok ? '' : ' — insufficient gas wallet TRX'}</span>`;
                 } else if (est.gas_needed_crypto > 0) {
                     const okGas = est.gas_ok;
                     document.getElementById('sndGas').innerHTML = `<span class="${okGas ? 'fee-ok' : 'fee-bad'}">${est.gas_balance === null ? 'not configured' : fmtCrypto(est.gas_balance, 'TRX') + ' ' + est.gas_asset} ${okGas ? '✓' : '· insufficient — top up gas wallet'}</span>`;
@@ -1125,6 +1152,86 @@
         function toggleGasPanel() {
             const p = document.getElementById('gasPanel');
             p.style.display = p.style.display === 'none' ? '' : 'none';
+            if (p.style.display !== 'none') { refreshRentTargets(); refreshRentRing(); }
+        }
+
+        function ringHTML(pct, color) {
+            const CIRC = 238.76, c = color || (pct > 20 ? '#4ade80' : '#f87171');
+            return `<div style="position:relative; width:92px; height:92px;">
+                <svg viewBox="0 0 90 90" style="width:92px; height:92px; transform:rotate(-90deg);">
+                    <circle cx="45" cy="45" r="38" fill="none" stroke="rgba(255,255,255,.08)" stroke-width="9"/>
+                    <circle cx="45" cy="45" r="38" fill="none" stroke="${c}" stroke-width="9" stroke-linecap="round"
+                            stroke-dasharray="${CIRC}" stroke-dashoffset="${CIRC * (1 - pct / 100)}"
+                            style="transition:stroke-dashoffset .8s, stroke .4s; filter: drop-shadow(0 0 6px ${c}88);"/>
+                </svg>
+                <div style="position:absolute; inset:0; display:flex; align-items:center; justify-content:center;">
+                    <b style="color:#fff; font-size:1.05em;">${Math.round(pct)}%</b>
+                </div>
+            </div>`;
+        }
+
+        function rentTargets() {
+            const out = [];
+            const ga = balData && balData.gas_addresses ? balData.gas_addresses.tron : null;
+            if (ga) out.push({ id: 'gas', label: '⛽ Gas wallet', addr: ga });
+            const ws = (balData && balData.assets && balData.assets.USDT_TRC20
+                ? balData.assets.USDT_TRC20.wallets : []) || [];
+            ws.filter(w => (w.balance || 0) > 0).forEach(w =>
+                out.push({ id: String(w.uid), label: `${w.first || w.name} — ${fmtCrypto(w.balance, 'USDT_TRC20')} USDT`, addr: w.address }));
+            return out;
+        }
+
+        function refreshRentTargets() {
+            const rt = document.getElementById('rentTarget');
+            if (!rt) return;
+            const prev = rt.value, list = rentTargets();
+            rt.innerHTML = list.map(x => `<option value="${x.id}">${x.label}</option>`).join('');
+            if (list.some(x => String(x.id) === prev)) rt.value = prev;
+        }
+
+        async function refreshRentRing() {
+            const sel = document.getElementById('rentTarget');
+            const opt = rentTargets().find(x => String(x.id) === sel.value);
+            const el = document.getElementById('rentRing');
+            if (!opt) { el.innerHTML = '<div style="color:#777; font-size:0.8em;">no target</div>'; return; }
+            const { data: e } = await api('/api/target_energy', { address: opt.addr });
+            const sends = e && !e.error ? (e.sends || 0) : 0;
+            const pct = Math.min(100, sends * 100);
+            el.innerHTML = `<div style="display:flex; flex-direction:column; align-items:center; gap:4px;">` +
+                ringHTML(pct, '#38bdf8') +
+                `<div style="font-size:0.72em; color:#38bdf8; text-align:center;">⚡💰 ${sends.toFixed(1)} sends<br>charged</div></div>`;
+        }
+
+        let rentQuoteTimer = null;
+        function quoteRent() {
+            clearTimeout(rentQuoteTimer);
+            const q = document.getElementById('rentQuote');
+            const energy = parseFloat(document.getElementById('rentAmt').value);
+            if (!(energy > 0)) { q.textContent = ''; return; }
+            rentQuoteTimer = setTimeout(async () => {
+                const { data } = await api('/api/rent_quote', { energy,
+                    hours: parseFloat(document.getElementById('rentDur').value) });
+                q.innerHTML = data && !data.error
+                    ? `≈ <b style="color:#38bdf8;">${fmtCrypto(data.trx, 'TRX')} TRX</b> (~$${Number(data.usd).toFixed(2)}) — gas wallet pays`
+                    : `<span class="fee-bad">${(data && data.error) || 'quote failed'}</span>`;
+            }, 450);
+        }
+
+        async function buyEnergy() {
+            const st = document.getElementById('rentStatus');
+            const sel = document.getElementById('rentTarget');
+            const energy = parseFloat(document.getElementById('rentAmt').value);
+            if (!(energy > 0)) { st.innerHTML = '<span class="fee-bad">Enter an energy amount</span>'; return; }
+            const opt = rentTargets().find(x => String(x.id) === sel.value);
+            if (!opt) { st.innerHTML = '<span class="fee-bad">Pick a target wallet</span>'; return; }
+            if (!confirm(`Rent ${Number(energy).toLocaleString()} energy for ${opt.label}? The gas wallet pays.`)) return;
+            st.textContent = 'Renting… (gas wallet pays, energy lands in ~1 min)';
+            const { ok, data } = await api('/api/buy_energy', { target: sel.value, energy,
+                hours: parseFloat(document.getElementById('rentDur').value) });
+            if (ok && data.success) {
+                st.innerHTML = `<span class="fee-ok">✅ Rented! ~${fmtCrypto(data.trx, 'TRX')} TRX paid${data.pay_txid ? ' · TX: ' + data.pay_txid.slice(0, 12) + '…' : ''}</span>`;
+                refreshRentRing(); fetchBalanceOverview();
+            } else st.innerHTML = `<span class="fee-bad">❌ ${(data && data.error) || 'Rent failed'}</span>`;
         }
 
         async function stakeGas() {
