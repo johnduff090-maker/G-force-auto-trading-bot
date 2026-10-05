@@ -750,13 +750,13 @@
                             <h4 style="margin:0 0 10px;">⚡💰 Rent Energy — pay-as-you-go</h4>
                             <div style="display:flex; align-items:center; gap:16px; flex-wrap:wrap;">
                                 <div id="rentRing" style="flex-shrink:0;"></div>
-                                <div style="flex:1; min-width:230px;">
+                                <div style="flex:1; min-width:200px;">
                                     <div class="form-group" style="margin-bottom:8px;">
                                         <label>Charge wallet</label>
                                         <select id="rentTarget" onchange="refreshRentRing(); quoteRent();"></select>
                                     </div>
                                     <div style="display:flex; gap:8px;">
-                                        <select id="rentDur" onchange="quoteRent()" style="flex:0 0 auto;">
+                                        <select id="rentDur" onchange="quoteRent()" style="flex:0 0 68px; width:68px; min-width:0; padding:12px 6px;">
                                             <option value="1">1h</option>
                                             <option value="24" selected>24h</option>
                                             <option value="72">3d</option>
