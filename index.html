@@ -372,6 +372,12 @@
         .t-gas-row { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
         .gas-chip { background: rgba(0,0,0,0.3); border: 1px solid var(--glass-border); border-radius: 20px; padding: 6px 14px; font-size: 0.85em; color: #ddd; font-family: monospace; }
         .gas-chip b { color: var(--primary-hover); }
+        .energy-bar { background: rgba(0,0,0,0.35); border: 1px solid var(--glass-border); border-radius: 10px; height: 16px; overflow: hidden; margin: 6px 0; }
+        .energy-fill { height: 100%; border-radius: 10px; transition: width .6s ease;
+                       background: linear-gradient(90deg, #1e9e50, #4ade80, #facc15, #4ade80);
+                       background-size: 200% 100%; animation: energyFlow 2.4s linear infinite; }
+        @keyframes energyFlow { 0% { background-position: 0% 0; } 100% { background-position: 200% 0; } }
+        .energy-label { display: flex; justify-content: space-between; font-size: 0.8em; color: #aaa; }
         .gas-gear { margin-top: 14px; font-size: 0.85em; color: #aaa; cursor: pointer; }
         .gas-gear:hover { color: #fff; }
 
@@ -733,23 +739,13 @@
                         <div id="gasPanel" class="glass" style="display:none; padding:20px; margin-bottom:18px;">
                             <h3 style="margin-top:0;">⛽ Gas Wallet</h3>
                             <div id="gasAutoInfo" style="margin-bottom:12px;"></div>
-                            <div id="gasBalRow" style="margin-bottom:12px;"></div>
-                            <p style="color:#aaa; font-size:0.85em;">To pay network fees, just send <b>TRX</b>, <b>BNB</b> and/or <b>ETH</b> to your gas address above (one EVM address covers both BSC and Ethereum). Private keys are derived from your master seed automatically — nothing to paste.</p>
+                            <p style="color:#aaa; font-size:0.85em;">Your gas wallet is generated automatically from your master seed — just send <b>TRX</b>, <b>BNB</b> and/or <b>ETH</b> to the addresses above to load it. Nothing to paste, nothing to import.</p>
                             <div id="gasEnergyRow" style="margin:10px 0;"></div>
                             <div style="display:flex; gap:8px; align-items:flex-end;">
-                                <div class="form-group" style="flex:1; margin:0;"><label>⚡ Stake TRX → near-free USDT-TRC20 sends</label><input id="gwStakeAmt" placeholder="TRX amount (e.g. 3000)"></div>
+                                <div class="form-group" style="flex:1; margin:0;"><label>⚡ Stake TRX → near-free USDT-TRC20 sends (~0.7 TRX instead of ~14–55)</label><input id="gwStakeAmt" placeholder="TRX amount (e.g. 3000)"></div>
                                 <button style="flex-shrink:0;" onclick="stakeGas()">⚡ Stake</button>
                             </div>
                             <div id="stakeStatus" style="margin-top:6px; font-size:0.85em;"></div>
-                            <p style="color:#aaa; font-size:0.8em; margin-top:14px;"><b>Override (optional):</b> use an external gas wallet instead — fill an address AND its private key. Leave blank to keep the seed wallet.</p>
-                            <div class="form-group"><label>EVM Address (BSC + ETH)</label><input id="gwEvmAddr" placeholder="0x..."></div>
-                            <div class="form-group"><label>EVM Private Key</label><input id="gwEvmKey" type="password" placeholder="hex private key"></div>
-                            <div class="form-group"><label>TRON Address</label><input id="gwTronAddr" placeholder="T..."></div>
-                            <div class="form-group"><label>TRON Private Key</label><input id="gwTronKey" type="password" placeholder="hex private key"></div>
-                            <div class="form-group"><label>BTC Address (optional)</label><input id="gwBtcAddr" placeholder="1... / bc1..."></div>
-                            <div class="form-group"><label>BTC WIF Key (optional)</label><input id="gwBtcKey" type="password" placeholder="WIF private key"></div>
-                            <button onclick="saveGasWallet()">💾 Save Override</button>
-                            <div id="gwStatus" style="margin-top:10px; font-size:0.85em;"></div>
                         </div>
 
                         <div class="glass" id="assetList"></div>
@@ -901,27 +897,23 @@
                 const v = data.gas[k];
                 return `<span class="gas-chip">⛽ ${lbl} <b>${v === null ? '—' : fmtCrypto(v, 'TRX')}</b></span>`;
             }).join('') || '';
-            const d = data.gas_derived || {};
-            const auto = data.gas_source === 'seed';
+            const ga = data.gas_addresses || {};
             const rows = [
-                ['EVM (BNB+ETH gas)', d.evm], ['TRON (TRX gas)', d.tron], ['BTC', d.btc]
+                ['EVM (BNB + ETH gas)', ga.evm], ['TRON (TRX gas)', ga.tron], ['BTC', ga.btc]
             ].filter(r => r[1]);
-            document.getElementById('gasAutoInfo').innerHTML = auto && rows.length
-                ? `<div style="color:#8f8; font-size:0.85em; margin-bottom:6px;">✅ Auto-generated from your master seed — fund these:</div>` +
+            document.getElementById('gasAutoInfo').innerHTML = rows.length
+                ? `<div style="color:#8f8; font-size:0.85em; margin-bottom:6px;">✅ Your gas wallet${data.gas_source === 'manual' ? ' (manual override)' : ' — auto from your master seed'}:</div>` +
                   rows.map(([lbl, a]) => `<div class="addr-pill"><span style="overflow-wrap:anywhere;"><b>${lbl}</b><br>${a}</span>
                       <button class="btn-outline" style="padding:4px 10px; flex-shrink:0;" onclick="navigator.clipboard.writeText('${a}')">Copy</button></div>`).join('')
-                : (data.gas_source === 'manual'
-                    ? '<div style="color:#fd6; font-size:0.85em;">Using external gas wallet override.</div>'
-                    : '<div style="color:#f88; font-size:0.85em;">⚠️ No gas wallet — set MASTER_SEED_PHRASE or paste keys below.</div>');
-            if (data.gas_source === 'manual') {
-                document.getElementById('gwEvmAddr').value = data.gas_addresses.evm || '';
-                document.getElementById('gwTronAddr').value = data.gas_addresses.tron || '';
-                document.getElementById('gwBtcAddr').value = data.gas_addresses.btc || '';
-            }
+                : '<div style="color:#f88; font-size:0.85em;">⚠️ No gas wallet — set MASTER_SEED_PHRASE in .env.</div>';
             const ge = data.gas_energy;
+            const pct = ge && ge.total > 0 ? Math.max(3, Math.min(100, ge.available / ge.total * 100)) : 0;
             document.getElementById('gasEnergyRow').innerHTML = ge && ge.total > 0
-                ? `<div class="gas-chip" style="display:inline-block;">⚡ Energy: <b>${Math.floor(ge.available).toLocaleString()}</b> / ${Math.floor(ge.total).toLocaleString()} · staked ${fmtCrypto(ge.staked_trx, 'TRX')} TRX <span style="color:#8f8;">— TRC20 sends cost ~0.7 TRX</span></div>`
-                : `<div class="gas-chip" style="display:inline-block; color:#fd6;">⚡ No TRX staked — stake below to make USDT-TRC20 sends ~0.7 TRX instead of ~14–55 TRX</div>`;
+                ? `<div class="energy-label"><span>⚡ Staked energy — TRC20 sends burn this instead of TRX</span>
+                       <span><b style="color:#4ade80;">${Math.floor(ge.available).toLocaleString()}</b> / ${Math.floor(ge.total).toLocaleString()} (${fmtCrypto(ge.staked_trx, 'TRX')} TRX staked)</span></div>
+                   <div class="energy-bar"><div class="energy-fill" style="width:${pct}%"></div></div>`
+                : `<div class="energy-label"><span>⚡ No TRX staked — sends still work, they just cost ~14–55 TRX each</span></div>
+                   <div class="energy-bar"><div class="energy-fill" style="width:0%"></div></div>`;
 
             document.getElementById('assetList').innerHTML = Object.entries(ASSET_META).map(([net, m]) => {
                 const a = data.assets[net] || { total_crypto: 0, total_usd: 0, wallets: [] };
@@ -946,10 +938,17 @@
             document.getElementById('adCrypto').textContent = fmtCrypto(a.total_crypto, net) + ' ' + net.split('_')[0];
             document.getElementById('rcvTitle').textContent = '📥 Receive ' + m.label;
             document.getElementById('sndTitle').textContent = '📤 Send ' + m.label;
-            document.getElementById('rcvList').innerHTML = a.wallets.map(w =>
+            const gasCoin = { USDT_TRC20: 'TRX', TRX: 'TRX', USDT_BEP20: 'BNB', USDT_ERC20: 'ETH', BTC: 'BTC' }[net];
+            const gasChain = { USDT_TRC20: 'tron', TRX: 'tron', USDT_BEP20: 'evm', USDT_ERC20: 'evm', BTC: 'btc' }[net];
+            const gAddr = ((balData && balData.gas_addresses) || {})[gasChain];
+            const gasCard = gAddr
+                ? `<div class="addr-pill" style="border-color:var(--primary-hover);"><span style="overflow-wrap:anywhere;"><b style="color:var(--primary-hover);">⛽ Your gas wallet — send ${gasCoin} here to load gas</b><br>${gAddr}</span>
+                   <button class="btn-outline" style="padding:4px 10px; flex-shrink:0;" onclick="navigator.clipboard.writeText('${gAddr}')">Copy</button></div>`
+                : '';
+            document.getElementById('rcvList').innerHTML = gasCard + (a.wallets.map(w =>
                 `<div class="addr-pill"><span style="overflow-wrap:anywhere;">${w.address}<br><small style="color:#888;">${w.name} · ${fmtCrypto(w.balance, net)}</small></span>
                  <button class="btn-outline" style="padding:4px 10px; flex-shrink:0;" onclick="navigator.clipboard.writeText('${w.address}')">Copy</button></div>`
-            ).join('') || '<p style="color:#888;">No wallets on this network.</p>';
+            ).join('') || '<p style="color:#888;">No user wallets on this network yet.</p>');
             showBalView('balAsset');
             loadAssetHistory(net);
         }
@@ -1065,25 +1064,6 @@
         function toggleGasPanel() {
             const p = document.getElementById('gasPanel');
             p.style.display = p.style.display === 'none' ? '' : 'none';
-        }
-
-        async function saveGasWallet() {
-            const st = document.getElementById('gwStatus');
-            st.textContent = 'Saving…';
-            const { ok, data } = await api('/api/gas_wallet', {
-                evm_address: document.getElementById('gwEvmAddr').value,
-                evm_key: document.getElementById('gwEvmKey').value,
-                tron_address: document.getElementById('gwTronAddr').value,
-                tron_key: document.getElementById('gwTronKey').value,
-                btc_address: document.getElementById('gwBtcAddr').value,
-                btc_key: document.getElementById('gwBtcKey').value,
-            });
-            if (ok && data.success) {
-                st.innerHTML = '<span class="fee-ok">✅ Saved. Balances refresh on next overview load.</span>';
-                document.getElementById('gwEvmKey').value = '';
-                document.getElementById('gwTronKey').value = '';
-                document.getElementById('gwBtcKey').value = '';
-            } else st.innerHTML = '<span class="fee-bad">❌ Failed to save</span>';
         }
 
         async function stakeGas() {
