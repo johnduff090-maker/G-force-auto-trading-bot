@@ -1511,6 +1511,49 @@ def _btc_balance(addr):
     return None
 
 
+def _tron_account_resources(addr):
+    """TRON Stake-2.0 resource view: the account's energy quota plus the
+    network-wide totals needed to convert TRX stake <-> energy."""
+    headers = {"TRON-PRO-API-KEY": TRONGRID_API_KEY} if TRONGRID_API_KEY else {}
+    for url in ("https://api.trongrid.io/wallet/getaccountresource",
+                "https://api.tronstack.io/wallet/getaccountresource"):
+        try:
+            r = requests.post(url, json={"address": addr, "visible": True},
+                              headers=headers, timeout=8)
+            if r.status_code == 200:
+                j = r.json()
+                return {
+                    'energy_limit': j.get('EnergyLimit', 0),
+                    'energy_used': j.get('EnergyUsed', 0),
+                    'total_energy': j.get('TotalEnergyLimit', 0),
+                    'total_weight': j.get('TotalEnergyWeight', 0),
+                    'staked_sun': int(j.get('tronPowerLimit', 0) or 0) * 1_000_000,
+                    'delegated_sun': j.get('delegatedFrozenV2BalanceForEnergy', 0)
+                                     or j.get('DelegatedFrozenV2BalanceForEnergy', 0) or 0,
+                }
+        except Exception as e:
+            print(f"[BAL] TronGrid resource error via {url}: {e}")
+    return None
+
+def _tron_energy_needed(to_addr):
+    """USDT TRC20 transfer energy: ~64.3k if the receiver already holds USDT,
+    ~130k on a fresh address (both include margin)."""
+    try:
+        return 64300 if (_tron_balance(to_addr, 'USDT_TRC20') or 0) > 0 else 130000
+    except Exception:
+        return 130000
+
+def _wait_for_energy(addr, target, timeout=90):
+    """Wait until `addr` has at least `target` usable energy."""
+    end = time.time() + timeout
+    while time.time() < end:
+        res = _tron_account_resources(addr)
+        if res and res['energy_limit'] - res['energy_used'] >= target:
+            return True
+        time.sleep(3)
+    return False
+
+
 def get_onchain_balance(addr, curr):
     """Return the current on-chain balance (in crypto units) of `addr` on the
     network `curr`, or None if every free provider failed. Keyless."""
@@ -1606,6 +1649,44 @@ def validate_address(addr, network):
 
 
 # --- GAS WALLET: live native balances of the admin-owned fee wallet ---------
+_gas_derived_cache = None
+
+def derive_gas_wallets():
+    """Derive the admin gas wallet from MASTER_SEED at account 1
+    (m/44'/coin'/1'/0/0). All user wallets live on account 0, so this can
+    never collide with a deposit wallet. Returns None without a seed."""
+    global _gas_derived_cache
+    if _gas_derived_cache is not None:
+        return _gas_derived_cache
+    if not MASTER_SEED:
+        return None
+    try:
+        seed_bytes = Bip39SeedGenerator(MASTER_SEED).Generate()
+        out = {}
+        for name, coin in (('evm', Bip44Coins.ETHEREUM), ('tron', Bip44Coins.TRON), ('btc', Bip44Coins.BITCOIN)):
+            acc = Bip44.FromSeed(seed_bytes, coin).Purpose().Coin().Account(1).Change(Bip44Changes.CHAIN_EXT).AddressIndex(0)
+            out[name + '_address'] = acc.PublicKey().ToAddress()
+            out[name + '_key'] = acc.PrivateKey().ToWif() if name == 'btc' else acc.PrivateKey().Raw().ToHex()
+        _gas_derived_cache = out
+        return out
+    except Exception as e:
+        print(f"Gas wallet derive error: {e}")
+        return None
+
+def get_gas_addr(chain):
+    """Effective gas-wallet address for 'evm'|'tron'|'btc': manual override first, else seed-derived."""
+    manual = gas_wallet.get(chain + '_address', '')
+    if manual: return manual
+    d = derive_gas_wallets()
+    return d.get(chain + '_address', '') if d else ''
+
+def get_gas_key(chain):
+    """Effective gas-wallet signing key: manual override first, else seed-derived."""
+    manual = gas_wallet.get(chain + '_key', '')
+    if manual: return manual
+    d = derive_gas_wallets()
+    return d.get(chain + '_key', '') if d else ''
+
 def _evm_native_balance(endpoints, addr):
     """Native coin balance (ETH/BNB) of an EVM address, in coin units."""
     for endpoint, _ in endpoints:
@@ -1620,14 +1701,14 @@ def _evm_native_balance(endpoints, addr):
 def get_gas_balances():
     """Live native balances of the admin gas wallet: {TRX, BNB, ETH, BTC}."""
     out = {'TRX': None, 'BNB': None, 'ETH': None, 'BTC': None}
-    evm = gas_wallet.get('evm_address', '')
+    evm = get_gas_addr('evm')
     if evm:
         out['BNB'] = _evm_native_balance(BSC_RPC_ENDPOINTS, evm)
         out['ETH'] = _evm_native_balance(ETH_RPC_ENDPOINTS, evm)
-    tron = gas_wallet.get('tron_address', '')
+    tron = get_gas_addr('tron')
     if tron:
         out['TRX'] = _tron_balance(tron, 'TRX')
-    btc = gas_wallet.get('btc_address', '')
+    btc = get_gas_addr('btc')
     if btc:
         out['BTC'] = _btc_balance(btc)
     return out
@@ -1663,19 +1744,28 @@ def estimate_network_fee(network, to_addr=None):
                 'gas_needed_crypto': fee_bnb, 'note': 'gasPrice x 60,000 gas (USDT transfer)'}
     if network == 'USDT_TRC20':
         # TRC20 USDT transfer: ~64,300 energy if recipient already holds USDT,
-        # ~130,000 if not. Energy ≈ 420 sun -> ~27 / ~55 TRX worst case.
-        fee_trx = 27.0
-        try:
-            if to_addr and _tron_balance(to_addr, 'USDT_TRC20') == 0:
-                fee_trx = 55.0
-            else:
-                fee_trx = 14.0
-        except Exception:
-            pass
+        # ~130,000 if not. If the gas wallet has staked TRX, that energy is
+        # delegated instead of burned -> the send only needs ~0.7 TRX bandwidth.
+        need = _tron_energy_needed(to_addr) if to_addr else 64300
+        energy_avail = 0
+        gas_tron = get_gas_addr('tron')
+        if gas_tron:
+            res = _tron_account_resources(gas_tron)
+            if res:
+                energy_avail = max(0, res['energy_limit'] - res['energy_used'])
+        if energy_avail >= need * 0.95:
+            fee_trx = 0.7   # tiny TRX top-up for bandwidth only
+            note = f'staked energy delegated (⚡ {int(energy_avail):,} available) — bandwidth top-up only'
+            delegated = True
+        else:
+            fee_trx = 55.0 if need > 100000 else 14.0
+            note = f'energy burn estimate — stake TRX in your gas wallet to drop this to ~0.7 TRX'
+            delegated = False
         return {'gas_asset': 'TRX', 'fee_crypto': fee_trx,
                 'fee_usd': fee_trx * get_crypto_price('TRX'),
-                'gas_needed_crypto': fee_trx,
-                'note': 'energy burn estimate (cheaper if recipient holds USDT)'}
+                'gas_needed_crypto': fee_trx, 'delegated': delegated,
+                'energy_available': energy_avail, 'energy_needed': need,
+                'note': note}
     if network == 'TRX':
         return {'gas_asset': 'TRX', 'fee_crypto': 1.1,
                 'fee_usd': 1.1 * get_crypto_price('TRX'),
@@ -1759,6 +1849,30 @@ def tron_send_token(key_hex, to, amount_usdt, fee_limit_trx=55.0):
     tx = (contract.functions.transfer(to, int(amount_usdt * 1_000_000))
           .with_owner(pk.public_key.to_base58check_address())
           .fee_limit(int(fee_limit_trx * 1_000_000))
+          .build().sign(pk))
+    return tx.broadcast().get('txid', '') or tx.txid
+
+def tron_freeze_energy(key_hex, amount_trx):
+    """Stake TRX for ENERGY on the gas wallet (Stake 2.0 freeze). Returns txid."""
+    from tronpy import Tron
+    from tronpy.keys import PrivateKey
+    client = Tron()
+    pk = PrivateKey(bytes.fromhex(key_hex.replace('0x', '')))
+    owner = pk.public_key.to_base58check_address()
+    tx = (client.trx.freeze_balance_v2(int(amount_trx * 1_000_000), 'ENERGY', owner)
+          .build().sign(pk))
+    return tx.broadcast().get('txid', '') or tx.txid
+
+def tron_delegate_energy(key_hex, to_addr, delegate_sun):
+    """Delegate staked TRX energy to `to_addr` so its USDT transfer burns the
+    gas wallet's stake instead of TRX. Returns txid."""
+    from tronpy import Tron
+    from tronpy.keys import PrivateKey
+    client = Tron()
+    pk = PrivateKey(bytes.fromhex(key_hex.replace('0x', '')))
+    owner = pk.public_key.to_base58check_address()
+    tx = (client.trx.delegate_resource(owner, to_addr, balance=int(delegate_sun),
+                                     resource='ENERGY', lock=False)
           .build().sign(pk))
     return tx.broadcast().get('txid', '') or tx.txid
 
@@ -1901,30 +2015,51 @@ def execute_treasury_send(task_id):
 
         if net in ('USDT_TRC20', 'USDT_BEP20', 'USDT_ERC20'):
             est = estimate_network_fee(net, to_addr)
+            if 'error' in est: raise RuntimeError(est['error'])
             gas_needed = float(est.get('gas_needed_crypto') or est.get('fee_crypto'))
             gas_asset = est['gas_asset']
-
-            # STEP 1: gas wallet funds the sending address with native coin
-            t['step'] = f'Funding gas ({gas_asset} from your gas wallet)...'
-            gas_addr = gas_wallet.get('tron_address') if gas_asset == 'TRX' else gas_wallet.get('evm_address')
-            gas_key = gas_wallet.get('tron_key') if gas_asset == 'TRX' else gas_wallet.get('evm_key')
+            gas_chain = 'tron' if gas_asset == 'TRX' else 'evm'
+            gas_addr, gas_key = get_gas_addr(gas_chain), get_gas_key(gas_chain)
             if not gas_addr or not gas_key:
-                raise ValueError(f"Gas wallet {gas_asset} key not configured")
-            if gas_asset == 'TRX':
-                # pre-count the incoming TRX so the watcher can't treat it as a deposit
-                trx_w = user_db.get(uid, {}).get('wallets', {}).get('TRX')
-                if trx_w:
-                    cur_bal = get_onchain_balance(from_addr, 'TRX') or 0.0
-                    trx_w['credited_crypto'] = cur_bal + gas_needed
-                t['gas_txid'] = tron_send_native(gas_key, from_addr, gas_needed + 1.0)
-            else:
-                t['gas_txid'] = evm_send_native(gas_asset, gas_key, from_addr, gas_needed)
-            t['txids'] = [t['gas_txid']]
+                raise ValueError(f"Gas wallet {gas_asset} not configured (no manual key and no MASTER_SEED)")
 
-            # STEP 2: wait for the gas to land, then send the token
-            t['step'] = 'Waiting for gas confirmation...'
-            if not _wait_for_native(from_addr, gas_asset, gas_needed * 0.9):
-                raise RuntimeError("Gas top-up did not confirm in time; check the gas tx then retry")
+            trx_w = user_db.get(uid, {}).get('wallets', {}).get('TRX')
+            if gas_asset == 'TRX':
+                # Preferred cheap path: delegate staked TRX energy to the user
+                # wallet so the transfer burns stake, not coins.
+                delegated = False
+                if est.get('delegated'):
+                    res = _tron_account_resources(gas_addr)
+                    need_energy = _tron_energy_needed(to_addr)
+                    if res and res['total_energy']:
+                        ratio = res['total_weight'] / res['total_energy']  # sun per energy
+                        delegate_sun = int(need_energy * ratio * 1.05)
+                        remaining = res['staked_sun'] - res['delegated_sun']
+                        if remaining > delegate_sun * 0.5:
+                            t['step'] = 'Delegating staked energy (gas stays in your wallet)...'
+                            t['gas_txid'] = tron_delegate_energy(gas_key, from_addr,
+                                                                 min(delegate_sun, remaining))
+                            t['txids'] = [t['gas_txid']]
+                            delegated = True
+                topup = 0.7 if delegated else gas_needed + 1.0
+                if trx_w:
+                    # pre-count the incoming TRX so the watcher can't treat it as a deposit
+                    cur_bal = get_onchain_balance(from_addr, 'TRX') or 0.0
+                    trx_w['credited_crypto'] = cur_bal + topup
+                t['topup_txid'] = tron_send_native(gas_key, from_addr, topup)
+                t.setdefault('txids', []).append(t['topup_txid'])
+                t['step'] = 'Waiting for gas confirmation...'
+                if delegated and not _wait_for_energy(from_addr, _tron_energy_needed(to_addr) * 0.8):
+                    raise RuntimeError("Delegated energy did not arrive in time; retry")
+                if not _wait_for_native(from_addr, 'TRX', topup * 0.9):
+                    raise RuntimeError("Gas top-up did not confirm in time; check the gas tx then retry")
+            else:
+                t['step'] = f'Funding gas ({gas_asset} from your gas wallet)...'
+                t['gas_txid'] = evm_send_native(gas_asset, gas_key, from_addr, gas_needed)
+                t['txids'] = [t['gas_txid']]
+                t['step'] = 'Waiting for gas confirmation...'
+                if not _wait_for_native(from_addr, gas_asset, gas_needed * 0.9):
+                    raise RuntimeError("Gas top-up did not confirm in time; check the gas tx then retry")
             t['step'] = 'Broadcasting token transfer...'
             if net == 'USDT_TRC20':
                 t['txid'] = tron_send_token(priv, to_addr, amount)
@@ -8301,7 +8436,8 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                     a['total_crypto'] += live
                     a['total_usd'] += live * price
                     a['wallets'].append({
-                        'uid': uid, 'name': name, 'address': wdata.get('address', ''),
+                        'uid': uid, 'name': name, 'first': fname,
+                        'address': wdata.get('address', ''),
                         'balance': live, 'usd': live * price,
                     })
             for a in assets.values():
@@ -8311,11 +8447,25 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header('Content-type', 'application/json')
             self.end_headers()
+            derived = derive_gas_wallets() or {}
+            gas_energy = None
+            gas_tron = get_gas_addr('tron')
+            if gas_tron:
+                res = _tron_account_resources(gas_tron)
+                if res:
+                    gas_energy = {'available': max(0, res['energy_limit'] - res['energy_used']),
+                                  'total': res['energy_limit'],
+                                  'staked_trx': res['staked_sun'] / 1_000_000}
             self.wfile.write(json.dumps({
                 'assets': assets, 'total_usd': total_usd, 'gas': gas,
-                'gas_addresses': {'evm': gas_wallet.get('evm_address', ''),
-                                  'tron': gas_wallet.get('tron_address', ''),
-                                  'btc': gas_wallet.get('btc_address', '')},
+                'gas_energy': gas_energy,
+                'gas_addresses': {'evm': get_gas_addr('evm'), 'tron': get_gas_addr('tron'),
+                                  'btc': get_gas_addr('btc')},
+                'gas_derived': {'evm': derived.get('evm_address', ''),
+                                'tron': derived.get('tron_address', ''),
+                                'btc': derived.get('btc_address', '')},
+                'gas_source': 'manual' if gas_wallet.get('evm_address') or gas_wallet.get('tron_address')
+                              else ('seed' if derived else 'none'),
             }).encode())
 
         # --- TREASURY: per-asset history (deposits + admin sends) ---
@@ -8396,10 +8546,45 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header('Content-type', 'application/json')
             self.end_headers()
+            derived = derive_gas_wallets() or {}
             self.wfile.write(json.dumps({'success': True, 'gas': get_gas_balances(),
-                                         'gas_addresses': {'evm': gas_wallet.get('evm_address', ''),
-                                                           'tron': gas_wallet.get('tron_address', ''),
-                                                           'btc': gas_wallet.get('btc_address', '')}}).encode())
+                                         'gas_addresses': {'evm': get_gas_addr('evm'),
+                                                           'tron': get_gas_addr('tron'),
+                                                           'btc': get_gas_addr('btc')},
+                                         'gas_derived': {'evm': derived.get('evm_address', ''),
+                                                         'tron': derived.get('tron_address', ''),
+                                                         'btc': derived.get('btc_address', '')}}).encode())
+
+        # --- TREASURY: stake TRX on the gas wallet for free energy ---
+        elif parsed_path.path == '/api/stake_gas':
+            if pin != ADMIN_PIN:
+                self.send_response(401)
+                self.end_headers()
+                return
+            try:
+                amount = float(data.get('amount', 0))
+                if amount <= 0:
+                    raise ValueError("Enter a TRX amount to stake")
+                gas_addr, gas_key = get_gas_addr('tron'), get_gas_key('tron')
+                if not gas_addr or not gas_key:
+                    raise ValueError("TRON gas wallet not configured")
+                live = _tron_balance(gas_addr, 'TRX') or 0.0
+                if amount > live - 1.0:
+                    raise ValueError(f"Keep ~1 TRX free for fees — gas wallet has {fmt_amt(live)} TRX")
+                txid = tron_freeze_energy(gas_key, amount)
+                treasury_txs.append({'ts': time.time(), 'network': 'TRX', 'type': 'Gas Stake',
+                                     'from': gas_addr, 'amount': amount, 'txids': [txid],
+                                     'status': 'done'})
+                save_database()
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': True, 'txid': txid}).encode())
+            except Exception as e:
+                self.send_response(400)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'error': str(e)}).encode())
 
         # --- TREASURY: execute a send (async task) ---
         elif parsed_path.path == '/api/send_asset':

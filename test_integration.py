@@ -454,6 +454,14 @@ est = main.estimate_network_fee('BTC')
 check("BTC fee est", est.get('gas_asset') == 'BTC' and est.get('fee_crypto', 0) > 0,
       f"= {est.get('fee_crypto')}")
 
+# --- TRC20 energy path (gas wallet empty -> burn path; energy helpers sane) ---
+check("TRC20 energy estimate known", main._tron_energy_needed(TRON_ADDR) in (64300, 130000))
+res = main._tron_account_resources(TRON_ADDR)
+check("account resources readable", res is None or 'energy_limit' in res)
+est = main.estimate_network_fee('USDT_TRC20', TRON_ADDR)
+check("TRC20 est carries energy info", 'energy_needed' in est and 'delegated' in est,
+      f"= fee {est.get('fee_crypto')} delegated={est.get('delegated')}")
+
 # --- /api/balance_overview aggregates live balances ---
 main.user_db[111]['wallets']['USDT_TRC20']['live_balance'] = 100.0
 main.user_db[111]['wallets']['USDT_BEP20']['live_balance'] = 50.0
@@ -508,6 +516,28 @@ main.get_onchain_balance = lambda a, c: 100.0
 r = post('/api/send_asset', {'pin': PIN, 'network': 'USDT_TRC20', 'uid': 111,
       'to_addr': TRON_ADDR, 'amount': 50})
 check("token send queued", r.json().get('success') is True)
+
+# --- seed-derived gas wallet resolution (bip_utils stubbed -> derive() = None,
+#     so inject the derived cache directly) ---
+check("overview reports gas_source marker",
+      ov.get('gas_source') in ('seed', 'manual', 'none'), f"= {ov.get('gas_source')}")
+main._gas_derived_cache = {'evm_address': '0xSEEDEVM', 'tron_address': 'TSEEDTRON',
+                           'btc_address': 'bc1seedbtc',
+                           'evm_key': 'kE', 'tron_key': 'kT', 'btc_key': 'kB'}
+saved_manual = dict(main.gas_wallet)
+main.gas_wallet.clear()
+main.gas_wallet.update({'evm_address': '', 'evm_key': '', 'tron_address': '',
+                        'tron_key': '', 'btc_address': '', 'btc_key': ''})
+check("resolver falls back to seed addr", main.get_gas_addr('tron') == 'TSEEDTRON')
+check("resolver falls back to seed key", main.get_gas_key('tron') == 'kT')
+check("resolver falls back to seed evm", main.get_gas_addr('evm') == '0xSEEDEVM')
+main.gas_wallet['tron_address'] = 'TMANUAL'
+main.gas_wallet['tron_key'] = 'kMANUAL'
+check("manual override wins over seed", main.get_gas_addr('tron') == 'TMANUAL'
+      and main.get_gas_key('tron') == 'kMANUAL')
+main.gas_wallet.clear()
+main.gas_wallet.update(saved_manual)
+main._gas_derived_cache = None
 
 server.shutdown()
 
