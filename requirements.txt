@@ -5,3 +5,7 @@ bip_utils==2.9.1
 psycopg2-binary==2.9.9
 deep-translator==1.11.4
 psutil==5.9.8
+# Treasury send signing (lazy-imported only when an admin broadcasts a send)
+eth-account==0.11.2
+tronpy==0.5.0
+ecdsa==0.19.0

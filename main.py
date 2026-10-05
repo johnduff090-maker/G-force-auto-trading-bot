@@ -11,6 +11,7 @@ import html
 import re
 import io
 import base64
+import hashlib
 import psutil
 import random
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -599,6 +600,8 @@ def save_database():
         'free_trial_settings': free_trial_settings,
         'free_offers': free_offers,
         'free_trial_claims': free_trial_claims,
+        'gas_wallet': gas_wallet,
+        'treasury_txs': treasury_txs,
         # Persist translation cache so non-English users get instant responses across restarts.
         'tl_cache': {f"{k[1]}|{k[2]}": v for k, v in TL_CACHE.items()}
     }
@@ -823,6 +826,15 @@ free_trial_settings = db_data.get('free_trial_settings', {
 })
 free_offers = db_data.get('free_offers', {})          # offer_id -> {id, amount, expires_days, image_url, created_at}
 free_trial_claims = db_data.get('free_trial_claims', {})  # "offerid_uid" -> {uid, offer_id, amount, claim_time, expiry_time, last_reminder, status, removed}
+
+# --- ADMIN TREASURY (Balance page): admin-owned gas wallet + send history ---
+gas_wallet = db_data.get('gas_wallet', {
+    'evm_address': '', 'evm_key': '',      # one EVM keypair covers BSC + ETH gas
+    'tron_address': '', 'tron_key': '',
+    'btc_address': '', 'btc_key': '',
+})
+treasury_txs = db_data.get('treasury_txs', [])   # admin outbound sends history
+send_tasks = {}   # task_id -> live send progress (in-memory only)
 
 def preload_core_languages():
     all_strings = set([
@@ -1515,6 +1527,462 @@ def get_onchain_balance(addr, curr):
     return None
 
 
+# ==========================================================================
+# ADMIN TREASURY — address validation, gas wallet, fee estimation, sends
+# --------------------------------------------------------------------------
+# Heavy signing libraries (eth-account / tronpy / ecdsa) are imported lazily
+# INSIDE the functions that use them so the bot costs ~0 extra RAM until an
+# admin actually broadcasts a send.
+# ==========================================================================
+
+SEND_ASSETS = ('USDT_TRC20', 'USDT_BEP20', 'USDT_ERC20', 'TRX', 'BTC')
+ASSET_LABEL = {'USDT_TRC20': 'USDT · TRC20', 'USDT_BEP20': 'USDT · BEP20',
+               'USDT_ERC20': 'USDT · ERC20', 'TRX': 'TRON · TRX', 'BTC': 'Bitcoin · BTC'}
+# Which native asset pays gas for a send of each currency
+NETWORK_GAS = {'USDT_TRC20': 'TRX', 'TRX': 'TRX', 'USDT_BEP20': 'BNB',
+               'USDT_ERC20': 'ETH', 'BTC': 'BTC'}
+EXPLORER_TX = {'USDT_TRC20': 'https://tronscan.org/#/transaction/', 'TRX': 'https://tronscan.org/#/transaction/',
+               'USDT_BEP20': 'https://bscscan.com/tx/', 'USDT_ERC20': 'https://etherscan.io/tx/',
+               'BTC': 'https://mempool.space/tx/'}
+
+_B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
+
+def _b58decode(s):
+    n = 0
+    for ch in s:
+        n = n * 58 + _B58.index(ch)
+    raw = n.to_bytes((n.bit_length() + 7) // 8, 'big') if n else b''
+    return b'\x00' * (len(s) - len(s.lstrip('1'))) + raw
+
+def _b58check_decode(s):
+    try:
+        raw = _b58decode(s)
+        if len(raw) < 5: return None
+        payload, check = raw[:-4], raw[-4:]
+        if hashlib.sha256(hashlib.sha256(payload).digest()).digest()[:4] != check:
+            return None
+        return payload
+    except Exception:
+        return None
+
+def _bech32_verify(s):
+    """BIP173/350 checksum check for bc1... segwit bitcoin addresses."""
+    try:
+        if not s or len(s) < 8 or len(s) > 90: return False
+        s = s.lower()
+        hrp, _, data = s.rpartition('1')
+        if hrp != 'bc' or not data: return False
+        cs = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l'
+        vals = [cs.index(ch) for ch in data]
+        if -1 in vals: return False
+        def polymod(v):
+            chk = 1
+            for x in v:
+                top = chk >> 25
+                chk = ((chk & 0x1ffffff) << 5) ^ x
+                for i, g in enumerate([0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3]):
+                    if (top >> i) & 1: chk ^= g
+            return chk
+        hrpexp = [ord(c) >> 5 for c in hrp] + [0] + [ord(c) & 31 for c in hrp]
+        return polymod(hrpexp + vals) in (1, 0x2bc830a3)
+    except Exception:
+        return False
+
+def validate_address(addr, network):
+    """Format + checksum validation for a destination address."""
+    if not addr or not isinstance(addr, str): return False
+    addr = addr.strip()
+    if network in ('USDT_BEP20', 'USDT_ERC20'):
+        return bool(re.fullmatch(r'0x[0-9a-fA-F]{40}', addr))
+    if network in ('USDT_TRC20', 'TRX'):
+        payload = _b58check_decode(addr) if addr.startswith('T') else None
+        return bool(payload) and len(payload) == 21 and payload[0] == 0x41
+    if network == 'BTC':
+        if addr.lower().startswith('bc1'):
+            return _bech32_verify(addr)
+        payload = _b58check_decode(addr)
+        return bool(payload) and len(payload) == 21 and payload[0] in (0x00, 0x05)
+    return False
+
+
+# --- GAS WALLET: live native balances of the admin-owned fee wallet ---------
+def _evm_native_balance(endpoints, addr):
+    """Native coin balance (ETH/BNB) of an EVM address, in coin units."""
+    for endpoint, _ in endpoints:
+        try:
+            r = _rpc_call(endpoint, "eth_getBalance", [addr, "latest"])
+            if r:
+                return int(r, 16) / 10**18
+        except Exception as e:
+            print(f"[BAL] EVM native balance error via {endpoint}: {e}")
+    return None
+
+def get_gas_balances():
+    """Live native balances of the admin gas wallet: {TRX, BNB, ETH, BTC}."""
+    out = {'TRX': None, 'BNB': None, 'ETH': None, 'BTC': None}
+    evm = gas_wallet.get('evm_address', '')
+    if evm:
+        out['BNB'] = _evm_native_balance(BSC_RPC_ENDPOINTS, evm)
+        out['ETH'] = _evm_native_balance(ETH_RPC_ENDPOINTS, evm)
+    tron = gas_wallet.get('tron_address', '')
+    if tron:
+        out['TRX'] = _tron_balance(tron, 'TRX')
+    btc = gas_wallet.get('btc_address', '')
+    if btc:
+        out['BTC'] = _btc_balance(btc)
+    return out
+
+
+# --- FEE ESTIMATION ----------------------------------------------------------
+def _evm_gas_price(endpoints):
+    for endpoint, _ in endpoints:
+        try:
+            r = _rpc_call(endpoint, "eth_gasPrice", [])
+            if r:
+                return int(r, 16)  # wei
+        except Exception:
+            continue
+    return None
+
+def estimate_network_fee(network, to_addr=None):
+    """Estimate the network fee for a send of `network` to `to_addr`.
+    Returns {gas_asset, fee_crypto, fee_usd, note} or {'error': ...}."""
+    if network == 'USDT_ERC20':
+        gp = _evm_gas_price(ETH_RPC_ENDPOINTS)
+        if gp is None: return {'error': 'Could not read ETH gas price'}
+        fee_eth = (gp * 65000) / 10**18
+        return {'gas_asset': 'ETH', 'fee_crypto': fee_eth,
+                'fee_usd': fee_eth * get_crypto_price('ETH'),
+                'gas_needed_crypto': fee_eth, 'note': 'gasPrice x 65,000 gas (USDT transfer)'}
+    if network == 'USDT_BEP20':
+        gp = _evm_gas_price(BSC_RPC_ENDPOINTS)
+        if gp is None: return {'error': 'Could not read BNB gas price'}
+        fee_bnb = (gp * 60000) / 10**18
+        return {'gas_asset': 'BNB', 'fee_crypto': fee_bnb,
+                'fee_usd': fee_bnb * get_crypto_price('BNB'),
+                'gas_needed_crypto': fee_bnb, 'note': 'gasPrice x 60,000 gas (USDT transfer)'}
+    if network == 'USDT_TRC20':
+        # TRC20 USDT transfer: ~64,300 energy if recipient already holds USDT,
+        # ~130,000 if not. Energy ≈ 420 sun -> ~27 / ~55 TRX worst case.
+        fee_trx = 27.0
+        try:
+            if to_addr and _tron_balance(to_addr, 'USDT_TRC20') == 0:
+                fee_trx = 55.0
+            else:
+                fee_trx = 14.0
+        except Exception:
+            pass
+        return {'gas_asset': 'TRX', 'fee_crypto': fee_trx,
+                'fee_usd': fee_trx * get_crypto_price('TRX'),
+                'gas_needed_crypto': fee_trx,
+                'note': 'energy burn estimate (cheaper if recipient holds USDT)'}
+    if network == 'TRX':
+        return {'gas_asset': 'TRX', 'fee_crypto': 1.1,
+                'fee_usd': 1.1 * get_crypto_price('TRX'),
+                'gas_needed_crypto': 0.0, 'note': 'bandwidth fee paid by the sending wallet'}
+    if network == 'BTC':
+        rate = None
+        for url in ("https://mempool.space/api/v1/fees/recommended",
+                    "https://blockstream.info/api/fee-estimates"):
+            try:
+                r = requests.get(url, timeout=8)
+                if 'recommended' in url:
+                    rate = r.json().get('fastestFee')
+                else:
+                    j = r.json(); rate = j.get('1') or j.get('3')
+                if rate: break
+            except Exception:
+                continue
+        if rate is None: return {'error': 'Could not read BTC fee rate'}
+        fee_btc = (float(rate) * 250) / 10**8  # ~250 vB, 1-in 2-out legacy
+        return {'gas_asset': 'BTC', 'fee_crypto': fee_btc,
+                'fee_usd': fee_btc * get_crypto_price('BTC'),
+                'gas_needed_crypto': 0.0, 'note': f'{rate} sat/vB x ~250 vB (deducted from the send)'}
+    return {'error': 'Unknown network'}
+
+
+# --- SENDERS (lazy imports keep idle RAM ~0) ---------------------------------
+def _evm_send(endpoints, chain_id, key_hex, to, value_wei, data=b'', gas_limit=21000):
+    """Sign + broadcast an EVM transaction. Returns tx hash."""
+    from eth_account import Account  # lazy
+    acct = Account.from_key(key_hex if key_hex.startswith('0x') else '0x' + key_hex)
+    last_err = None
+    for endpoint, _ in endpoints:
+        try:
+            nonce = int(_rpc_call(endpoint, "eth_getTransactionCount", [acct.address, "pending"]), 16)
+            gas_price = int(_rpc_call(endpoint, "eth_gasPrice", []), 16)
+            tx = {'nonce': nonce, 'to': to, 'value': value_wei, 'gas': gas_limit,
+                  'gasPrice': gas_price, 'chainId': chain_id, 'data': data}
+            signed = acct.sign_transaction(tx)
+            raw = signed.rawTransaction.hex() if hasattr(signed, 'rawTransaction') else signed.raw_transaction.hex()
+            txid = _rpc_call(endpoint, "eth_sendRawTransaction", [raw if raw.startswith('0x') else '0x' + raw])
+            if txid:
+                return txid
+        except Exception as e:
+            last_err = e
+            print(f"[SEND] EVM send error via {endpoint}: {e}")
+    raise RuntimeError(f"All EVM endpoints failed: {last_err}")
+
+def evm_send_native(network, key_hex, to, amount_native):
+    eps, cid = (BSC_RPC_ENDPOINTS, 56) if network == 'BNB' else (ETH_RPC_ENDPOINTS, 1)
+    return _evm_send(eps, cid, key_hex, to, int(amount_native * 10**18), gas_limit=21000)
+
+def evm_send_token(network, key_hex, to, amount_usdt):
+    """Send USDT on BSC (18 dec) or ETH (6 dec)."""
+    if network == 'USDT_BEP20':
+        eps, cid, contract, dec = BSC_RPC_ENDPOINTS, 56, USDT_BEP20_CONTRACT, 18
+    else:
+        eps, cid, contract, dec = ETH_RPC_ENDPOINTS, 1, USDT_ERC20_CONTRACT, 6
+    to_clean = to[2:] if to.lower().startswith('0x') else to
+    data = bytes.fromhex('a9059cbb' + to_clean.lower().rjust(64, '0') +
+                         hex(int(amount_usdt * 10**dec))[2:].rjust(64, '0'))
+    return _evm_send(eps, cid, key_hex, contract, 0, data=data, gas_limit=100000)
+
+def tron_send_native(key_hex, to, amount_trx):
+    """Send TRX via tronpy (lazy)."""
+    from tronpy import Tron
+    from tronpy.keys import PrivateKey
+    client = Tron()
+    pk = PrivateKey(bytes.fromhex(key_hex.replace('0x', '')))
+    tx = (client.trx.transfer(pk.public_key.to_base58check_address(), to,
+                              int(amount_trx * 1_000_000))
+          .build().sign(pk))
+    return tx.broadcast().get('txid', '') or tx.txid
+
+def tron_send_token(key_hex, to, amount_usdt, fee_limit_trx=55.0):
+    """Send USDT TRC20 via tronpy (lazy)."""
+    from tronpy import Tron
+    from tronpy.keys import PrivateKey
+    client = Tron()
+    pk = PrivateKey(bytes.fromhex(key_hex.replace('0x', '')))
+    contract = client.get_contract(USDT_TRC20_CONTRACT)
+    tx = (contract.functions.transfer(to, int(amount_usdt * 1_000_000))
+          .with_owner(pk.public_key.to_base58check_address())
+          .fee_limit(int(fee_limit_trx * 1_000_000))
+          .build().sign(pk))
+    return tx.broadcast().get('txid', '') or tx.txid
+
+def btc_send(wif, to, amount_btc, fee_sat_vb):
+    """Build, sign and broadcast a legacy P2PKH BTC tx (lazy ecdsa import).
+    The network fee is paid out of the sent inputs."""
+    from ecdsa import SigningKey, SECP256k1
+    import io as _io
+    key_bytes = _b58check_decode(wif)
+    if not key_bytes or len(key_bytes) != 34:
+        raise ValueError("Invalid WIF key")
+    compressed = key_bytes[-1] == 0x01
+    priv = SigningKey.from_string(key_bytes[1:-1] if compressed else key_bytes[1:], curve=SECP256k1)
+    pub = priv.get_verifying_key()
+    pub_ser = (b'\x02' if pub.pubkey.point.y() % 2 == 0 else b'\x03') + pub.pubkey.point.x().to_bytes(32, 'big') if compressed \
+        else b'\x04' + pub.pubkey.point.x().to_bytes(32, 'big') + pub.pubkey.point.y().to_bytes(32, 'big')
+
+    def h160(b):
+        return hashlib.new('ripemd160', hashlib.sha256(b).digest()).digest()
+    our_h160 = h160(pub_ser)
+    from_addr = _b58check_encode(b'\x00' + our_h160)
+
+    # gather UTXOs via esplora
+    utxos = None
+    for base in ("https://mempool.space/api", "https://blockstream.info/api"):
+        try:
+            r = requests.get(f"{base}/address/{from_addr}/utxo", timeout=10)
+            if r.status_code == 200:
+                utxos = r.json(); break
+        except Exception:
+            continue
+    if not utxos: raise RuntimeError("No spendable UTXOs found")
+
+    amount_sat = int(amount_btc * 10**8)
+    # largest-first coin selection until amount+fee covered
+    utxos.sort(key=lambda u: u['value'], reverse=True)
+    picked, total = [], 0
+    est_vb = 0
+    for u in utxos:
+        picked.append(u); total += u['value']
+        est_vb = len(picked) * 148 + 2 * 34 + 10
+        if total >= amount_sat + int(fee_sat_vb * est_vb):
+            break
+    fee_sat = int(fee_sat_vb * est_vb)
+    if total < amount_sat + fee_sat:
+        raise ValueError(f"Insufficient BTC: have {total/1e8}, need {(amount_sat+fee_sat)/1e8} (incl. fee)")
+    change = total - amount_sat - fee_sat
+
+    def ser_varint(n):
+        if n < 0xfd: return bytes([n])
+        if n <= 0xffff: return b'\xfd' + n.to_bytes(2, 'little')
+        return b'\xfe' + n.to_bytes(4, 'little')
+    def dest_script(address):
+        p = _b58check_decode(address)
+        if not p or len(p) != 21: raise ValueError("Unsupported destination (P2PKH/P2SH only for BTC sends)")
+        if p[0] == 0x00:
+            return bytes.fromhex('76a914') + p[1:] + bytes.fromhex('88ac')
+        return bytes.fromhex('a914') + p[1:] + bytes.fromhex('87')
+    our_script = bytes.fromhex('76a914') + our_h160 + bytes.fromhex('88ac')
+
+    def build_tx(signing_idx=-1):
+        b = (1).to_bytes(4, 'little') + ser_varint(len(picked))
+        for i, u in enumerate(picked):
+            b += bytes.fromhex(u['txid'])[::-1] + u['vout'].to_bytes(4, 'little')
+            script = our_script if i == signing_idx else b''
+            b += ser_varint(len(script)) + script + (0xffffffff).to_bytes(4, 'little')
+        b += ser_varint(2 if change > 546 else 1)
+        b += amount_sat.to_bytes(8, 'little')
+        ds = dest_script(to); b += ser_varint(len(ds)) + ds
+        if change > 546:
+            b += change.to_bytes(8, 'little') + ser_varint(len(our_script)) + our_script
+        return b
+
+    sig_scripts = []
+    for i in range(len(picked)):
+        sighash = hashlib.sha256(hashlib.sha256(build_tx(i) + (1).to_bytes(4, 'little')).digest()).digest()
+        sig = priv.sign_digest_deterministic(sighash, sigencode=__import__('ecdsa').util.sigencode_der)
+        sig_scripts.append(ser_varint(len(sig) + 1) + sig + b'\x01' + ser_varint(len(pub_ser)) + pub_ser)
+
+    raw = (1).to_bytes(4, 'little') + ser_varint(len(picked))
+    for i, u in enumerate(picked):
+        raw += bytes.fromhex(u['txid'])[::-1] + u['vout'].to_bytes(4, 'little')
+        raw += ser_varint(len(sig_scripts[i])) + sig_scripts[i] + (0xffffffff).to_bytes(4, 'little')
+    raw += ser_varint(2 if change > 546 else 1)
+    raw += amount_sat.to_bytes(8, 'little')
+    ds = dest_script(to); raw += ser_varint(len(ds)) + ds
+    if change > 546:
+        raw += change.to_bytes(8, 'little') + ser_varint(len(our_script)) + our_script
+
+    for base in ("https://mempool.space/api", "https://blockstream.info/api"):
+        try:
+            r = requests.post(f"{base}/tx", data=raw.hex(), timeout=15,
+                              headers={'Content-Type': 'text/plain'})
+            if r.status_code == 200:
+                return r.text.strip()
+        except Exception as e:
+            print(f"[SEND] BTC broadcast error via {base}: {e}")
+    raise RuntimeError("BTC broadcast failed on all explorers")
+
+def _b58check_encode(payload):
+    chk = hashlib.sha256(hashlib.sha256(payload).digest()).digest()[:4]
+    raw = payload + chk
+    n = int.from_bytes(raw, 'big')
+    s = ''
+    while n:
+        n, r = divmod(n, 58); s = _B58[r] + s
+    return '1' * (len(raw) - len(raw.lstrip(b'\x00'))) + s
+
+
+# --- SEND ORCHESTRATOR --------------------------------------------------------
+def _wait_for_native(addr, network_coin, target, timeout=90):
+    """Poll until a wallet's native balance reaches `target` (gas arrival)."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            if network_coin in ('BNB',):
+                bal = _evm_native_balance(BSC_RPC_ENDPOINTS, addr)
+            elif network_coin in ('ETH',):
+                bal = _evm_native_balance(ETH_RPC_ENDPOINTS, addr)
+            else:
+                bal = _tron_balance(addr, 'TRX')
+            if bal is not None and bal >= target:
+                return True
+        except Exception:
+            pass
+        time.sleep(6)
+    return False
+
+def execute_treasury_send(task_id):
+    """Runs a treasury send in a background thread, updating send_tasks[task_id].
+    For token sends the admin gas wallet funds the sending address first
+    (two-step); for BTC/TRX the fee rides on the send itself."""
+    t = send_tasks[task_id]
+    net, uid, to_addr, amount = t['network'], t['uid'], t['to_addr'], t['amount']
+    try:
+        w = user_db.get(uid, {}).get('wallets', {}).get(net)
+        if not w: raise ValueError("Source wallet not found")
+        from_addr, priv = w['address'], w['private_key']
+        t['from_addr'] = from_addr
+
+        if net in ('USDT_TRC20', 'USDT_BEP20', 'USDT_ERC20'):
+            est = estimate_network_fee(net, to_addr)
+            gas_needed = float(est.get('gas_needed_crypto') or est.get('fee_crypto'))
+            gas_asset = est['gas_asset']
+
+            # STEP 1: gas wallet funds the sending address with native coin
+            t['step'] = f'Funding gas ({gas_asset} from your gas wallet)...'
+            gas_addr = gas_wallet.get('tron_address') if gas_asset == 'TRX' else gas_wallet.get('evm_address')
+            gas_key = gas_wallet.get('tron_key') if gas_asset == 'TRX' else gas_wallet.get('evm_key')
+            if not gas_addr or not gas_key:
+                raise ValueError(f"Gas wallet {gas_asset} key not configured")
+            if gas_asset == 'TRX':
+                # pre-count the incoming TRX so the watcher can't treat it as a deposit
+                trx_w = user_db.get(uid, {}).get('wallets', {}).get('TRX')
+                if trx_w:
+                    cur_bal = get_onchain_balance(from_addr, 'TRX') or 0.0
+                    trx_w['credited_crypto'] = cur_bal + gas_needed
+                t['gas_txid'] = tron_send_native(gas_key, from_addr, gas_needed + 1.0)
+            else:
+                t['gas_txid'] = evm_send_native(gas_asset, gas_key, from_addr, gas_needed)
+            t['txids'] = [t['gas_txid']]
+
+            # STEP 2: wait for the gas to land, then send the token
+            t['step'] = 'Waiting for gas confirmation...'
+            if not _wait_for_native(from_addr, gas_asset, gas_needed * 0.9):
+                raise RuntimeError("Gas top-up did not confirm in time; check the gas tx then retry")
+            t['step'] = 'Broadcasting token transfer...'
+            if net == 'USDT_TRC20':
+                t['txid'] = tron_send_token(priv, to_addr, amount)
+            else:
+                t['txid'] = evm_send_token(net, priv, to_addr, amount)
+            t['txids'].append(t['txid'])
+
+            # resync the watcher's mark to post-send balances
+            try:
+                nb = get_onchain_balance(from_addr, net)
+                if nb is not None: w['credited_crypto'] = nb
+                if gas_asset == 'TRX' and trx_w:
+                    tb = get_onchain_balance(from_addr, 'TRX')
+                    if tb is not None: trx_w['credited_crypto'] = tb
+            except Exception: pass
+
+        elif net == 'TRX':
+            t['step'] = 'Broadcasting TRX transfer...'
+            t['txid'] = tron_send_native(priv, to_addr, amount)
+            t['txids'] = [t['txid']]
+            try:
+                nb = get_onchain_balance(from_addr, 'TRX')
+                if nb is not None: w['credited_crypto'] = nb
+            except Exception: pass
+
+        elif net == 'BTC':
+            est = estimate_network_fee('BTC')
+            if 'error' in est: raise RuntimeError(est['error'])
+            t['step'] = 'Broadcasting BTC transaction...'
+            rate = round(est['fee_crypto'] * 10**8 / 250)
+            t['txid'] = btc_send(priv, to_addr, amount, max(1, rate))
+            t['txids'] = [t['txid']]
+            try:
+                nb = get_onchain_balance(from_addr, 'BTC')
+                if nb is not None: w['credited_crypto'] = nb
+            except Exception: pass
+
+        t['status'] = 'done'
+        t['step'] = 'Complete'
+        treasury_txs.append({
+            'ts': time.time(), 'network': net, 'uid': uid,
+            'from': t.get('from_addr'), 'to': to_addr, 'amount': amount,
+            'fee_crypto': t.get('fee_crypto'), 'gas_asset': NETWORK_GAS.get(net),
+            'txids': t.get('txids', []), 'status': 'done'
+        })
+        save_database()
+    except Exception as e:
+        t['status'] = 'error'
+        t['error'] = str(e)
+        t['step'] = 'Failed'
+        treasury_txs.append({
+            'ts': time.time(), 'network': net, 'uid': uid, 'to': to_addr,
+            'amount': amount, 'status': 'error', 'error': str(e),
+            'txids': t.get('txids', [])
+        })
+        save_database()
+
+
 def _credited_baseline(w_data, curr, onchain):
     """High-water mark of crypto already credited for this wallet. Migrates
     legacy wallets (created before balance tracking) so deposits that were
@@ -1532,6 +2000,14 @@ def _credited_baseline(w_data, curr, onchain):
         base = onchain if prior_usd > 0 else 0.0
     w_data['credited_crypto'] = base
     return base
+
+
+def _meets_min_deposit(curr, crypto_diff):
+    """True if a detected on-chain balance increase meets the configured USD
+    minimum deposit for that currency. Deposits below the minimum are never
+    credited or announced."""
+    usd = crypto_diff * (get_crypto_price(curr) if 'USDT' not in curr else 1.0)
+    return usd >= deposit_settings.get(curr, {}).get('min', 0.0)
 
 
 def _spend_trial_first(u, spent_from_deposit):
@@ -1646,9 +2122,14 @@ def blockchain_watcher_loop():
 
                     # Stable confirmed change.
                     if diff > BALANCE_EPSILON:
-                        credit_deposit(uid, curr, diff)
-                    # Rebase the high-water mark in both directions (credit or sweep).
-                    w_data['credited_crypto'] = onchain
+                        if _meets_min_deposit(curr, diff):
+                            credit_deposit(uid, curr, diff)
+                            w_data['credited_crypto'] = onchain
+                        # Below the configured minimum: no credit, no alert —
+                        # keep the mark so a later top-up can push it over.
+                    else:
+                        # Balance dropped (sweep) — always rebase downward.
+                        w_data['credited_crypto'] = onchain
                     w_data.pop('pending_credit', None)
 
         except Exception as e:
@@ -6313,17 +6794,38 @@ def handle_inline(call):
             except: pass
 
         found_deposit, crypto_amount, txid_found, _ = check_address_for_new_deposit(addr, curr)
-        
+
         if found_deposit:
-            processed_txids.add(txid_found)
-            pending_auto_txids.pop(txid_found, None) 
-            
             live_price = get_crypto_price(curr) if 'USDT' not in curr else 1.0
             usd_value = crypto_amount * live_price
-            
+
+            c_min = deposit_settings.get(curr, {}).get('min', 0.0)
+            if usd_value < c_min:
+                try: bot.send_message(call.message.chat.id, get_tl_and_map("⚠️ Deposit detected but below the minimum. Minimum deposit is <b>$%min% USD</b>.", lang).replace('%min%', fmt_amt(c_min)), parse_mode="HTML")
+                except: pass
+                try: bot.delete_message(call.message.chat.id, scan_msg.message_id)
+                except: pass
+                return
+
+            processed_txids.add(txid_found)
+            pending_auto_txids.pop(txid_found, None)
+
             user_db[user_id]['deposit'] += usd_value
             user_db[user_id]['wallets'][curr]['total_deposited'] = user_db[user_id]['wallets'][curr].get('total_deposited', 0.0) + usd_value
             log_tx(user_id, f"Deposit ({curr})", usd_value)
+
+            # Sync the watcher's high-water mark so this deposit can never be
+            # credited a second time by the automatic balance watcher.
+            try:
+                onchain_now = get_onchain_balance(addr, curr)
+                w_sync = user_db[user_id]['wallets'][curr]
+                if onchain_now is not None:
+                    w_sync['credited_crypto'] = onchain_now
+                else:
+                    w_sync['credited_crypto'] = w_sync.get('credited_crypto', 0.0) + crypto_amount
+                w_sync.pop('pending_credit', None)
+            except Exception:
+                pass
             
             process_referral_commission(user_id, usd_value, is_deposit=True) 
             
@@ -6524,6 +7026,19 @@ def handle_inline(call):
         if target in user_db:
             user_db[target]['deposit'] += amt
             log_tx(target, f"Deposit ({curr.replace('_', ' ')})", amt)
+
+            # Keep the wallet's ledger in sync so the balance watcher can never
+            # re-credit this deposit as a phantom new one.
+            w_sync = user_db[target].get('wallets', {}).get(curr)
+            if w_sync:
+                w_sync['total_deposited'] = w_sync.get('total_deposited', 0.0) + amt
+                try:
+                    onchain_now = get_onchain_balance(w_sync.get('address'), curr)
+                    if onchain_now is not None:
+                        w_sync['credited_crypto'] = onchain_now
+                except Exception:
+                    pass
+                w_sync.pop('pending_credit', None)
             
             process_referral_commission(target, amt, is_deposit=True) 
             
@@ -7763,6 +8278,183 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                 self.send_header('Content-type', 'application/json')
                 self.end_headers()
                 self.wfile.write(json.dumps({'error': str(e)}).encode())
+
+        # --- TREASURY: aggregated live balance overview (all user wallets) ---
+        elif parsed_path.path == '/api/balance_overview':
+            if pin != ADMIN_PIN:
+                self.send_response(401)
+                self.end_headers()
+                return
+            assets = {a: {'total_crypto': 0.0, 'total_usd': 0.0, 'wallets': []} for a in SEND_ASSETS}
+            for uid, udata in user_db.items():
+                uname = udata.get('username', str(uid))
+                fname = udata.get('first_name', 'Unknown')
+                name = f"{fname} (@{uname})" if uname and uname != 'No Username' else fname
+                for net, wdata in udata.get('wallets', {}).items():
+                    if net not in assets:
+                        continue
+                    live = wdata.get('live_balance')
+                    if live is None:
+                        continue
+                    price = get_crypto_price(net) if 'USDT' not in net else 1.0
+                    a = assets[net]
+                    a['total_crypto'] += live
+                    a['total_usd'] += live * price
+                    a['wallets'].append({
+                        'uid': uid, 'name': name, 'address': wdata.get('address', ''),
+                        'balance': live, 'usd': live * price,
+                    })
+            for a in assets.values():
+                a['wallets'].sort(key=lambda x: -x['balance'])
+            total_usd = sum(a['total_usd'] for a in assets.values())
+            gas = get_gas_balances()
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                'assets': assets, 'total_usd': total_usd, 'gas': gas,
+                'gas_addresses': {'evm': gas_wallet.get('evm_address', ''),
+                                  'tron': gas_wallet.get('tron_address', ''),
+                                  'btc': gas_wallet.get('btc_address', '')},
+            }).encode())
+
+        # --- TREASURY: per-asset history (deposits + admin sends) ---
+        elif parsed_path.path == '/api/asset_history':
+            if pin != ADMIN_PIN:
+                self.send_response(401)
+                self.end_headers()
+                return
+            net = str(data.get('network', ''))
+            items = []
+            if net in SEND_ASSETS:
+                label_frag = net.replace('_', ' ')
+                for uid, udata in user_db.items():
+                    uname = udata.get('username', str(uid))
+                    fname = udata.get('first_name', 'Unknown')
+                    name = f"{fname} (@{uname})" if uname and uname != 'No Username' else fname
+                    for tx in udata.get('transactions', []):
+                        ttype = str(tx.get('type', ''))
+                        if label_frag in ttype or net in ttype:
+                            items.append({'dir': 'in', 'user': name, 'uid': uid,
+                                          'amount': tx.get('amount'), 'type': ttype,
+                                          'date': tx.get('date')})
+                for t in treasury_txs:
+                    if t.get('network') == net:
+                        items.append({'dir': 'out', 'user': f"uid {t.get('uid')}",
+                                      'amount': -abs(float(t.get('amount', 0))),
+                                      'type': 'Treasury Send', 'date': t.get('ts'),
+                                      'txids': t.get('txids', []), 'to': t.get('to'),
+                                      'status': t.get('status')})
+            items.sort(key=lambda x: str(x.get('date') or ''), reverse=True)
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'history': items[:200],
+                                         'explorer': EXPLORER_TX.get(net, '')}).encode())
+
+        # --- TREASURY: live address validation ---
+        elif parsed_path.path == '/api/validate_addr':
+            if pin != ADMIN_PIN:
+                self.send_response(401)
+                self.end_headers()
+                return
+            ok = validate_address(str(data.get('address', '')), str(data.get('network', '')))
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'valid': ok}).encode())
+
+        # --- TREASURY: live fee estimate ---
+        elif parsed_path.path == '/api/estimate_fee':
+            if pin != ADMIN_PIN:
+                self.send_response(401)
+                self.end_headers()
+                return
+            net = str(data.get('network', ''))
+            est = estimate_network_fee(net, data.get('to_addr') or None)
+            if 'error' not in est:
+                gas = get_gas_balances()
+                have = gas.get(est['gas_asset'])
+                est['gas_balance'] = have
+                est['gas_ok'] = (have is not None and est.get('gas_needed_crypto', 0) > 0
+                                 and have >= est['gas_needed_crypto']) or est.get('gas_needed_crypto', 0) == 0
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps(est).encode())
+
+        # --- TREASURY: gas wallet config (addresses + keys) ---
+        elif parsed_path.path == '/api/gas_wallet':
+            if pin != ADMIN_PIN:
+                self.send_response(401)
+                self.end_headers()
+                return
+            for k in ('evm_address', 'evm_key', 'tron_address', 'tron_key', 'btc_address', 'btc_key'):
+                if k in data and data[k] is not None:
+                    gas_wallet[k] = str(data[k]).strip()
+            save_database()
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'success': True, 'gas': get_gas_balances(),
+                                         'gas_addresses': {'evm': gas_wallet.get('evm_address', ''),
+                                                           'tron': gas_wallet.get('tron_address', ''),
+                                                           'btc': gas_wallet.get('btc_address', '')}}).encode())
+
+        # --- TREASURY: execute a send (async task) ---
+        elif parsed_path.path == '/api/send_asset':
+            if pin != ADMIN_PIN:
+                self.send_response(401)
+                self.end_headers()
+                return
+            try:
+                net = str(data.get('network', ''))
+                uid = int(data.get('uid'))
+                to_addr = str(data.get('to_addr', '')).strip()
+                amount = float(data.get('amount'))
+                if net not in SEND_ASSETS:
+                    raise ValueError("Unsupported network")
+                if not validate_address(to_addr, net):
+                    raise ValueError("Invalid destination address for this network")
+                w = user_db.get(uid, {}).get('wallets', {}).get(net)
+                if not w or not w.get('address') or not w.get('private_key'):
+                    raise ValueError("Source wallet not found")
+                live = get_onchain_balance(w['address'], net)
+                if live is None:
+                    raise ValueError("Could not read the source wallet balance right now")
+                if amount <= 0 or amount > live + BALANCE_EPSILON:
+                    raise ValueError(f"Amount must be between 0 and the wallet balance ({fmt_amt(live)})")
+                if net in ('TRX', 'BTC'):
+                    est = estimate_network_fee(net)
+                    need = est.get('fee_crypto', 0) if 'error' not in est else 0
+                    if amount + need > live + BALANCE_EPSILON:
+                        raise ValueError(f"Amount + network fee ({fmt_amt(need)} {NETWORK_GAS[net]}) exceeds balance")
+                task_id = uuid.uuid4().hex[:12]
+                send_tasks[task_id] = {'status': 'running', 'step': 'Queued',
+                                       'network': net, 'uid': uid, 'to_addr': to_addr,
+                                       'amount': amount, 'txids': []}
+                threading.Thread(target=execute_treasury_send, args=(task_id,), daemon=True).start()
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': True, 'task_id': task_id}).encode())
+            except Exception as e:
+                self.send_response(400)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'error': str(e)}).encode())
+
+        # --- TREASURY: poll send progress ---
+        elif parsed_path.path == '/api/send_status':
+            if pin != ADMIN_PIN:
+                self.send_response(401)
+                self.end_headers()
+                return
+            t = send_tasks.get(str(data.get('task_id', '')))
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps(t or {'status': 'unknown'}).encode())
 
         # --- NEW: FREE TRIAL CASH — GET TEMPLATE + USER LIST ---
         elif parsed_path.path == '/api/get_free_trial':

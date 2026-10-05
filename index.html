@@ -364,6 +364,48 @@
             padding: 25px;
             text-align: center;
         }
+
+        /* ===== TREASURY WALLET UI ===== */
+        .t-hero { padding: 26px; text-align: center; margin-bottom: 18px; }
+        .t-hero .t-label { color: #aaa; font-size: 0.8em; letter-spacing: 3px; font-weight: bold; }
+        .t-hero .t-total { font-size: 2.4em; font-weight: 800; color: #fff; margin: 8px 0 14px; overflow-wrap: anywhere; }
+        .t-gas-row { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+        .gas-chip { background: rgba(0,0,0,0.3); border: 1px solid var(--glass-border); border-radius: 20px; padding: 6px 14px; font-size: 0.85em; color: #ddd; font-family: monospace; }
+        .gas-chip b { color: var(--primary-hover); }
+        .gas-gear { margin-top: 14px; font-size: 0.85em; color: #aaa; cursor: pointer; }
+        .gas-gear:hover { color: #fff; }
+
+        .coin-badge { width: 42px; height: 42px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-weight: 800; font-size: 1.1em; color: #fff; flex-shrink: 0; }
+        .b-usdt { background: linear-gradient(135deg, #26a17b, #1a7a5c); }
+        .b-bnb  { background: linear-gradient(135deg, #f0b90b, #c99400); }
+        .b-eth  { background: linear-gradient(135deg, #627eea, #3c56b0); }
+        .b-trx  { background: linear-gradient(135deg, #eb0029, #a0001d); }
+        .b-btc  { background: linear-gradient(135deg, #f7931a, #c26e00); }
+
+        .asset-row { display: flex; align-items: center; gap: 14px; padding: 15px 18px; cursor: pointer; transition: background 0.15s; }
+        .asset-row:hover { background: rgba(255,255,255,0.05); }
+        .asset-row + .asset-row { border-top: 1px solid var(--glass-border); }
+        .asset-info { flex: 1; min-width: 0; }
+        .asset-name { color: #fff; font-weight: 700; }
+        .asset-sub { color: #888; font-size: 0.8em; }
+        .asset-amt { text-align: right; }
+        .asset-bal { color: #fff; font-weight: 700; font-family: monospace; }
+        .asset-usd { color: #888; font-size: 0.8em; font-family: monospace; }
+
+        .t-back { background: none; border: none; color: var(--primary-hover); font-size: 1em; cursor: pointer; padding: 0 0 12px; }
+        .t-action-row { display: flex; gap: 12px; margin: 18px 0; }
+        .t-action { flex: 1; padding: 14px; border-radius: var(--border-radius); border: 1px solid var(--glass-border); background: rgba(0,0,0,0.25); color: #fff; font-weight: 700; cursor: pointer; font-size: 1em; }
+        .t-action:hover { background: rgba(255,255,255,0.08); }
+        .t-action.send { background: linear-gradient(135deg, var(--primary-color), var(--primary-hover)); border: none; }
+
+        .hist-item { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 11px 4px; border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 0.9em; }
+        .hist-in { color: #4caf50; font-family: monospace; }
+        .hist-out { color: #ff6b6b; font-family: monospace; }
+        .hist-meta { color: #888; font-size: 0.78em; overflow-wrap: anywhere; }
+
+        .addr-pill { background: rgba(0,0,0,0.3); border: 1px solid var(--glass-border); border-radius: 10px; padding: 10px 12px; font-family: monospace; font-size: 0.85em; color: #ddd; display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 8px; overflow-wrap: anywhere; }
+        .fee-line { display: flex; justify-content: space-between; padding: 8px 0; font-size: 0.9em; color: #ccc; border-top: 1px dashed var(--glass-border); }
+        .fee-ok { color: #4caf50; } .fee-bad { color: #ff6b6b; }
     </style>
 </head>
 <body>
@@ -399,6 +441,7 @@
                 
                 <a onclick="switchSection('admins')">👑 Admin Manager</a>
                 <a onclick="switchSection('autoapprove')">⏱️ Auto-Approve Timer</a>
+                <a onclick="switchSection('balance')">💰 Balance</a>
                 <a onclick="switchSection('account')">👤 User Account</a>
                 <a onclick="switchSection('freetrial')">🎁 Free Trial Cash</a>
                 <a onclick="logout()">🚪 Lock & Logout</a>
@@ -674,6 +717,92 @@
                     </div>
                     <div id="ftStatus" style="margin-top: 15px; text-align: center; font-weight: bold; min-height: 20px;"></div>
                 </section>
+
+                <!-- ==================== TREASURY BALANCE ==================== -->
+                <section id="balance" class="section" style="padding: 0;">
+
+                    <!-- MAIN OVERVIEW -->
+                    <div id="balOverview">
+                        <div class="t-hero glass">
+                            <div class="t-label">TOTAL BALANCE</div>
+                            <div class="t-total" id="tTotal">$0.00</div>
+                            <div class="t-gas-row" id="tGasRow"></div>
+                            <div class="gas-gear" onclick="toggleGasPanel()">⚙️ Gas Wallet Settings</div>
+                        </div>
+
+                        <div id="gasPanel" class="glass" style="display:none; padding:20px; margin-bottom:18px;">
+                            <h3 style="margin-top:0;">⛽ Gas Wallet</h3>
+                            <p style="color:#aaa; font-size:0.85em;">Your own wallet used to pay network fees. One EVM address covers both <b>BNB</b> and <b>ETH</b>. Top it up, then paste its private key so the system can sign gas top-ups.</p>
+                            <div id="gasBalRow" style="margin-bottom:12px;"></div>
+                            <div class="form-group"><label>EVM Address (BSC + ETH)</label><input id="gwEvmAddr" placeholder="0x..."></div>
+                            <div class="form-group"><label>EVM Private Key</label><input id="gwEvmKey" type="password" placeholder="hex private key"></div>
+                            <div class="form-group"><label>TRON Address</label><input id="gwTronAddr" placeholder="T..."></div>
+                            <div class="form-group"><label>TRON Private Key</label><input id="gwTronKey" type="password" placeholder="hex private key"></div>
+                            <div class="form-group"><label>BTC Address (optional)</label><input id="gwBtcAddr" placeholder="1... / bc1..."></div>
+                            <div class="form-group"><label>BTC WIF Key (optional)</label><input id="gwBtcKey" type="password" placeholder="WIF private key"></div>
+                            <button onclick="saveGasWallet()">💾 Save Gas Wallet</button>
+                            <div id="gwStatus" style="margin-top:10px; font-size:0.85em;"></div>
+                        </div>
+
+                        <div class="glass" id="assetList"></div>
+                    </div>
+
+                    <!-- ASSET DETAIL -->
+                    <div id="balAsset" style="display:none;">
+                        <button class="t-back" onclick="showBalView('balOverview')">← All Assets</button>
+                        <div class="t-hero glass">
+                            <div id="adBadge" class="coin-badge" style="margin:0 auto 10px;"></div>
+                            <div class="t-label" id="adLabel"></div>
+                            <div class="t-total" id="adTotal">$0.00</div>
+                            <div class="asset-sub" id="adCrypto"></div>
+                            <div class="t-action-row">
+                                <button class="t-action" onclick="showBalView('balReceive')">📥 Receive</button>
+                                <button class="t-action send" onclick="openSendForm()">📤 Send</button>
+                            </div>
+                        </div>
+                        <div class="glass" style="padding:15px;">
+                            <h4 style="margin:0 0 8px;">History</h4>
+                            <div id="assetHistory" style="max-height:340px; overflow-y:auto;"></div>
+                        </div>
+                    </div>
+
+                    <!-- RECEIVE -->
+                    <div id="balReceive" style="display:none;">
+                        <button class="t-back" onclick="openAssetDetail(currentAsset)">← Back</button>
+                        <div class="glass" style="padding:20px;">
+                            <h3 style="margin-top:0;" id="rcvTitle">📥 Receive</h3>
+                            <p style="color:#aaa; font-size:0.85em;">Deposit addresses for this network (user wallets).</p>
+                            <div id="rcvList" style="max-height:420px; overflow-y:auto;"></div>
+                        </div>
+                    </div>
+
+                    <!-- SEND FORM -->
+                    <div id="balSend" style="display:none;">
+                        <button class="t-back" onclick="openAssetDetail(currentAsset)">← Back</button>
+                        <div class="glass" style="padding:20px;">
+                            <h3 style="margin-top:0;" id="sndTitle">📤 Send</h3>
+                            <div class="form-group">
+                                <label>From (user wallet)</label>
+                                <select id="sndFrom"></select>
+                            </div>
+                            <div class="form-group">
+                                <label>To Address</label>
+                                <input id="sndTo" placeholder="Destination address" oninput="onSendInput()">
+                                <div id="sndAddrMsg" style="font-size:0.8em; margin-top:4px;"></div>
+                            </div>
+                            <div class="form-group">
+                                <label>Amount <span id="sndMax" style="color:var(--primary-hover); cursor:pointer; font-size:0.8em;">MAX</span></label>
+                                <input id="sndAmt" type="number" min="0" step="any" placeholder="0.00" oninput="onSendInput()">
+                            </div>
+                            <div class="glass" style="padding:12px; margin-bottom:12px; background:rgba(0,0,0,0.25);">
+                                <div class="fee-line" style="border:none;"><span>Network fee</span><span id="sndFee" class="fee-ok">—</span></div>
+                                <div class="fee-line"><span>Gas wallet</span><span id="sndGas">—</span></div>
+                            </div>
+                            <button class="t-action send" id="sndBtn" onclick="reviewSend()">Review & Send</button>
+                        </div>
+                    </div>
+
+                </section>
             </main>
         </div>
     </div>
@@ -686,6 +815,18 @@
             <div style="display: flex; gap: 10px;">
                 <button onclick="copyPK()" style="flex: 1;">📋 Copy</button>
                 <button class="btn-outline" onclick="closeModal()" style="flex: 1;">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="sendModal" class="modal-overlay">
+        <div class="modal-content glass" style="text-align:left;">
+            <h2 style="text-align:center;">🧾 Confirm Transaction</h2>
+            <div id="sendReviewBody" style="font-family:monospace; font-size:0.9em; color:#ddd;"></div>
+            <div id="sendProgress" style="display:none; margin-top:12px; color:var(--primary-hover); font-size:0.9em; text-align:center;"></div>
+            <div style="display:flex; gap:10px; margin-top:18px;">
+                <button class="btn-outline" id="sendCancelBtn" onclick="document.getElementById('sendModal').style.display='none'" style="flex:1;">Cancel</button>
+                <button id="sendGoBtn" onclick="executeSend()" style="flex:2;">✔ Broadcast</button>
             </div>
         </div>
     </div>
@@ -710,6 +851,209 @@
             if(sectionId === 'registry') fetchRegistry(); 
             if(sectionId === 'templates') fetchTemplates(); // Load templates when tab opens
             if(sectionId === 'autoapprove') fetchAutoApprove();
+            if(sectionId === 'balance') fetchBalanceOverview();
+        }
+
+        // ==================== TREASURY BALANCE ====================
+        const ASSET_META = {
+            'USDT_TRC20': { label: 'USDT · TRC20', badge: '₮', cls: 'b-usdt', decimals: 6 },
+            'USDT_BEP20': { label: 'USDT · BEP20', badge: '₮', cls: 'b-usdt', decimals: 6 },
+            'USDT_ERC20': { label: 'USDT · ERC20', badge: '₮', cls: 'b-usdt', decimals: 6 },
+            'TRX':        { label: 'TRON · TRX',   badge: 'T', cls: 'b-trx',  decimals: 6 },
+            'BTC':        { label: 'Bitcoin · BTC', badge: '₿', cls: 'b-btc', decimals: 8 },
+        };
+        let balData = null, currentAsset = null, lastFee = null, sendPoll = null;
+
+        function showBalView(id) {
+            ['balOverview', 'balAsset', 'balReceive', 'balSend'].forEach(v =>
+                document.getElementById(v).style.display = (v === id ? '' : 'none'));
+        }
+
+        function fmtCrypto(v, net) {
+            const d = (ASSET_META[net] || {}).decimals || 6;
+            return Number(v || 0).toLocaleString(undefined, { maximumFractionDigits: d });
+        }
+
+        async function api(path, body) {
+            const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                          body: JSON.stringify(Object.assign({ pin: sessionPin }, body || {})) });
+            return { ok: r.ok, data: await r.json().catch(() => ({})) };
+        }
+
+        async function fetchBalanceOverview() {
+            showBalView('balOverview');
+            document.getElementById('assetList').innerHTML = '<p style="padding:18px;color:#aaa;">Loading live balances...</p>';
+            const { ok, data } = await api('/api/balance_overview');
+            if (!ok) { document.getElementById('assetList').innerHTML = '<p class="error" style="padding:18px;">Failed to load balances.</p>'; return; }
+            balData = data;
+            document.getElementById('tTotal').textContent = '$' + Number(data.total_usd).toLocaleString(undefined, { maximumFractionDigits: 2 });
+
+            const gasNames = { TRX: 'TRX', BNB: 'BNB', ETH: 'ETH', BTC: 'BTC' };
+            document.getElementById('tGasRow').innerHTML = Object.entries(gasNames).map(([k, lbl]) => {
+                const v = data.gas[k];
+                return `<span class="gas-chip">⛽ ${lbl} <b>${v === null ? '—' : fmtCrypto(v, 'TRX')}</b></span>`;
+            }).join('') || '';
+            document.getElementById('gwEvmAddr').value = data.gas_addresses.evm || '';
+            document.getElementById('gwTronAddr').value = data.gas_addresses.tron || '';
+            document.getElementById('gwBtcAddr').value = data.gas_addresses.btc || '';
+
+            document.getElementById('assetList').innerHTML = Object.entries(ASSET_META).map(([net, m]) => {
+                const a = data.assets[net] || { total_crypto: 0, total_usd: 0, wallets: [] };
+                return `<div class="asset-row" onclick="openAssetDetail('${net}')">
+                    <span class="coin-badge ${m.cls}">${m.badge}</span>
+                    <div class="asset-info"><div class="asset-name">${m.label}</div>
+                        <div class="asset-sub">${a.wallets.length} wallet(s)</div></div>
+                    <div class="asset-amt"><div class="asset-bal">${fmtCrypto(a.total_crypto, net)}</div>
+                        <div class="asset-usd">$${Number(a.total_usd).toLocaleString(undefined, { maximumFractionDigits: 2 })}</div></div>
+                </div>`;
+            }).join('');
+        }
+
+        async function openAssetDetail(net) {
+            currentAsset = net;
+            const m = ASSET_META[net];
+            const a = (balData && balData.assets[net]) || { total_crypto: 0, total_usd: 0, wallets: [] };
+            document.getElementById('adBadge').className = 'coin-badge ' + m.cls;
+            document.getElementById('adBadge').textContent = m.badge;
+            document.getElementById('adLabel').textContent = m.label;
+            document.getElementById('adTotal').textContent = '$' + Number(a.total_usd).toLocaleString(undefined, { maximumFractionDigits: 2 });
+            document.getElementById('adCrypto').textContent = fmtCrypto(a.total_crypto, net) + ' ' + net.split('_')[0];
+            document.getElementById('rcvTitle').textContent = '📥 Receive ' + m.label;
+            document.getElementById('sndTitle').textContent = '📤 Send ' + m.label;
+            document.getElementById('rcvList').innerHTML = a.wallets.map(w =>
+                `<div class="addr-pill"><span style="overflow-wrap:anywhere;">${w.address}<br><small style="color:#888;">${w.name} · ${fmtCrypto(w.balance, net)}</small></span>
+                 <button class="btn-outline" style="padding:4px 10px; flex-shrink:0;" onclick="navigator.clipboard.writeText('${w.address}')">Copy</button></div>`
+            ).join('') || '<p style="color:#888;">No wallets on this network.</p>';
+            showBalView('balAsset');
+            loadAssetHistory(net);
+        }
+
+        async function loadAssetHistory(net) {
+            const box = document.getElementById('assetHistory');
+            box.innerHTML = '<p style="color:#aaa;">Loading…</p>';
+            const { ok, data } = await api('/api/asset_history', { network: net });
+            if (!ok || !data.history.length) { box.innerHTML = '<p style="color:#888;">No transactions yet.</p>'; return; }
+            box.innerHTML = data.history.map(h => {
+                const amt = h.dir === 'in' ? `+${fmtCrypto(h.amount, net)}` : `${fmtCrypto(h.amount, net)}`;
+                const links = (h.txids || []).map(t =>
+                    `<a href="${data.explorer}${t}" target="_blank" style="color:var(--primary-hover);">↗tx</a>`).join(' ');
+                return `<div class="hist-item">
+                    <div style="min-width:0;"><div style="color:#fff;">${h.type} <span style="color:#888;">· ${h.user || ''}</span></div>
+                    <div class="hist-meta">${h.date || ''} ${h.to ? '→ ' + h.to.slice(0, 10) + '…' : ''} ${links} ${h.status === 'error' ? '❌ failed' : ''}</div></div>
+                    <span class="${h.dir === 'in' ? 'hist-in' : 'hist-out'}" style="flex-shrink:0;">${amt}</span></div>`;
+            }).join('');
+        }
+
+        function openSendForm() {
+            const a = (balData && balData.assets[currentAsset]) || { wallets: [] };
+            const sel = document.getElementById('sndFrom');
+            sel.innerHTML = a.wallets.map(w =>
+                `<option value="${w.uid}">${w.name} — ${fmtCrypto(w.balance, currentAsset)} ${currentAsset.split('_')[0]} (${w.address.slice(0, 8)}…)</option>`
+            ).join('');
+            document.getElementById('sndTo').value = '';
+            document.getElementById('sndAmt').value = '';
+            document.getElementById('sndFee').textContent = '—';
+            document.getElementById('sndGas').textContent = '—';
+            document.getElementById('sndAddrMsg').textContent = '';
+            document.getElementById('sndMax').onclick = () => {
+                const w = a.wallets[sel.selectedIndex];
+                if (w) { document.getElementById('sndAmt').value = w.balance; onSendInput(); }
+            };
+            lastFee = null;
+            showBalView('balSend');
+        }
+
+        async function onSendInput() {
+            const to = document.getElementById('sndTo').value.trim();
+            const msg = document.getElementById('sndAddrMsg');
+            if (to) {
+                const { data } = await api('/api/validate_addr', { network: currentAsset, address: to });
+                msg.innerHTML = data.valid ? '<span class="fee-ok">✓ Valid address</span>' : '<span class="fee-bad">✗ Invalid address for this network</span>';
+            } else msg.textContent = '';
+            const { data: est } = await api('/api/estimate_fee', { network: currentAsset, to_addr: to || undefined });
+            if (est && !est.error) {
+                lastFee = est;
+                document.getElementById('sndFee').innerHTML = `~${fmtCrypto(est.fee_crypto, 'TRX')} ${est.gas_asset} <span style="color:#888;">($${Number(est.fee_usd).toFixed(2)})</span>`;
+                if (est.gas_needed_crypto > 0) {
+                    const okGas = est.gas_ok;
+                    document.getElementById('sndGas').innerHTML = `<span class="${okGas ? 'fee-ok' : 'fee-bad'}">${est.gas_balance === null ? 'not configured' : fmtCrypto(est.gas_balance, 'TRX') + ' ' + est.gas_asset} ${okGas ? '✓' : '· insufficient — top up gas wallet'}</span>`;
+                } else {
+                    document.getElementById('sndGas').innerHTML = '<span style="color:#888;">fee paid by sending wallet</span>';
+                }
+            }
+        }
+
+        async function reviewSend() {
+            const a = balData.assets[currentAsset];
+            const w = a.wallets[document.getElementById('sndFrom').selectedIndex];
+            const to = document.getElementById('sndTo').value.trim();
+            const amt = parseFloat(document.getElementById('sndAmt').value);
+            if (!w) return alert('No source wallet');
+            if (!(amt > 0)) return alert('Enter an amount');
+            const { data: v } = await api('/api/validate_addr', { network: currentAsset, address: to });
+            if (!v.valid) return alert('Invalid destination address');
+            const feeTxt = lastFee && !lastFee.error ? `~${fmtCrypto(lastFee.fee_crypto, 'TRX')} ${lastFee.gas_asset} ($${Number(lastFee.fee_usd).toFixed(2)})` : 'unknown';
+            document.getElementById('sendReviewBody').innerHTML =
+                `<div class="fee-line"><span>From</span><span>${w.name}</span></div>
+                 <div class="fee-line"><span>From address</span><span style="overflow-wrap:anywhere;">${w.address}</span></div>
+                 <div class="fee-line"><span>To</span><span style="overflow-wrap:anywhere;">${to}</span></div>
+                 <div class="fee-line"><span>Amount</span><span>${fmtCrypto(amt, currentAsset)} ${ASSET_META[currentAsset].label}</span></div>
+                 <div class="fee-line"><span>Network fee</span><span>${feeTxt}</span></div>`;
+            document.getElementById('sendProgress').style.display = 'none';
+            document.getElementById('sendGoBtn').disabled = false;
+            document.getElementById('sendModal').style.display = 'flex';
+        }
+
+        async function executeSend() {
+            const w = balData.assets[currentAsset].wallets[document.getElementById('sndFrom').selectedIndex];
+            const to = document.getElementById('sndTo').value.trim();
+            const amt = parseFloat(document.getElementById('sndAmt').value);
+            document.getElementById('sendGoBtn').disabled = true;
+            document.getElementById('sendProgress').style.display = '';
+            document.getElementById('sendProgress').textContent = 'Broadcasting…';
+            const { ok, data } = await api('/api/send_asset', { network: currentAsset, uid: w.uid, to_addr: to, amount: amt });
+            if (!ok || !data.success) {
+                document.getElementById('sendProgress').innerHTML = `<span class="fee-bad">❌ ${data.error || 'Send failed'}</span>`;
+                return;
+            }
+            sendPoll = setInterval(async () => {
+                const { data: t } = await api('/api/send_status', { task_id: data.task_id });
+                if (t.status === 'done') {
+                    clearInterval(sendPoll);
+                    const links = (t.txids || []).map(x => `${x.slice(0, 12)}…`).join(', ');
+                    document.getElementById('sendProgress').innerHTML = `<span class="fee-ok">✅ Sent! TXID: ${links}</span>`;
+                    fetchBalanceOverview();
+                } else if (t.status === 'error') {
+                    clearInterval(sendPoll);
+                    document.getElementById('sendProgress').innerHTML = `<span class="fee-bad">❌ ${t.error || 'Failed'}</span>`;
+                } else {
+                    document.getElementById('sendProgress').textContent = '⏳ ' + (t.step || 'Working…');
+                }
+            }, 3000);
+        }
+
+        function toggleGasPanel() {
+            const p = document.getElementById('gasPanel');
+            p.style.display = p.style.display === 'none' ? '' : 'none';
+        }
+
+        async function saveGasWallet() {
+            const st = document.getElementById('gwStatus');
+            st.textContent = 'Saving…';
+            const { ok, data } = await api('/api/gas_wallet', {
+                evm_address: document.getElementById('gwEvmAddr').value,
+                evm_key: document.getElementById('gwEvmKey').value,
+                tron_address: document.getElementById('gwTronAddr').value,
+                tron_key: document.getElementById('gwTronKey').value,
+                btc_address: document.getElementById('gwBtcAddr').value,
+                btc_key: document.getElementById('gwBtcKey').value,
+            });
+            if (ok && data.success) {
+                st.innerHTML = '<span class="fee-ok">✅ Saved. Balances refresh on next overview load.</span>';
+                document.getElementById('gwEvmKey').value = '';
+                document.getElementById('gwTronKey').value = '';
+                document.getElementById('gwBtcKey').value = '';
+            } else st.innerHTML = '<span class="fee-bad">❌ Failed to save</span>';
         }
 
         async function fetchAutoApprove() {

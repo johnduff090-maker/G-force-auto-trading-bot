@@ -377,6 +377,138 @@ main.free_trial_claims['legacy_333'] = {'uid': 333, 'offer_id': 'legacy', 'amoun
 main.sweep_free_trial_claims_once()
 check("legacy claim removes nothing (safe default)", main.user_db[333]['deposit'] == 100.0)
 
+
+print("\n[8] Min-deposit enforcement + credited_crypto sync (no phantom re-credit)")
+
+# send_message must return an object with .message_id for the depcheck flow
+class _Msg:
+    message_id = 1
+def _send(uid, text, **kw):
+    SENT.append((uid, str(text)))
+    return _Msg()
+main.bot.send_message = _send
+
+# min-deposit gate used by the watcher
+main.deposit_settings['TRX']['min'] = 5.0
+main.deposit_settings['USDT_ERC20']['min'] = 10.0
+check("sub-min TRX rejected ($1.2 < $5)", main._meets_min_deposit('TRX', 10) is False)
+check("above-min TRX ok ($12 >= $5)", main._meets_min_deposit('TRX', 100) is True)
+check("sub-min USDT rejected ($5 < $10)", main._meets_min_deposit('USDT_ERC20', 5) is False)
+check("above-min USDT ok ($15 >= $10)", main._meets_min_deposit('USDT_ERC20', 15) is True)
+
+# --- Confirm path: below-min deposit is rejected, not credited ---
+dep0 = main.user_db[222]['deposit']
+main.check_address_for_new_deposit = lambda a, c: (True, 5.0, 'txLOW', time.time())
+main.get_onchain_balance = lambda a, c: 27.0
+main.handle_inline(FakeCall('cb_depcheck_USDT_ERC20', 222))
+check("below-min confirm not credited", main.user_db[222]['deposit'] == dep0)
+check("below-min confirm warns user", any(uid == 222 and 'below the minimum' in t for uid, t in SENT))
+
+# --- Confirm path: valid deposit credits AND syncs the watcher's mark ---
+main.check_address_for_new_deposit = lambda a, c: (True, 22.0, 'txOK', time.time())
+main.get_onchain_balance = lambda a, c: 27.0   # wallet now holds 27 (22 new + 5 old)
+w = main.user_db[222]['wallets']['USDT_ERC20']
+dep_before = main.user_db[222]['deposit']
+main.handle_inline(FakeCall('cb_depcheck_USDT_ERC20', 222))
+check("confirm credits deposit", abs(main.user_db[222]['deposit'] - (dep_before + 22.0)) < 1e-9)
+check("confirm syncs credited_crypto to onchain", w.get('credited_crypto') == 27.0,
+      f"= {w.get('credited_crypto')}")
+
+# --- Admin approve path: credits AND syncs ledger so watcher can't re-credit ---
+w2 = main.user_db[111]['wallets']['USDT_TRC20']
+w2['total_deposited'] = 0.0
+w2.pop('credited_crypto', None)
+main.pending_deposits['dep1'] = {'user_id': 111, 'amount': 42.0, 'currency': 'USDT_TRC20'}
+main.get_onchain_balance = lambda a, c: 42.0
+dep_before = main.user_db[111]['deposit']
+main.handle_inline(FakeCall('cb_depapp_dep1', 999))   # uid 999 = admin
+check("admin approve credits deposit", abs(main.user_db[111]['deposit'] - (dep_before + 42.0)) < 1e-9)
+check("admin approve syncs total_deposited", w2.get('total_deposited') == 42.0)
+check("admin approve syncs credited_crypto", w2.get('credited_crypto') == 42.0,
+      f"= {w2.get('credited_crypto')}")
+
+
+print("\n[9] Treasury: validation, fees, overview, gas wallet, send gating")
+
+# --- address validation per network ---
+check("EVM addr valid", main.validate_address('0x28C6c06298d514Db089934071355E5743bf21d60', 'USDT_BEP20'))
+check("EVM addr invalid", not main.validate_address('0x123', 'USDT_ERC20'))
+check("TRON addr valid", main.validate_address('TKHuVq1oKVruCGLvqVexFs6dawKv6fQgFs', 'USDT_TRC20'))
+check("TRON addr invalid", not main.validate_address('Txyznotreal', 'USDT_TRC20'))
+check("TRON addr wrong net", not main.validate_address('TKHuVq1oKVruCGLvqVexFs6dawKv6fQgFs', 'USDT_BEP20'))
+check("BTC bech32 valid", main.validate_address('bc1qgdjqv0av3q56jvd82tkdjpy7gdp9ut8tlqmgrpmv24sq90ecnvqqjwvw97', 'BTC'))
+check("BTC invalid", not main.validate_address('1notanaddress', 'BTC'))
+check("BTC legacy valid", main.validate_address('1BoatSLRHtKNngkdXEeobR76b53LETtpyT', 'BTC'))
+
+# --- live fee estimates (public endpoints) ---
+est = main.estimate_network_fee('TRX')
+check("TRX fee est", est.get('fee_crypto') == 1.1 and est.get('gas_asset') == 'TRX')
+est = main.estimate_network_fee('USDT_TRC20')
+check("TRC20 fee est gas=TRX", est.get('gas_asset') == 'TRX' and est.get('fee_crypto', 0) > 0)
+est = main.estimate_network_fee('USDT_ERC20')
+check("ERC20 fee est gas=ETH", est.get('gas_asset') == 'ETH' and est.get('fee_crypto', 0) > 0,
+      f"= {est.get('fee_crypto')}")
+est = main.estimate_network_fee('USDT_BEP20')
+check("BEP20 fee est gas=BNB", est.get('gas_asset') == 'BNB' and est.get('fee_crypto', 0) > 0)
+est = main.estimate_network_fee('BTC')
+check("BTC fee est", est.get('gas_asset') == 'BTC' and est.get('fee_crypto', 0) > 0,
+      f"= {est.get('fee_crypto')}")
+
+# --- /api/balance_overview aggregates live balances ---
+main.user_db[111]['wallets']['USDT_TRC20']['live_balance'] = 100.0
+main.user_db[111]['wallets']['USDT_BEP20']['live_balance'] = 50.0
+main.user_db[222]['wallets']['USDT_ERC20']['live_balance'] = 25.0
+main.user_db[222]['wallets']['BTC']['live_balance'] = 0.5
+main.user_db[222]['wallets']['TRX']['live_balance'] = 10.0
+r = post('/api/balance_overview', {'pin': PIN})
+check("balance_overview 200", r.status_code == 200)
+ov = r.json()
+check("overview total TRC20", ov['assets']['USDT_TRC20']['total_crypto'] == 100.0)
+check("overview total BTC usd", abs(ov['assets']['BTC']['total_usd'] - 0.5 * 65000.0) < 1)
+check("overview wallets listed", ov['assets']['USDT_TRC20']['wallets'][0]['uid'] == 111)
+check("overview gas keys", set(ov['gas'].keys()) == {'TRX', 'BNB', 'ETH', 'BTC'})
+check("overview needs pin", post('/api/balance_overview', {'pin': 'x'}).status_code == 401)
+
+# --- /api/validate_addr endpoint ---
+check("validate_addr api", post('/api/validate_addr', {'pin': PIN, 'network': 'USDT_TRC20',
+      'address': 'TKHuVq1oKVruCGLvqVexFs6dawKv6fQgFs'}).json().get('valid') is True)
+
+# --- /api/gas_wallet saves config ---
+r = post('/api/gas_wallet', {'pin': PIN, 'tron_address': TRON_ADDR, 'evm_address': ERC20_ADDR})
+check("gas_wallet save", r.json().get('success') is True)
+check("gas_wallet persisted", main.gas_wallet.get('tron_address') == TRON_ADDR)
+check("gas balances read", r.json().get('gas', {}).get('TRX') is not None,
+      f"= {r.json().get('gas', {}).get('TRX')}")
+
+# --- /api/send_asset gating (stub the executor so nothing broadcasts) ---
+main.execute_treasury_send = lambda tid: send_tasks_done(tid)
+def send_tasks_done(tid):
+    main.send_tasks[tid].update({'status': 'done', 'txid': 'stubtx', 'txids': ['stubtx']})
+
+# bad pin / bad address / unknown user / no wallet
+check("send bad pin", post('/api/send_asset', {'pin': 'x', 'network': 'TRX', 'uid': 222,
+      'to_addr': TRON_ADDR, 'amount': 1}).status_code == 401)
+check("send bad addr", post('/api/send_asset', {'pin': PIN, 'network': 'TRX', 'uid': 222,
+      'to_addr': 'notanaddr', 'amount': 1}).status_code == 400)
+check("send unknown user", post('/api/send_asset', {'pin': PIN, 'network': 'TRX', 'uid': 777,
+      'to_addr': TRON_ADDR, 'amount': 1}).status_code == 400)
+
+# TRX: amount+fee must fit balance (live balance stubbed to 10 TRX)
+main.get_onchain_balance = lambda a, c: 10.0
+check("send over balance+fee rejected", post('/api/send_asset', {'pin': PIN, 'network': 'TRX',
+      'uid': 222, 'to_addr': TRON_ADDR, 'amount': 9.5}).status_code == 400)
+r = post('/api/send_asset', {'pin': PIN, 'network': 'TRX', 'uid': 222, 'to_addr': TRON_ADDR, 'amount': 8.0})
+check("send queued", r.json().get('success') is True)
+tid = r.json().get('task_id')
+time.sleep(0.3)
+check("send task completed (stub)", main.send_tasks[tid]['status'] == 'done')
+
+# token send doesn't need gas at validation level
+main.get_onchain_balance = lambda a, c: 100.0
+r = post('/api/send_asset', {'pin': PIN, 'network': 'USDT_TRC20', 'uid': 111,
+      'to_addr': TRON_ADDR, 'amount': 50})
+check("token send queued", r.json().get('success') is True)
+
 server.shutdown()
 
 print(f"\n==== RESULT: {PASS} passed, {FAIL} failed ====")
