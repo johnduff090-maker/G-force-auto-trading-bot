@@ -798,6 +798,13 @@
                                 <label>Amount <span id="sndMax" style="color:var(--primary-hover); cursor:pointer; font-size:0.8em;">MAX</span></label>
                                 <input id="sndAmt" type="number" min="0" step="any" placeholder="0.00" oninput="onSendInput()">
                             </div>
+                            <div class="form-group" id="feeModeRow" style="display:none;">
+                                <label>Fee mode</label>
+                                <select id="sndFeeMode" onchange="onSendInput()">
+                                    <option value="trx">⚡ TRX / staked energy (cheapest)</option>
+                                    <option value="usdt">💵 Pay fee in USDT (GasFree — no TRX needed)</option>
+                                </select>
+                            </div>
                             <div class="glass" style="padding:12px; margin-bottom:12px; background:rgba(0,0,0,0.25);">
                                 <div class="fee-line" style="border:none;"><span>Network fee</span><span id="sndFee" class="fee-ok">—</span></div>
                                 <div class="fee-line"><span>Gas wallet</span><span id="sndGas">—</span></div>
@@ -976,10 +983,7 @@
                 ? `<div class="addr-pill" style="border-color:var(--primary-hover);"><span style="overflow-wrap:anywhere;"><b style="color:var(--primary-hover);">⛽ Your gas wallet — send ${gasCoin} here to load gas</b><br>${gAddr}</span>
                    <button class="btn-outline" style="padding:4px 10px; flex-shrink:0;" onclick="navigator.clipboard.writeText('${gAddr}')">Copy</button></div>`
                 : '';
-            document.getElementById('rcvList').innerHTML = gasCard + (a.wallets.map(w =>
-                `<div class="addr-pill"><span style="overflow-wrap:anywhere;">${w.address}<br><small style="color:#888;">${w.name} · ${fmtCrypto(w.balance, net)}</small></span>
-                 <button class="btn-outline" style="padding:4px 10px; flex-shrink:0;" onclick="navigator.clipboard.writeText('${w.address}')">Copy</button></div>`
-            ).join('') || '<p style="color:#888;">No user wallets on this network yet.</p>');
+            document.getElementById('rcvList').innerHTML = gasCard || '<p style="color:#888;">No gas wallet configured.</p>';
             showBalView('balAsset');
             loadAssetHistory(net);
         }
@@ -1016,9 +1020,19 @@
             document.getElementById('sndFee').textContent = '—';
             document.getElementById('sndGas').textContent = '—';
             document.getElementById('sndAddrMsg').textContent = '';
-            document.getElementById('sndMax').onclick = () => {
+            const fm = document.getElementById('feeModeRow');
+            fm.style.display = currentAsset === 'USDT_TRC20' ? '' : 'none';
+            document.getElementById('sndFeeMode').value = 'trx';
+            document.getElementById('sndMax').onclick = async () => {
                 const w = fundedWallets[sel.selectedIndex];
-                if (w) { document.getElementById('sndAmt').value = w.balance; onSendInput(); }
+                if (!w) return;
+                let max = w.balance;
+                if (document.getElementById('sndFeeMode').value === 'usdt') {
+                    const { data: e } = await api('/api/estimate_fee', { network: currentAsset, uid: w.uid, fee_mode: 'usdt' });
+                    if (e && !e.error) max = Math.max(0, w.balance - e.fee_crypto);
+                }
+                document.getElementById('sndAmt').value = max;
+                onSendInput();
             };
             lastFee = null;
             showBalView('balSend');
@@ -1031,11 +1045,19 @@
                 const { data } = await api('/api/validate_addr', { network: currentAsset, address: to });
                 msg.innerHTML = data.valid ? '<span class="fee-ok">✓ Valid address</span>' : '<span class="fee-bad">✗ Invalid address for this network</span>';
             } else msg.textContent = '';
-            const { data: est } = await api('/api/estimate_fee', { network: currentAsset, to_addr: to || undefined });
-            if (est && !est.error) {
+            const w = fundedWallets[document.getElementById('sndFrom').selectedIndex];
+            const fee_mode = document.getElementById('sndFeeMode').value;
+            const { data: est } = await api('/api/estimate_fee', { network: currentAsset, to_addr: to || undefined, uid: w ? w.uid : undefined, fee_mode });
+            if (est && est.error) {
+                lastFee = null;
+                document.getElementById('sndFee').innerHTML = `<span class="fee-bad">${est.error}</span>`;
+                document.getElementById('sndGas').textContent = '—';
+            } else if (est) {
                 lastFee = est;
                 document.getElementById('sndFee').innerHTML = `~${fmtCrypto(est.fee_crypto, 'TRX')} ${est.gas_asset} <span style="color:#888;">($${Number(est.fee_usd).toFixed(2)})</span>`;
-                if (est.gas_needed_crypto > 0) {
+                if (est.gasfree) {
+                    document.getElementById('sndGas').innerHTML = `<span class="fee-ok">GasFree relayer · ${est.note || ''}</span>`;
+                } else if (est.gas_needed_crypto > 0) {
                     const okGas = est.gas_ok;
                     document.getElementById('sndGas').innerHTML = `<span class="${okGas ? 'fee-ok' : 'fee-bad'}">${est.gas_balance === null ? 'not configured' : fmtCrypto(est.gas_balance, 'TRX') + ' ' + est.gas_asset} ${okGas ? '✓' : '· insufficient — top up gas wallet'}</span>`;
                 } else {
@@ -1053,11 +1075,13 @@
             const { data: v } = await api('/api/validate_addr', { network: currentAsset, address: to });
             if (!v.valid) return alert('Invalid destination address');
             const feeTxt = lastFee && !lastFee.error ? `~${fmtCrypto(lastFee.fee_crypto, 'TRX')} ${lastFee.gas_asset} ($${Number(lastFee.fee_usd).toFixed(2)})` : 'unknown';
+            const modeTxt = (currentAsset === 'USDT_TRC20' && document.getElementById('sndFeeMode').value === 'usdt') ? 'USDT (GasFree)' : 'TRX/energy';
             document.getElementById('sendReviewBody').innerHTML =
                 `<div class="fee-line"><span>From</span><span>${w.name}</span></div>
                  <div class="fee-line"><span>From address</span><span style="overflow-wrap:anywhere;">${w.address}</span></div>
                  <div class="fee-line"><span>To</span><span style="overflow-wrap:anywhere;">${to}</span></div>
                  <div class="fee-line"><span>Amount</span><span>${fmtCrypto(amt, currentAsset)} ${ASSET_META[currentAsset].label}</span></div>
+                 <div class="fee-line"><span>Fee mode</span><span>${modeTxt}</span></div>
                  <div class="fee-line"><span>Network fee</span><span>${feeTxt}</span></div>`;
             document.getElementById('sendProgress').style.display = 'none';
             document.getElementById('sendGoBtn').disabled = false;
@@ -1071,7 +1095,8 @@
             document.getElementById('sendGoBtn').disabled = true;
             document.getElementById('sendProgress').style.display = '';
             document.getElementById('sendProgress').textContent = 'Broadcasting…';
-            const { ok, data } = await api('/api/send_asset', { network: currentAsset, uid: w.uid, to_addr: to, amount: amt });
+            const { ok, data } = await api('/api/send_asset', { network: currentAsset, uid: w.uid, to_addr: to, amount: amt,
+                fee_mode: document.getElementById('sndFeeMode').value });
             if (!ok || !data.success) {
                 document.getElementById('sendProgress').innerHTML = `<span class="fee-bad">❌ ${data.error || 'Send failed'}</span>`;
                 return;

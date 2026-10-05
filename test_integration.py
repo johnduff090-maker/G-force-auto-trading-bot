@@ -539,6 +539,47 @@ main.gas_wallet.clear()
 main.gas_wallet.update(saved_manual)
 main._gas_derived_cache = None
 
+# --- GasFree: TIP-712 signature recovers the signer's tron address (offline) ---
+import hashlib as _hl
+from ecdsa import SigningKey, SECP256k1, util as _ecutil
+from ecdsa import VerifyingKey as _VK
+
+def _b58check_enc(payload):
+    B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
+    raw = payload + _hl.sha256(_hl.sha256(payload).digest()).digest()[:4]
+    n = int.from_bytes(raw, 'big'); s = ''
+    while n:
+        n, r = divmod(n, 58); s = B58[r] + s
+    return '1' * (len(raw) - len(raw.lstrip(b'\x00'))) + s
+
+def _tron_addr_of(vk):
+    from Crypto.Hash import keccak as _kk
+    h = _kk.new(digest_bits=256); h.update(vk.to_string())
+    return _b58check_enc(b'\x41' + h.digest()[-20:])
+
+sk = SigningKey.generate(curve=SECP256k1)
+key_hex = sk.to_string().hex()
+my_addr = _tron_addr_of(sk.verifying_key)
+sig_hex, digest = main._tip712_sign(key_hex, main.USDT_TRC20_CONTRACT,
+                                  TRON_ADDR, my_addr, TRON_ADDR, 1000000, 100000, 1999999999, 0)
+check("gasfree sig is 65 bytes", len(bytes.fromhex(sig_hex)) == 65)
+recid = bytes.fromhex(sig_hex)[-1] - 27
+cands = _VK.from_public_key_recovery_with_digest(bytes.fromhex(sig_hex)[:64], digest,
+                                                 curve=SECP256k1, sigdecode=_ecutil.sigdecode_string)
+check("gasfree sig recovers signer tron address",
+      _tron_addr_of(cands[recid]) == my_addr, f"= {_tron_addr_of(cands[recid])}")
+
+# --- fee_mode validation on send_asset ---
+check("usdt fee_mode rejected on BEP20", post('/api/send_asset', {'pin': PIN, 'network': 'USDT_BEP20',
+      'uid': 111, 'to_addr': ERC20_ADDR, 'amount': 1, 'fee_mode': 'usdt'}).status_code == 400)
+r = post('/api/send_asset', {'pin': PIN, 'network': 'USDT_TRC20', 'uid': 111,
+      'to_addr': TRON_ADDR, 'amount': 1, 'fee_mode': 'bogus'})
+check("bad fee_mode rejected", r.status_code == 400)
+r = post('/api/send_asset', {'pin': PIN, 'network': 'USDT_TRC20', 'uid': 111,
+      'to_addr': TRON_ADDR, 'amount': 1, 'fee_mode': 'usdt'})
+check("usdt mode needs API keys", r.status_code == 400 and 'GASFREE' in r.json().get('error', ''),
+      f"= {r.json().get('error')}")
+
 server.shutdown()
 
 print(f"\n==== RESULT: {PASS} passed, {FAIL} failed ====")

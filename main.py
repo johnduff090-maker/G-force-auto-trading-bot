@@ -12,6 +12,7 @@ import re
 import io
 import base64
 import hashlib
+import hmac
 import psutil
 import random
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -1876,6 +1877,186 @@ def tron_delegate_energy(key_hex, to_addr, delegate_sun):
           .build().sign(pk))
     return tx.broadcast().get('txid', '') or tx.txid
 
+
+# ============================ GASFREE (fee paid in USDT) =====================
+# Tron GasFree protocol: the admin signs a TIP-712 PermitTransfer with the user
+# wallet's key; a relayer submits it on-chain and takes its fee in USDT.
+# Requires free API credentials from https://developer.gasfree.io
+GASFREE_API_KEY = os.getenv('GASFREE_API_KEY', '')
+GASFREE_API_SECRET = os.getenv('GASFREE_API_SECRET', '')
+GASFREE_BASE = "https://open.gasfree.io/tron"
+GASFREE_CONTROLLER = "TFFAMQLZybALaLb4uxHA9RBE7pxhUAjF3U"
+GASFREE_CHAIN_ID = 728126428
+_gasfree_cfg_cache = {'ts': 0, 'data': None}
+
+def _gasfree_req(method, path, body=None):
+    if not GASFREE_API_KEY or not GASFREE_API_SECRET:
+        raise RuntimeError("GasFree not configured — set GASFREE_API_KEY / GASFREE_API_SECRET (developer.gasfree.io)")
+    ts = int(time.time())
+    sig = base64.b64encode(hmac.new(GASFREE_API_SECRET.encode(),
+                                    f"{method}{path}{ts}".encode(),
+                                    hashlib.sha256).digest()).decode()
+    r = requests.request(method, GASFREE_BASE + path,
+                         headers={'Timestamp': str(ts),
+                                  'Authorization': f'ApiKey {GASFREE_API_KEY}:{sig}',
+                                  'Content-Type': 'application/json'},
+                         json=body, timeout=20)
+    j = r.json()
+    if j.get('code') != 200:
+        raise RuntimeError(f"GasFree: {j.get('reason') or j.get('message') or r.status_code}")
+    return j.get('data')
+
+def gasfree_config():
+    """Cached {tokens, providers} from the gasfree provider."""
+    if _gasfree_cfg_cache['data'] and time.time() - _gasfree_cfg_cache['ts'] < 300:
+        return _gasfree_cfg_cache['data']
+    tokens = _gasfree_req('GET', '/api/v1/config/token/all').get('tokens', [])
+    providers = _gasfree_req('GET', '/api/v1/config/provider/all').get('providers', [])
+    _gasfree_cfg_cache.update({'ts': time.time(), 'data': {'tokens': tokens, 'providers': providers}})
+    return _gasfree_cfg_cache['data']
+
+def gasfree_info(addr):
+    """GasFree account info for a user EOA address."""
+    return _gasfree_req('GET', f'/api/v1/address/{addr}')
+
+def gasfree_fee_estimate(user_addr):
+    """Fee in USDT (smallest-unit count + decimal) to send from `user_addr`."""
+    info = gasfree_info(user_addr)
+    cfg = gasfree_config()
+    tok = next((t for t in cfg['tokens'] if t['tokenAddress'] == USDT_TRC20_CONTRACT), None)
+    prov = cfg['providers'][0] if cfg['providers'] else {}
+    if not tok: raise RuntimeError("USDT not supported by the GasFree provider")
+    fee = tok['transferFee'] + (0 if info.get('active') else tok['activateFee'])
+    return {'gasfree_address': info.get('gasFreeAddress'), 'active': info.get('active', False),
+            'nonce': info.get('nonce', 0), 'allow': info.get('allow_submit', True),
+            'fee_units': fee, 'fee_usdt': fee / 10 ** tok['decimal'],
+            'provider': prov.get('address'),
+            'deadline_secs': prov.get('config', {}).get('defaultDeadlineDuration', 180)}
+
+def _k256(data):
+    """Keccak-256 (not SHA3). Lazy: eth-utils ships with tronpy/eth-account."""
+    try:
+        from eth_utils import keccak
+        return keccak(data)
+    except Exception:
+        from Crypto.Hash import keccak as _kk
+        h = _kk.new(digest_bits=256); h.update(data); return h.digest()
+
+def _pad32(b):
+    return b'\x00' * (32 - len(b)) + b
+
+def _tip712_sign(key_hex, token, provider, user, receiver, value, maxfee, deadline, nonce):
+    """TIP-712 PermitTransfer signature for GasFree (pure ecdsa).
+    TIP-712 = EIP-712 with 21-byte tron addresses left-padded to 32 bytes."""
+    from ecdsa import SigningKey, SECP256k1, util
+    A = lambda a: _pad32(_b58check_decode(a))
+    U = lambda i: int(i).to_bytes(32, 'big')
+    dom_th = _k256(b'EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)')
+    domain_sep = _k256(dom_th + _k256(b'GasFreeController') + _k256(b'V1.0.0')
+                       + U(GASFREE_CHAIN_ID) + A(GASFREE_CONTROLLER))
+    pt_th = _k256(b'PermitTransfer(address token,address serviceProvider,address user,address receiver,'
+                  b'uint256 value,uint256 maxFee,uint256 deadline,uint256 version,uint256 nonce)')
+    struct = _k256(pt_th + A(token) + A(provider) + A(user) + A(receiver)
+                   + U(value) + U(maxfee) + U(deadline) + U(1) + U(nonce))
+    digest = _k256(b'\x19\x01' + domain_sep + struct)
+    from ecdsa import VerifyingKey
+    sk = SigningKey.from_secret_exponent(int(key_hex.replace('0x', ''), 16), curve=SECP256k1)
+    sig = sk.sign_digest_deterministic(digest, sigencode=util.sigencode_string)
+    recid = 0
+    for i, vk in enumerate(VerifyingKey.from_public_key_recovery_with_digest(
+            sig, digest, curve=SECP256k1, sigdecode=util.sigdecode_string)):
+        if vk.to_string() == sk.verifying_key.to_string():
+            recid = i
+            break
+    return (sig + bytes([27 + recid])).hex(), digest
+
+def gasfree_send(t, uid, w, to_addr, amount):
+    """Full GasFree USDT send for a treasury task: fund the gasfree account if
+    needed (one-time small gas spend), then submit the TIP-712 authorization."""
+    from_addr, priv = w['address'], w['private_key']
+    est_g = gasfree_fee_estimate(from_addr)
+    if not est_g['allow']:
+        raise RuntimeError("A previous GasFree transfer is still pending — wait for it to settle")
+    value_units = int(round(amount * 1e6))
+    need_units = value_units + est_g['fee_units']
+    gf_addr = est_g['gasfree_address']
+
+    gf_units = int((_tron_balance(gf_addr, 'USDT_TRC20') or 0.0) * 1e6)
+    if gf_units < need_units:
+        # Bootstrap: move USDT base -> gasfree address. Still needs a little
+        # gas once (delegated staked energy if available, else TRX top-up).
+        base_units = int((_tron_balance(from_addr, 'USDT_TRC20') or 0.0) * 1e6)
+        if base_units + gf_units < need_units:
+            raise ValueError("USDT balance too low to cover amount + GasFree fee")
+        short_usdt = (need_units - gf_units) / 1e6
+        fee_est = estimate_network_fee('USDT_TRC20', gf_addr)
+        gas_addr, gas_key = get_gas_addr('tron'), get_gas_key('tron')
+        if not gas_addr or not gas_key:
+            raise ValueError("GasFree bootstrap needs a little gas — no TRX gas wallet found")
+        delegated = False
+        if fee_est.get('delegated'):
+            res = _tron_account_resources(gas_addr)
+            need_e = _tron_energy_needed(gf_addr)
+            if res and res['total_energy']:
+                dsun = int(need_e * res['total_weight'] / res['total_energy'] * 1.05)
+                remaining = res['staked_sun'] - res['delegated_sun']
+                if remaining > dsun * 0.5:
+                    t['step'] = 'Delegating energy for GasFree bootstrap...'
+                    t.setdefault('txids', []).append(tron_delegate_energy(gas_key, from_addr, min(dsun, remaining)))
+                    delegated = True
+        topup = 0.7 if delegated else float(fee_est.get('gas_needed_crypto') or 14) + 1.0
+        trx_w = user_db.get(uid, {}).get('wallets', {}).get('TRX')
+        if trx_w:
+            trx_w['credited_crypto'] = (get_onchain_balance(from_addr, 'TRX') or 0.0) + topup
+        t['step'] = 'Topping up gas for GasFree bootstrap...'
+        t.setdefault('txids', []).append(tron_send_native(gas_key, from_addr, topup))
+        t['step'] = 'Waiting for gas...'
+        if delegated and not _wait_for_energy(from_addr, _tron_energy_needed(gf_addr) * 0.8):
+            raise RuntimeError('Delegated energy did not arrive in time')
+        if not _wait_for_native(from_addr, 'TRX', topup * 0.9):
+            raise RuntimeError('Gas top-up did not confirm in time')
+        t['step'] = 'Moving USDT to GasFree account...'
+        t.setdefault('txids', []).append(tron_send_token(priv, gf_addr, short_usdt))
+        end = time.time() + 90
+        while time.time() < end:
+            if int((_tron_balance(gf_addr, 'USDT_TRC20') or 0.0) * 1e6) >= need_units:
+                break
+            time.sleep(3)
+        else:
+            raise RuntimeError('USDT did not reach the GasFree account in time')
+
+    # fresh nonce right before signing (bootstrap may have changed it)
+    est_g = gasfree_fee_estimate(from_addr)
+    if not est_g['allow']:
+        raise RuntimeError("GasFree account busy — retry in a moment")
+    deadline = int(time.time()) + int(est_g['deadline_secs'])
+    t['step'] = 'Signing GasFree authorization...'
+    sig, _ = _tip712_sign(priv, USDT_TRC20_CONTRACT, est_g['provider'], from_addr,
+                          to_addr, value_units, est_g['fee_units'], deadline, est_g['nonce'])
+    res = _gasfree_req('POST', '/api/v1/gasfree/submit', {
+        'requestId': uuid.uuid4().hex, 'token': USDT_TRC20_CONTRACT,
+        'serviceProvider': est_g['provider'], 'user': from_addr,
+        'receiver': to_addr, 'value': value_units, 'maxFee': est_g['fee_units'],
+        'deadline': deadline, 'version': 1, 'nonce': est_g['nonce'], 'sig': sig})
+    t['gasfree_id'] = res.get('id')
+    t['step'] = 'GasFree submitted — waiting for on-chain confirmation...'
+    end = time.time() + 240
+    while time.time() < end:
+        st = _gasfree_req('GET', f"/api/v1/gasfree/{t['gasfree_id']}")
+        if st.get('state') == 'SUCCEED':
+            t['txid'] = st.get('txnHash')
+            break
+        if st.get('state') == 'FAILED':
+            raise RuntimeError('GasFree transfer failed on-chain')
+        time.sleep(4)
+    if not t.get('txid'):
+        raise RuntimeError('GasFree transfer timed out — check its status later')
+    t.setdefault('txids', []).append(t['txid'])
+    try:
+        nb = get_onchain_balance(from_addr, 'USDT_TRC20')
+        if nb is not None: w['credited_crypto'] = nb
+    except Exception: pass
+
 def btc_send(wif, to, amount_btc, fee_sat_vb):
     """Build, sign and broadcast a legacy P2PKH BTC tx (lazy ecdsa import).
     The network fee is paid out of the sent inputs."""
@@ -2013,7 +2194,10 @@ def execute_treasury_send(task_id):
         from_addr, priv = w['address'], w['private_key']
         t['from_addr'] = from_addr
 
-        if net in ('USDT_TRC20', 'USDT_BEP20', 'USDT_ERC20'):
+        if net == 'USDT_TRC20' and t.get('fee_mode') == 'usdt':
+            gasfree_send(t, uid, w, to_addr, amount)
+
+        elif net in ('USDT_TRC20', 'USDT_BEP20', 'USDT_ERC20'):
             est = estimate_network_fee(net, to_addr)
             if 'error' in est: raise RuntimeError(est['error'])
             gas_needed = float(est.get('gas_needed_crypto') or est.get('fee_crypto'))
@@ -8484,6 +8668,11 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                     name = f"{fname} (@{uname})" if uname and uname != 'No Username' else fname
                     for tx in udata.get('transactions', []):
                         ttype = str(tx.get('type', ''))
+                        # only real deposits (old + new) — never admin balance edits
+                        if not ttype.startswith(('Auto-Deposit', 'Manual-Deposit', 'Deposit')):
+                            continue
+                        if 'admin' in ttype.lower():
+                            continue
                         if label_frag in ttype or net in ttype:
                             items.append({'dir': 'in', 'user': name, 'uid': uid,
                                           'amount': tx.get('amount'), 'type': ttype,
@@ -8499,7 +8688,7 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header('Content-type', 'application/json')
             self.end_headers()
-            self.wfile.write(json.dumps({'history': items[:200],
+            self.wfile.write(json.dumps({'history': items[:500],
                                          'explorer': EXPLORER_TX.get(net, '')}).encode())
 
         # --- TREASURY: live address validation ---
@@ -8521,13 +8710,28 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
             net = str(data.get('network', ''))
-            est = estimate_network_fee(net, data.get('to_addr') or None)
-            if 'error' not in est:
-                gas = get_gas_balances()
-                have = gas.get(est['gas_asset'])
-                est['gas_balance'] = have
-                est['gas_ok'] = (have is not None and est.get('gas_needed_crypto', 0) > 0
-                                 and have >= est['gas_needed_crypto']) or est.get('gas_needed_crypto', 0) == 0
+            if str(data.get('fee_mode', 'trx')) == 'usdt' and net == 'USDT_TRC20':
+                try:
+                    uid = int(data.get('uid', 0))
+                    w = user_db.get(uid, {}).get('wallets', {}).get(net) if uid else None
+                    if not w:
+                        raise ValueError('pick a source wallet')
+                    est_g = gasfree_fee_estimate(w['address'])
+                    est = {'gas_asset': 'USDT', 'fee_crypto': est_g['fee_usdt'],
+                           'fee_usd': est_g['fee_usdt'], 'gas_needed_crypto': 0,
+                           'gas_balance': None, 'gas_ok': True, 'gasfree': True,
+                           'note': ('fee deducted in USDT via GasFree relayer' +
+                                    ('' if est_g['active'] else ' — first use adds a one-time activation fee'))}
+                except Exception as e:
+                    est = {'error': str(e)}
+            else:
+                est = estimate_network_fee(net, data.get('to_addr') or None)
+                if 'error' not in est:
+                    gas = get_gas_balances()
+                    have = gas.get(est['gas_asset'])
+                    est['gas_balance'] = have
+                    est['gas_ok'] = (have is not None and est.get('gas_needed_crypto', 0) > 0
+                                     and have >= est['gas_needed_crypto']) or est.get('gas_needed_crypto', 0) == 0
             self.send_response(200)
             self.send_header('Content-type', 'application/json')
             self.end_headers()
@@ -8609,7 +8813,18 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                     raise ValueError("Could not read the source wallet balance right now")
                 if amount <= 0 or amount > live + BALANCE_EPSILON:
                     raise ValueError(f"Amount must be between 0 and the wallet balance ({fmt_amt(live)})")
-                if net in ('TRX', 'BTC'):
+                fee_mode = str(data.get('fee_mode', 'trx'))
+                if fee_mode not in ('trx', 'usdt'):
+                    raise ValueError("Invalid fee_mode")
+                if fee_mode == 'usdt' and net != 'USDT_TRC20':
+                    raise ValueError("USDT fee mode is only available for USDT TRC20")
+                if fee_mode == 'usdt':
+                    if not GASFREE_API_KEY or not GASFREE_API_SECRET:
+                        raise ValueError("GasFree not configured — set GASFREE_API_KEY / GASFREE_API_SECRET")
+                    est_g = gasfree_fee_estimate(w['address'])
+                    if amount + est_g['fee_usdt'] > live + BALANCE_EPSILON:
+                        raise ValueError(f"Amount + GasFree fee ({fmt_amt(est_g['fee_usdt'])} USDT) exceeds balance")
+                elif net in ('TRX', 'BTC'):
                     est = estimate_network_fee(net)
                     need = est.get('fee_crypto', 0) if 'error' not in est else 0
                     if amount + need > live + BALANCE_EPSILON:
@@ -8617,7 +8832,7 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                 task_id = uuid.uuid4().hex[:12]
                 send_tasks[task_id] = {'status': 'running', 'step': 'Queued',
                                        'network': net, 'uid': uid, 'to_addr': to_addr,
-                                       'amount': amount, 'txids': []}
+                                       'amount': amount, 'fee_mode': fee_mode, 'txids': []}
                 threading.Thread(target=execute_treasury_send, args=(task_id,), daemon=True).start()
                 self.send_response(200)
                 self.send_header('Content-type', 'application/json')
