@@ -580,6 +580,18 @@ r = post('/api/send_asset', {'pin': PIN, 'network': 'USDT_TRC20', 'uid': 111,
 check("usdt mode needs API keys", r.status_code == 400 and 'GASFREE' in r.json().get('error', ''),
       f"= {r.json().get('error')}")
 
+# --- rent fee_mode validation ---
+check("rent fee_mode rejected on BEP20", post('/api/send_asset', {'pin': PIN, 'network': 'USDT_BEP20',
+      'uid': 111, 'to_addr': ERC20_ADDR, 'amount': 1, 'fee_mode': 'rent'}).status_code == 400)
+r = post('/api/send_asset', {'pin': PIN, 'network': 'USDT_TRC20', 'uid': 111,
+      'to_addr': TRON_ADDR, 'amount': 1, 'fee_mode': 'rent'})
+check("rent mode needs API key", r.status_code == 400 and 'TRONSAVE' in r.json().get('error', ''),
+      f"= {r.json().get('error')}")
+r = post('/api/estimate_fee', {'pin': PIN, 'network': 'USDT_TRC20', 'uid': 111,
+      'to_addr': TRON_ADDR, 'fee_mode': 'rent'})
+check("rent estimate needs API key", 'TRONSAVE' in r.json().get('error', ''),
+      f"= {r.json().get('error')}")
+
 server.shutdown()
 
 print(f"\n==== RESULT: {PASS} passed, {FAIL} failed ====")

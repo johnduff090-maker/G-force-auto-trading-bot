@@ -802,6 +802,7 @@
                                 <label>Fee mode</label>
                                 <select id="sndFeeMode" onchange="onSendInput()">
                                     <option value="trx">⚡ TRX / staked energy (cheapest)</option>
+                                    <option value="rent">⚡💰 Rent energy (~4 TRX via TronSave)</option>
                                     <option value="usdt">💵 Pay fee in USDT (GasFree — no TRX needed)</option>
                                 </select>
                             </div>
@@ -1057,6 +1058,8 @@
                 document.getElementById('sndFee').innerHTML = `~${fmtCrypto(est.fee_crypto, 'TRX')} ${est.gas_asset} <span style="color:#888;">($${Number(est.fee_usd).toFixed(2)})</span>`;
                 if (est.gasfree) {
                     document.getElementById('sndGas').innerHTML = `<span class="fee-ok">GasFree relayer · ${est.note || ''}</span>`;
+                } else if (est.rented) {
+                    document.getElementById('sndGas').innerHTML = `<span class="${est.gas_ok ? 'fee-ok' : 'fee-bad'}">TronSave rental · ${est.note || ''}${est.gas_ok ? '' : ' — gas wallet needs 0.7 TRX for bandwidth'}</span>`;
                 } else if (est.gas_needed_crypto > 0) {
                     const okGas = est.gas_ok;
                     document.getElementById('sndGas').innerHTML = `<span class="${okGas ? 'fee-ok' : 'fee-bad'}">${est.gas_balance === null ? 'not configured' : fmtCrypto(est.gas_balance, 'TRX') + ' ' + est.gas_asset} ${okGas ? '✓' : '· insufficient — top up gas wallet'}</span>`;
@@ -1075,7 +1078,9 @@
             const { data: v } = await api('/api/validate_addr', { network: currentAsset, address: to });
             if (!v.valid) return alert('Invalid destination address');
             const feeTxt = lastFee && !lastFee.error ? `~${fmtCrypto(lastFee.fee_crypto, 'TRX')} ${lastFee.gas_asset} ($${Number(lastFee.fee_usd).toFixed(2)})` : 'unknown';
-            const modeTxt = (currentAsset === 'USDT_TRC20' && document.getElementById('sndFeeMode').value === 'usdt') ? 'USDT (GasFree)' : 'TRX/energy';
+            const fmSel = document.getElementById('sndFeeMode').value;
+            const modeTxt = currentAsset !== 'USDT_TRC20' ? 'Network gas' :
+                { trx: 'TRX / staked energy', rent: 'Rented energy (TronSave)', usdt: 'USDT (GasFree)' }[fmSel] || fmSel;
             document.getElementById('sendReviewBody').innerHTML =
                 `<div class="fee-line"><span>From</span><span>${w.name}</span></div>
                  <div class="fee-line"><span>From address</span><span style="overflow-wrap:anywhere;">${w.address}</span></div>

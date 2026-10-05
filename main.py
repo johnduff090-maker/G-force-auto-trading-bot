@@ -1884,7 +1884,8 @@ def tron_delegate_energy(key_hex, to_addr, delegate_sun):
 # Requires free API credentials from https://developer.gasfree.io
 GASFREE_API_KEY = os.getenv('GASFREE_API_KEY', '')
 GASFREE_API_SECRET = os.getenv('GASFREE_API_SECRET', '')
-GASFREE_BASE = "https://open.gasfree.io/tron"
+GASFREE_BASE = "https://open.gasfree.io"
+GASFREE_PREFIX = "/tron"   # '/nile' on testnet — part of the signed path
 GASFREE_CONTROLLER = "TFFAMQLZybALaLb4uxHA9RBE7pxhUAjF3U"
 GASFREE_CHAIN_ID = 728126428
 _gasfree_cfg_cache = {'ts': 0, 'data': None}
@@ -1893,15 +1894,19 @@ def _gasfree_req(method, path, body=None):
     if not GASFREE_API_KEY or not GASFREE_API_SECRET:
         raise RuntimeError("GasFree not configured — set GASFREE_API_KEY / GASFREE_API_SECRET (developer.gasfree.io)")
     ts = int(time.time())
+    path_full = GASFREE_PREFIX + path
     sig = base64.b64encode(hmac.new(GASFREE_API_SECRET.encode(),
-                                    f"{method}{path}{ts}".encode(),
+                                    f"{method}{path_full}{ts}".encode(),
                                     hashlib.sha256).digest()).decode()
-    r = requests.request(method, GASFREE_BASE + path,
+    r = requests.request(method, GASFREE_BASE + path_full,
                          headers={'Timestamp': str(ts),
                                   'Authorization': f'ApiKey {GASFREE_API_KEY}:{sig}',
                                   'Content-Type': 'application/json'},
                          json=body, timeout=20)
-    j = r.json()
+    try:
+        j = r.json()
+    except Exception:
+        raise RuntimeError(f"GasFree API error (HTTP {r.status_code}): {(r.text or 'empty response')[:200]}")
     if j.get('code') != 200:
         raise RuntimeError(f"GasFree: {j.get('reason') or j.get('message') or r.status_code}")
     return j.get('data')
@@ -2056,6 +2061,66 @@ def gasfree_send(t, uid, w, to_addr, amount):
         nb = get_onchain_balance(from_addr, 'USDT_TRC20')
         if nb is not None: w['credited_crypto'] = nb
     except Exception: pass
+
+# ========================= TRONSAVE (rented energy) ========================
+# Middle path between staking (big lockup) and burning TRX: rent ~65k energy
+# for ~1h at ~70-80% below burn cost. Orders are paid from a prefunded
+# TronSave internal account (deposit TRX there once at tronsave.io).
+TRONSAVE_API_KEY = os.getenv('TRONSAVE_API_KEY', '')
+TRONSAVE_BASE = "https://api.tronsave.io"
+TRONSAVE_RENT_SECS = 3600   # 1h — covers the send plus margin
+
+def tronsave_estimate(receiver, energy):
+    """TRX cost to rent `energy` delegated to `receiver` for ~1h."""
+    r = requests.post(TRONSAVE_BASE + '/v2/estimate-buy-resource', json={
+        'resourceType': 'ENERGY', 'receiver': receiver,
+        'resourceAmount': int(energy), 'durationSec': TRONSAVE_RENT_SECS,
+        'unitPrice': 'MEDIUM', 'options': {'allowPartialFill': True}}, timeout=20)
+    j = r.json()
+    if j.get('error') or not isinstance(j.get('data'), dict):
+        raise RuntimeError(f"TronSave estimate: {j.get('message') or r.status_code}")
+    d = j['data']
+    if d.get('availableResource', 0) < energy * 0.9:
+        raise RuntimeError('TronSave market has insufficient energy right now — use TRX mode')
+    return {'trx': d['estimateTrx'] / 1e6}
+
+def tronsave_order(receiver, energy, requester):
+    """Rent `energy` for `receiver`, paid from the prefunded TronSave account."""
+    if not TRONSAVE_API_KEY:
+        raise RuntimeError("TronSave not configured — set TRONSAVE_API_KEY (tronsave.io → Account → API key)")
+    r = requests.post(TRONSAVE_BASE + '/v2/buy-resource',
+                      headers={'apikey': TRONSAVE_API_KEY, 'Content-Type': 'application/json'},
+                      json={'resourceType': 'ENERGY', 'receiver': receiver,
+                            'requester': requester,
+                            'resourceAmount': int(energy), 'durationSec': TRONSAVE_RENT_SECS,
+                            'unitPrice': 'MEDIUM',
+                            'options': {'allowPartialFill': True,
+                                        'onlyCreateWhenFulfilled': True,
+                                        'preventDuplicateIncompleteOrders': True}},
+                      timeout=30)
+    j = r.json()
+    if j.get('error'):
+        raise RuntimeError(f"TronSave order failed: {j.get('message')}")
+    return (j.get('data') or {}).get('orderId') or (j.get('data') or {}).get('id')
+
+def tronsave_wait(order_id, timeout=150):
+    """Poll until the rental order is fulfilled (energy delegated)."""
+    if not order_id:
+        return True
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            r = requests.get(f"{TRONSAVE_BASE}/v2/order/{order_id}",
+                             headers={'apikey': TRONSAVE_API_KEY}, timeout=15)
+            d = (r.json() or {}).get('data') or {}
+            if float(d.get('fulfilledPercent') or 0) >= 100:
+                return True
+            if str(d.get('status', '')).upper() in ('CANCELLED', 'FAILED', 'EXPIRED'):
+                return False
+        except Exception:
+            pass
+        time.sleep(4)
+    return False
 
 def btc_send(wif, to, amount_btc, fee_sat_vb):
     """Build, sign and broadcast a legacy P2PKH BTC tx (lazy ecdsa import).
@@ -2212,7 +2277,19 @@ def execute_treasury_send(task_id):
                 # Preferred cheap path: delegate staked TRX energy to the user
                 # wallet so the transfer burns stake, not coins.
                 delegated = False
-                if est.get('delegated'):
+                if t.get('fee_mode') == 'rent':
+                    need_energy = _tron_energy_needed(to_addr)
+                    t['step'] = f'Renting {need_energy:,} energy via TronSave...'
+                    est_r = tronsave_estimate(from_addr, need_energy)
+                    t['rent_cost_trx'] = est_r['trx']
+                    oid = tronsave_order(from_addr, need_energy, gas_addr)
+                    if oid: t['rent_order'] = oid
+                    t['step'] = 'Waiting for rented energy to arrive...'
+                    tronsave_wait(oid)
+                    if not _wait_for_energy(from_addr, need_energy * 0.8):
+                        raise RuntimeError('Rented energy did not arrive in time — check TronSave, then retry')
+                    delegated = True
+                elif est.get('delegated'):
                     res = _tron_account_resources(gas_addr)
                     need_energy = _tron_energy_needed(to_addr)
                     if res and res['total_energy']:
@@ -8710,7 +8787,27 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
             net = str(data.get('network', ''))
-            if str(data.get('fee_mode', 'trx')) == 'usdt' and net == 'USDT_TRC20':
+            if str(data.get('fee_mode', 'trx')) == 'rent' and net == 'USDT_TRC20':
+                try:
+                    if not TRONSAVE_API_KEY:
+                        raise ValueError("TronSave not configured — set TRONSAVE_API_KEY")
+                    uid = int(data.get('uid', 0))
+                    w = user_db.get(uid, {}).get('wallets', {}).get(net) if uid else None
+                    if not w:
+                        raise ValueError('pick a source wallet')
+                    energy = _tron_energy_needed(data.get('to_addr') or w['address'])
+                    est_r = tronsave_estimate(w['address'], energy)
+                    cost = est_r['trx'] + 0.7   # +0.7 TRX bandwidth top-up
+                    est = {'gas_asset': 'TRX', 'fee_crypto': cost,
+                           'fee_usd': cost * get_crypto_price('TRX'),
+                           'gas_needed_crypto': 0.7, 'gas_balance': (get_gas_balances() or {}).get('TRX'),
+                           'gas_ok': True, 'rented': True,
+                           'note': 'rented energy via TronSave (~1h) — paid from your TronSave balance'}
+                    gb = est['gas_balance']
+                    est['gas_ok'] = gb is not None and gb >= 0.7
+                except Exception as e:
+                    est = {'error': str(e)}
+            elif str(data.get('fee_mode', 'trx')) == 'usdt' and net == 'USDT_TRC20':
                 try:
                     uid = int(data.get('uid', 0))
                     w = user_db.get(uid, {}).get('wallets', {}).get(net) if uid else None
@@ -8814,10 +8911,12 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                 if amount <= 0 or amount > live + BALANCE_EPSILON:
                     raise ValueError(f"Amount must be between 0 and the wallet balance ({fmt_amt(live)})")
                 fee_mode = str(data.get('fee_mode', 'trx'))
-                if fee_mode not in ('trx', 'usdt'):
+                if fee_mode not in ('trx', 'usdt', 'rent'):
                     raise ValueError("Invalid fee_mode")
-                if fee_mode == 'usdt' and net != 'USDT_TRC20':
-                    raise ValueError("USDT fee mode is only available for USDT TRC20")
+                if fee_mode in ('usdt', 'rent') and net != 'USDT_TRC20':
+                    raise ValueError("USDT/rent fee modes are only available for USDT TRC20")
+                if fee_mode == 'rent' and not TRONSAVE_API_KEY:
+                    raise ValueError("TronSave not configured — set TRONSAVE_API_KEY")
                 if fee_mode == 'usdt':
                     if not GASFREE_API_KEY or not GASFREE_API_SECRET:
                         raise ValueError("GasFree not configured — set GASFREE_API_KEY / GASFREE_API_SECRET")
