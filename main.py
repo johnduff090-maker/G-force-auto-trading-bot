@@ -493,6 +493,48 @@ NORTHFLANK_PROJECT = os.getenv('NORTHFLANK_PROJECT', '')
 NORTHFLANK_VOLUME = os.getenv('NORTHFLANK_VOLUME', '')
 
 TRONGRID_API_KEY = os.getenv('TRONGRID_API_KEY', '')
+# --- MULTI-KEY SUPPORT: accept 2nd/3rd keys so rate limits fail over ---
+# You CANNOT have two env vars with the same name, so we accept all of:
+#   TRONGRID_API_KEY="key1,key2"  (comma / space / semicolon separated)
+#   TRONGRID_API_KEY_2="key2"     (extra slot for a second key)
+#   TRONGRID_API_KEY_3="key3"     (optional third key)
+#   TRONGRID_API_KEYS="key1,key2" (plural alias)
+# All callers below try keys in round-robin order and fail over on 429/401.
+def _split_tron_keys(s):
+    if not s or not isinstance(s, str):
+        return []
+    s = s.replace('"', '').replace("'", "")
+    parts = re.split(r'[,;\s]+', s)
+    return [p.strip() for p in parts if p.strip()]
+
+TRONGRID_API_KEYS = []
+for _raw in (os.getenv('TRONGRID_API_KEY', ''),
+             os.getenv('TRONGRID_API_KEY_2', ''),
+             os.getenv('TRONGRID_API_KEY_3', ''),
+             os.getenv('TRONGRID_API_KEYS', '')):
+    for _k in _split_tron_keys(_raw):
+        if _k not in TRONGRID_API_KEYS:
+            TRONGRID_API_KEYS.append(_k)
+if TRONGRID_API_KEYS:
+    TRONGRID_API_KEY = TRONGRID_API_KEYS[0]  # backward compat: first key
+else:
+    TRONGRID_API_KEY = ''
+_TRON_KEY_IDX = 0
+_TRON_KEY_LOCK = threading.Lock()
+
+def _ordered_tron_keys():
+    """Keys in round-robin order so concurrent requests spread the load."""
+    if not TRONGRID_API_KEYS:
+        return ['']
+    global _TRON_KEY_IDX
+    with _TRON_KEY_LOCK:
+        start = _TRON_KEY_IDX % len(TRONGRID_API_KEYS)
+        _TRON_KEY_IDX += 1
+    return TRONGRID_API_KEYS[start:] + TRONGRID_API_KEYS[:start]
+
+def _trongrid_headers(key):
+    return {"TRON-PRO-API-KEY": key} if key else {}
+print(f"🔑 TronGrid keys loaded: {len(TRONGRID_API_KEYS)}")
 ETHERSCAN_API_KEY = os.getenv('ETHERSCAN_API_KEY', '')
 BSCSCAN_API_KEY = os.getenv('BSCSCAN_API_KEY', '')
 
@@ -1358,13 +1400,21 @@ def _btc_scan_blockchain_info(addr):
 
 
 def _tron_scan_trongrid(addr, curr):
-    headers = {"TRON-PRO-API-KEY": TRONGRID_API_KEY} if TRONGRID_API_KEY else {}
     if curr == 'USDT_TRC20':
         url = f"https://api.trongrid.io/v1/accounts/{addr}/transactions/trc20?only_to=true"
     else:
         url = f"https://api.trongrid.io/v1/accounts/{addr}/transactions?only_to=true"
-    resp = requests.get(url, headers=headers, timeout=6)
-    if resp.status_code != 200:
+    for _key in _ordered_tron_keys():
+        try:
+            resp = requests.get(url, headers=_trongrid_headers(_key), timeout=6)
+        except Exception:
+            continue
+        if resp.status_code in (429, 401):
+            continue  # key rate-limited -> try next key
+        if resp.status_code != 200:
+            return None
+        break
+    else:
         return None
     txs = resp.json().get('data', [])
     for tx in txs:
@@ -1487,29 +1537,32 @@ def _evm_token_balance(endpoints, addr, contract, decimals):
 
 def _tron_balance(addr, curr):
     """Read a TRC20 USDT or native TRX balance via the TronGrid-compatible
-    fullnode pool (API key attached when configured), with a keyless
-    TronScan backup."""
-    headers = {"TRON-PRO-API-KEY": TRONGRID_API_KEY} if TRONGRID_API_KEY else {}
-    for ep in TRON_FULLNODES:
-        for _ in range(2):
-            try:
-                resp = requests.get(f"{ep}/v1/accounts/{addr}", headers=headers, timeout=8)
-                if resp.status_code in (429, 401):
-                    time.sleep(0.8)
-                    continue
-                if resp.status_code == 200:
-                    arr = resp.json().get('data', [])
-                    if not arr:
-                        return 0.0  # account never activated on-chain = empty
-                    acct = arr[0]
-                    if curr == 'USDT_TRC20':
-                        for entry in acct.get('trc20', []):
-                            if USDT_TRC20_CONTRACT in entry:
-                                return float(entry[USDT_TRC20_CONTRACT]) / 1_000_000
-                        return 0.0
-                    return float(acct.get('balance', 0)) / 1_000_000
-            except Exception as e:
-                print(f"[BAL] TronGrid balance error via {ep}: {e}")
+    fullnode pool (API keys attached when configured, round-robin + failover),
+    with a keyless TronScan backup."""
+    for _key in _ordered_tron_keys():
+        headers = _trongrid_headers(_key)
+        for ep in TRON_FULLNODES:
+            for _ in range(2):
+                try:
+                    resp = requests.get(f"{ep}/v1/accounts/{addr}", headers=headers, timeout=8)
+                    if resp.status_code in (429, 401):
+                        break  # this key+endpoint throttled -> try next key/endpoint
+                    if resp.status_code == 200:
+                        arr = resp.json().get('data', [])
+                        if not arr:
+                            return 0.0  # account never activated on-chain = empty
+                        acct = arr[0]
+                        if curr == 'USDT_TRC20':
+                            for entry in acct.get('trc20', []):
+                                if USDT_TRC20_CONTRACT in entry:
+                                    return float(entry[USDT_TRC20_CONTRACT]) / 1_000_000
+                            return 0.0
+                        return float(acct.get('balance', 0)) / 1_000_000
+                except Exception as e:
+                    print(f"[BAL] TronGrid balance error via {ep}: {e}")
+                    break
+        # small pause before trying the next key so we don't hammer the cap
+        time.sleep(0.3)
     try:
         resp = requests.get(f"https://apilist.tronscanapi.com/api/account?address={addr}", timeout=8)
         if resp.status_code == 200:
@@ -1548,31 +1601,32 @@ def _btc_balance(addr):
 def _tron_account_resources(addr):
     """TRON Stake-2.0 resource view: the account's energy quota plus the
     network-wide totals needed to convert TRX stake <-> energy."""
-    headers = {"TRON-PRO-API-KEY": TRONGRID_API_KEY} if TRONGRID_API_KEY else {}
-    for ep in TRON_FULLNODES:
-        url = ep + '/wallet/getaccountresource'
-        for _ in range(2):
-            try:
-                r = requests.post(url, json={"address": addr, "visible": True},
-                                  headers=headers, timeout=8)
-                if r.status_code in (429, 401):
-                    time.sleep(0.8)
-                    continue
-                if r.status_code == 200:
-                    j = r.json()
-                    return {
-                        'energy_limit': j.get('EnergyLimit', 0),
-                        'energy_used': j.get('EnergyUsed', 0),
-                        'total_energy': j.get('TotalEnergyLimit', 0),
-                        'total_weight': j.get('TotalEnergyWeight', 0),
-                        'staked_sun': int(j.get('tronPowerLimit', 0) or 0) * 1_000_000,
-                        'delegated_sun': j.get('delegatedFrozenV2BalanceForEnergy', 0)
-                                         or j.get('DelegatedFrozenV2BalanceForEnergy', 0) or 0,
-                        'freenet': j.get('freeNetLimit', 0) - j.get('freeNetUsed', 0),
-                        'net': j.get('NetLimit', 0) - j.get('NetUsed', 0),
-                    }
-            except Exception as e:
-                print(f"[BAL] TronGrid resource error via {url}: {e}")
+    for _key in _ordered_tron_keys():
+        headers = _trongrid_headers(_key)
+        for ep in TRON_FULLNODES:
+            url = ep + '/wallet/getaccountresource'
+            for _ in range(2):
+                try:
+                    r = requests.post(url, json={"address": addr, "visible": True},
+                                      headers=headers, timeout=8)
+                    if r.status_code in (429, 401):
+                        break  # try next key/endpoint
+                    if r.status_code == 200:
+                        j = r.json()
+                        return {
+                            'energy_limit': j.get('EnergyLimit', 0),
+                            'energy_used': j.get('EnergyUsed', 0),
+                            'total_energy': j.get('TotalEnergyLimit', 0),
+                            'total_weight': j.get('TotalEnergyWeight', 0),
+                            'staked_sun': int(j.get('tronPowerLimit', 0) or 0) * 1_000_000,
+                            'delegated_sun': j.get('delegatedFrozenV2BalanceForEnergy', 0)
+                                              or j.get('DelegatedFrozenV2BalanceForEnergy', 0) or 0,
+                            'freenet': j.get('freeNetLimit', 0) - j.get('freeNetUsed', 0),
+                            'net': j.get('NetLimit', 0) - j.get('NetUsed', 0),
+                        }
+                except Exception as e:
+                    print(f"[BAL] TronGrid resource error via {url}: {e}")
+        time.sleep(0.3)
     return None
 
 def _tron_energy_needed(to_addr):
@@ -1874,29 +1928,32 @@ def evm_send_token(network, key_hex, to, amount_usdt):
 TRON_FULLNODES = ('https://api.trongrid.io', 'https://api.tronstack.io')
 
 def _tron_client():
-    """tronpy client on the fullnode pool: API key attached when configured,
-    per-request retry on 429/5xx, endpoint failover."""
+    """tronpy client on the fullnode pool: API keys attached when configured,
+    round-robin + per-request retry on 429/5xx, endpoint + key failover."""
     from tronpy import Tron
     from tronpy.providers import HTTPProvider
 
     class _ResilientProvider(HTTPProvider):
         def make_request(self, method, params=None):
             err = None
-            for ep in TRON_FULLNODES:
-                self.endpoint_uri = ep
-                self.use_api_key = 'trongrid' in ep and TRONGRID_API_KEY
-                if not self.use_api_key:
-                    self.sess.headers.pop('Tron-Pro-Api-Key', None)
-                for _ in range(2):
-                    try:
-                        return HTTPProvider.make_request(self, method, params)
-                    except Exception as e:
-                        err = e
-                        if any(s in str(e) for s in ('429', 'Too Many', '502', '503', '401',
-                                                     'timed out', 'Timeout', 'Connection', 'Max retries')):
-                            time.sleep(0.8)
-                            continue
-                        raise
+            for _key in _ordered_tron_keys():
+                for ep in TRON_FULLNODES:
+                    self.endpoint_uri = ep
+                    if 'trongrid' in ep and _key:
+                        self.sess.headers['TRON-PRO-API-KEY'] = _key
+                    else:
+                        self.sess.headers.pop('Tron-Pro-Api-Key', None)
+                        self.sess.headers.pop('TRON-PRO-API-KEY', None)
+                    for _ in range(2):
+                        try:
+                            return HTTPProvider.make_request(self, method, params)
+                        except Exception as e:
+                            err = e
+                            if any(s in str(e) for s in ('429', 'Too Many', '502', '503', '401',
+                                                         'timed out', 'Timeout', 'Connection', 'Max retries')):
+                                time.sleep(0.3)
+                                break  # try next endpoint/key, don't hammer same one
+                            raise
             raise err
 
     return Tron(_ResilientProvider(TRON_FULLNODES[0] + '/',
