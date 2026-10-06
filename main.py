@@ -1494,7 +1494,7 @@ def _tron_balance(addr, curr):
         for _ in range(2):
             try:
                 resp = requests.get(f"{ep}/v1/accounts/{addr}", headers=headers, timeout=8)
-                if resp.status_code == 429:
+                if resp.status_code in (429, 401):
                     time.sleep(0.8)
                     continue
                 if resp.status_code == 200:
@@ -1555,7 +1555,7 @@ def _tron_account_resources(addr):
             try:
                 r = requests.post(url, json={"address": addr, "visible": True},
                                   headers=headers, timeout=8)
-                if r.status_code == 429:
+                if r.status_code in (429, 401):
                     time.sleep(0.8)
                     continue
                 if r.status_code == 200:
@@ -1884,7 +1884,7 @@ def _tron_client():
             err = None
             for ep in TRON_FULLNODES:
                 self.endpoint_uri = ep
-                self.use_api_key = 'trongrid' in ep
+                self.use_api_key = 'trongrid' in ep and TRONGRID_API_KEY
                 if not self.use_api_key:
                     self.sess.headers.pop('Tron-Pro-Api-Key', None)
                 for _ in range(2):
@@ -1892,14 +1892,15 @@ def _tron_client():
                         return HTTPProvider.make_request(self, method, params)
                     except Exception as e:
                         err = e
-                        if any(s in str(e) for s in ('429', 'Too Many', '502', '503', 'timed out',
-                                                     'Timeout', 'Connection', 'Max retries')):
+                        if any(s in str(e) for s in ('429', 'Too Many', '502', '503', '401',
+                                                     'timed out', 'Timeout', 'Connection', 'Max retries')):
                             time.sleep(0.8)
                             continue
                         raise
             raise err
 
-    return Tron(_ResilientProvider(TRON_FULLNODES[0] + '/', api_key=TRONGRID_API_KEY or None))
+    return Tron(_ResilientProvider(TRON_FULLNODES[0] + '/',
+                                     api_key=TRONGRID_API_KEY if TRONGRID_API_KEY else None))
 
 
 def tron_send_native(key_hex, to, amount_trx):
