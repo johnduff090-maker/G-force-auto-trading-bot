@@ -3,6 +3,13 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#0f2027">
+    <link rel="manifest" href="/manifest.json">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="G-Force">
+    <link rel="apple-touch-icon" href="/icon.png">
     <title>Bot Admin Dashboard</title>
     <style>
         :root {
@@ -411,6 +418,7 @@
 
         .addr-pill { background: rgba(0,0,0,0.3); border: 1px solid var(--glass-border); border-radius: 10px; padding: 10px 12px; font-family: monospace; font-size: 0.85em; color: #ddd; display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 8px; overflow-wrap: anywhere; }
         .fee-line { display: flex; justify-content: space-between; padding: 8px 0; font-size: 0.9em; color: #ccc; border-top: 1px dashed var(--glass-border); }
+        .fee-line > span:first-child { white-space: nowrap; padding-right: 10px; flex-shrink: 0; }
         .fee-ok { color: #4caf50; } .fee-bad { color: #ff6b6b; }
     </style>
 </head>
@@ -433,6 +441,8 @@
                 <button class="hamburger" onclick="toggleSidebar()">☰</button>
                 <h2>Bot Admin</h2>
             </div>
+            <button id="pushBtn" onclick="askPush()" title="Enable notifications"
+                    style="display:none; background:none; border:none; font-size:1.3em; cursor:pointer; padding:4px 8px;">🔕</button>
             <div class="total-balance" id="totalBalanceUI">Total: $0.00</div>
         </nav>
 
@@ -922,6 +932,41 @@
             return { ok: r.ok, data: await r.json().catch(() => ({})) };
         }
 
+        // --- PWA push notifications ---
+        // iOS: works only in the installed (Add to Home Screen) app, iOS 16.4+.
+        // Permission must come from a user gesture, so the bell button appears
+        // after login whenever notifications aren't enabled yet.
+        let swReg = null;
+        async function initPush() {
+            const btn = document.getElementById('pushBtn');
+            if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
+            try { swReg = await navigator.serviceWorker.register('/sw.js'); }
+            catch (e) { return; }
+            if (!btn) return;
+            btn.style.display = '';
+            if (Notification.permission === 'granted') { btn.textContent = '🔔'; subscribePush(); }
+            else if (Notification.permission === 'denied') btn.title = 'Notifications blocked — enable in browser settings';
+        }
+        async function askPush() {
+            if (!swReg) return;
+            const p = await Notification.requestPermission();
+            if (p === 'granted') { document.getElementById('pushBtn').textContent = '🔔'; subscribePush(); }
+        }
+        async function subscribePush() {
+            if (!swReg) return;
+            try {
+                const { data } = await api('/api/push_key');
+                if (!data || !data.key) return;
+                const sub = await swReg.pushManager.subscribe({
+                    userVisibleOnly: true, applicationServerKey: b64urlToBuf(data.key) });
+                await api('/api/push_subscribe', { sub: sub.toJSON() });
+            } catch (e) { console.warn('push subscribe failed', e); }
+        }
+        function b64urlToBuf(b64) {
+            const raw = atob((b64 + '='.repeat((4 - b64.length % 4) % 4)).replace(/-/g, '+').replace(/_/g, '/'));
+            return Uint8Array.from(raw, c => c.charCodeAt(0));
+        }
+
         async function fetchBalanceOverview() {
             // only jump to the overview when no balance sub-view is active
             if (!['balOverview', 'balAsset', 'balReceive', 'balSend'].some(v => document.getElementById(v).style.display !== 'none'))
@@ -1082,9 +1127,10 @@
             const msg = document.getElementById('sndAddrMsg');
             const w = fundedWallets[document.getElementById('sndFrom').selectedIndex];
             const fee_mode = document.getElementById('sndFeeMode').value;
+            const amt = parseFloat(document.getElementById('sndAmt').value) || 0;
             const [vRes, eRes] = await Promise.all([
                 to ? api('/api/validate_addr', { network: currentAsset, address: to }) : Promise.resolve({ data: null }),
-                api('/api/estimate_fee', { network: currentAsset, to_addr: to || undefined, uid: w ? w.uid : undefined, fee_mode })
+                api('/api/estimate_fee', { network: currentAsset, to_addr: to || undefined, uid: w ? w.uid : undefined, fee_mode, amount: amt })
             ]);
             if (seq !== feeReqSeq) return; // a newer request superseded this one
             if (to && vRes.data) {
@@ -1099,11 +1145,14 @@
                 lastFee = est;
                 document.getElementById('sndFee').innerHTML = `~${fmtCrypto(est.fee_crypto, 'TRX')} ${est.gas_asset} <span style="color:#888;">($${Number(est.fee_usd).toFixed(2)})</span>`;
                 if (est.gasfree) {
-                    document.getElementById('sndGas').innerHTML = `<span class="fee-ok">GasFree relayer · ${est.note || ''}</span>`;
+                    const gfOk = est.gas_ok !== false;
+                    document.getElementById('sndGas').innerHTML =
+                        `<span class="${gfOk ? 'fee-ok' : 'fee-bad'}">GasFree relayer · ${est.note || ''}` +
+                        (gfOk ? '' : ` — needs ~${fmtCrypto(est.gas_needed_crypto, 'TRX')} TRX in gas wallet`) + `</span>`;
                 } else if (est.rented || est.auto_rent) {
                     document.getElementById('sndGas').innerHTML = est.charged
                         ? `<span class="fee-ok">⚡💰 Charged wallet — ${est.note || 'burns its own energy'}</span>`
-                        : `<span class="${est.gas_ok ? 'fee-ok' : 'fee-bad'}">${est.auto_rent ? 'Auto-rent' : 'TronSave rental'} · ${est.note || ''}${est.gas_ok ? '' : ' — insufficient gas wallet TRX'}</span>`;
+                        : `<span class="${est.gas_ok ? 'fee-ok' : 'fee-bad'}">${est.note || (est.auto_rent ? 'Auto-rented energy' : 'TronSave rental')}${est.gas_ok ? '' : ' — insufficient gas wallet TRX'}</span>`;
                 } else if (est.gas_needed_crypto > 0) {
                     const okGas = est.gas_ok;
                     document.getElementById('sndGas').innerHTML = `<span class="${okGas ? 'fee-ok' : 'fee-bad'}">${est.gas_balance === null ? 'not configured' : fmtCrypto(est.gas_balance, 'TRX') + ' ' + est.gas_asset} ${okGas ? '✓' : '· insufficient — top up gas wallet'}</span>`;
@@ -1371,6 +1420,7 @@
                     fetchWallets();
                     fetchStorageStats(); 
                     setInterval(fetchStorageStats, 5000); // REFRESH STATS EVERY 5 SECONDS
+                    initPush();
                 } else {
                     errDiv.innerText = '❌ Incorrect PIN';
                 }

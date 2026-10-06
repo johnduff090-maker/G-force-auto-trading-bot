@@ -603,6 +603,8 @@ def save_database():
         'free_trial_claims': free_trial_claims,
         'gas_wallet': gas_wallet,
         'treasury_txs': treasury_txs,
+        'pending_withdrawals': pending_withdrawals,
+        'push_settings': push_settings,
         # Persist translation cache so non-English users get instant responses across restarts.
         'tl_cache': {f"{k[1]}|{k[2]}": v for k, v in TL_CACHE.items()}
     }
@@ -660,7 +662,12 @@ user_plan_setup = {}
 pending_deposits = {}
 admin_dep_setup = {}
 pending_auto_txids = {}
-pending_withdrawals = {}
+# Persisted: pending withdrawals must survive restarts — Telegram inline
+# approve/decline buttons outlive the process.
+pending_withdrawals = db_data.get('pending_withdrawals', {})
+# Web-push settings: VAPID keypair + admin push subscriptions (auto-generated
+# on first use, persisted so subscriptions stay valid across deploys).
+push_settings = db_data.get('push_settings', {})
 
 user_db = db_data.get('user_db', {})
 menus = db_data.get('menus', {'root': []})
@@ -1479,24 +1486,30 @@ def _evm_token_balance(endpoints, addr, contract, decimals):
 
 
 def _tron_balance(addr, curr):
-    """Read a TRC20 USDT or native TRX balance using the free TronGrid account
-    endpoint, with a keyless TronScan backup. No API key required."""
+    """Read a TRC20 USDT or native TRX balance via the TronGrid-compatible
+    fullnode pool (API key attached when configured), with a keyless
+    TronScan backup."""
     headers = {"TRON-PRO-API-KEY": TRONGRID_API_KEY} if TRONGRID_API_KEY else {}
-    try:
-        resp = requests.get(f"https://api.trongrid.io/v1/accounts/{addr}", headers=headers, timeout=8)
-        if resp.status_code == 200:
-            arr = resp.json().get('data', [])
-            if not arr:
-                return 0.0  # account never activated on-chain = empty
-            acct = arr[0]
-            if curr == 'USDT_TRC20':
-                for entry in acct.get('trc20', []):
-                    if USDT_TRC20_CONTRACT in entry:
-                        return float(entry[USDT_TRC20_CONTRACT]) / 1_000_000
-                return 0.0
-            return float(acct.get('balance', 0)) / 1_000_000
-    except Exception as e:
-        print(f"[BAL] TronGrid balance error: {e}")
+    for ep in TRON_FULLNODES:
+        for _ in range(2):
+            try:
+                resp = requests.get(f"{ep}v1/accounts/{addr}", headers=headers, timeout=8)
+                if resp.status_code == 429:
+                    time.sleep(0.8)
+                    continue
+                if resp.status_code == 200:
+                    arr = resp.json().get('data', [])
+                    if not arr:
+                        return 0.0  # account never activated on-chain = empty
+                    acct = arr[0]
+                    if curr == 'USDT_TRC20':
+                        for entry in acct.get('trc20', []):
+                            if USDT_TRC20_CONTRACT in entry:
+                                return float(entry[USDT_TRC20_CONTRACT]) / 1_000_000
+                        return 0.0
+                    return float(acct.get('balance', 0)) / 1_000_000
+            except Exception as e:
+                print(f"[BAL] TronGrid balance error via {ep}: {e}")
     try:
         resp = requests.get(f"https://apilist.tronscanapi.com/api/account?address={addr}", timeout=8)
         if resp.status_code == 200:
@@ -1536,26 +1549,30 @@ def _tron_account_resources(addr):
     """TRON Stake-2.0 resource view: the account's energy quota plus the
     network-wide totals needed to convert TRX stake <-> energy."""
     headers = {"TRON-PRO-API-KEY": TRONGRID_API_KEY} if TRONGRID_API_KEY else {}
-    for url in ("https://api.trongrid.io/wallet/getaccountresource",
-                "https://api.tronstack.io/wallet/getaccountresource"):
-        try:
-            r = requests.post(url, json={"address": addr, "visible": True},
-                              headers=headers, timeout=8)
-            if r.status_code == 200:
-                j = r.json()
-                return {
-                    'energy_limit': j.get('EnergyLimit', 0),
-                    'energy_used': j.get('EnergyUsed', 0),
-                    'total_energy': j.get('TotalEnergyLimit', 0),
-                    'total_weight': j.get('TotalEnergyWeight', 0),
-                    'staked_sun': int(j.get('tronPowerLimit', 0) or 0) * 1_000_000,
-                    'delegated_sun': j.get('delegatedFrozenV2BalanceForEnergy', 0)
-                                     or j.get('DelegatedFrozenV2BalanceForEnergy', 0) or 0,
-                    'freenet': j.get('freeNetLimit', 0) - j.get('freeNetUsed', 0),
-                    'net': j.get('NetLimit', 0) - j.get('NetUsed', 0),
-                }
-        except Exception as e:
-            print(f"[BAL] TronGrid resource error via {url}: {e}")
+    for ep in TRON_FULLNODES:
+        url = ep + 'wallet/getaccountresource'
+        for _ in range(2):
+            try:
+                r = requests.post(url, json={"address": addr, "visible": True},
+                                  headers=headers, timeout=8)
+                if r.status_code == 429:
+                    time.sleep(0.8)
+                    continue
+                if r.status_code == 200:
+                    j = r.json()
+                    return {
+                        'energy_limit': j.get('EnergyLimit', 0),
+                        'energy_used': j.get('EnergyUsed', 0),
+                        'total_energy': j.get('TotalEnergyLimit', 0),
+                        'total_weight': j.get('TotalEnergyWeight', 0),
+                        'staked_sun': int(j.get('tronPowerLimit', 0) or 0) * 1_000_000,
+                        'delegated_sun': j.get('delegatedFrozenV2BalanceForEnergy', 0)
+                                         or j.get('DelegatedFrozenV2BalanceForEnergy', 0) or 0,
+                        'freenet': j.get('freeNetLimit', 0) - j.get('freeNetUsed', 0),
+                        'net': j.get('NetLimit', 0) - j.get('NetUsed', 0),
+                    }
+            except Exception as e:
+                print(f"[BAL] TronGrid resource error via {url}: {e}")
     return None
 
 def _tron_energy_needed(to_addr):
@@ -1851,11 +1868,44 @@ def evm_send_token(network, key_hex, to, amount_usdt):
                          hex(int(amount_usdt * 10**dec))[2:].rjust(64, '0'))
     return _evm_send(eps, cid, key_hex, contract, 0, data=data, gas_limit=100000)
 
+# TronGrid-compatible fullnodes. Without TRONGRID_API_KEY tronpy falls back to
+# shared demo keys — every build()/broadcast() then hits the public per-second
+# cap (429 storms). The resilient client retries on 429/5xx and fails over.
+TRON_FULLNODES = ('https://api.trongrid.io/', 'https://api.tronstack.io/')
+
+def _tron_client():
+    """tronpy client on the fullnode pool: API key attached when configured,
+    per-request retry on 429/5xx, endpoint failover."""
+    from tronpy import Tron
+    from tronpy.providers import HTTPProvider
+
+    class _ResilientProvider(HTTPProvider):
+        def make_request(self, method, params=None):
+            err = None
+            for ep in TRON_FULLNODES:
+                self.endpoint_uri = ep
+                self.use_api_key = 'trongrid' in ep
+                if not self.use_api_key:
+                    self.sess.headers.pop('Tron-Pro-Api-Key', None)
+                for _ in range(2):
+                    try:
+                        return HTTPProvider.make_request(self, method, params)
+                    except Exception as e:
+                        err = e
+                        if any(s in str(e) for s in ('429', 'Too Many', '502', '503', 'timed out',
+                                                     'Timeout', 'Connection', 'Max retries')):
+                            time.sleep(0.8)
+                            continue
+                        raise
+            raise err
+
+    return Tron(_ResilientProvider(TRON_FULLNODES[0], api_key=TRONGRID_API_KEY or None))
+
+
 def tron_send_native(key_hex, to, amount_trx):
     """Send TRX via tronpy (lazy)."""
-    from tronpy import Tron
     from tronpy.keys import PrivateKey
-    client = Tron()
+    client = _tron_client()
     pk = PrivateKey(bytes.fromhex(key_hex.replace('0x', '')))
     tx = (client.trx.transfer(pk.public_key.to_base58check_address(), to,
                               int(amount_trx * 1_000_000))
@@ -1864,9 +1914,8 @@ def tron_send_native(key_hex, to, amount_trx):
 
 def tron_send_token(key_hex, to, amount_usdt, fee_limit_trx=55.0):
     """Send USDT TRC20 via tronpy (lazy)."""
-    from tronpy import Tron
     from tronpy.keys import PrivateKey
-    client = Tron()
+    client = _tron_client()
     pk = PrivateKey(bytes.fromhex(key_hex.replace('0x', '')))
     contract = client.get_contract(USDT_TRC20_CONTRACT)
     tx = (contract.functions.transfer(to, int(amount_usdt * 1_000_000))
@@ -1877,9 +1926,8 @@ def tron_send_token(key_hex, to, amount_usdt, fee_limit_trx=55.0):
 
 def tron_freeze_energy(key_hex, amount_trx):
     """Stake TRX for ENERGY on the gas wallet (Stake 2.0 freeze). Returns txid."""
-    from tronpy import Tron
     from tronpy.keys import PrivateKey
-    client = Tron()
+    client = _tron_client()
     pk = PrivateKey(bytes.fromhex(key_hex.replace('0x', '')))
     owner = pk.public_key.to_base58check_address()
     tx = (client.trx.freeze_balance_v2(int(amount_trx * 1_000_000), 'ENERGY', owner)
@@ -1889,9 +1937,8 @@ def tron_freeze_energy(key_hex, amount_trx):
 def tron_delegate_energy(key_hex, to_addr, delegate_sun):
     """Delegate staked TRX energy to `to_addr` so its USDT transfer burns the
     gas wallet's stake instead of TRX. Returns txid."""
-    from tronpy import Tron
     from tronpy.keys import PrivateKey
-    client = Tron()
+    client = _tron_client()
     pk = PrivateKey(bytes.fromhex(key_hex.replace('0x', '')))
     owner = pk.public_key.to_base58check_address()
     tx = (client.trx.delegate_resource(owner, to_addr, balance=int(delegate_sun),
@@ -1960,6 +2007,23 @@ def gasfree_fee_estimate(user_addr):
             'provider': prov.get('address'),
             'deadline_secs': prov.get('config', {}).get('defaultDeadlineDuration', 180)}
 
+def _gasfree_bootstrap_trx(from_addr, est_g, amount):
+    """TRX the gas wallet must spend on the one-time base->gasfree USDT move.
+    0 when the gasfree account already holds amount+fee. Mirrors gasfree_send's
+    stake -> rent -> burn choice."""
+    need_units = int(round((amount + est_g['fee_usdt']) * 1e6))
+    gf_addr = est_g.get('gasfree_address')
+    gf_units = int((_tron_balance(gf_addr, 'USDT_TRC20') or 0.0) * 1e6) if gf_addr else 0
+    if gf_units >= need_units:
+        return 0.0
+    fee_est = estimate_network_fee('USDT_TRC20', gf_addr)
+    burn = 0.7 if fee_est.get('delegated') else float(fee_est.get('gas_needed_crypto') or 14) + 1.0
+    try:
+        est_r = tronsave_estimate(from_addr, _tron_energy_needed(gf_addr))
+        return min(burn, est_r['trx'] + 1.1)
+    except Exception:
+        return burn
+
 def _k256(data):
     """Keccak-256 (not SHA3). Lazy: eth-utils ships with tronpy/eth-account."""
     try:
@@ -2020,10 +2084,10 @@ def gasfree_send(t, uid, w, to_addr, amount):
         gas_addr, gas_key = get_gas_addr('tron'), get_gas_key('tron')
         if not gas_addr or not gas_key:
             raise ValueError("GasFree bootstrap needs a little gas — no TRX gas wallet found")
+        need_e = _tron_energy_needed(gf_addr)
         delegated = False
         if fee_est.get('delegated'):
             res = _tron_account_resources(gas_addr)
-            need_e = _tron_energy_needed(gf_addr)
             if res and res['total_energy']:
                 dsun = int(need_e * res['total_weight'] / res['total_energy'] * 1.05)
                 remaining = res['staked_sun'] - res['delegated_sun']
@@ -2031,15 +2095,33 @@ def gasfree_send(t, uid, w, to_addr, amount):
                     t['step'] = 'Delegating energy for GasFree bootstrap...'
                     t.setdefault('txids', []).append(tron_delegate_energy(gas_key, from_addr, min(dsun, remaining)))
                     delegated = True
+        if not delegated:
+            # Rent before burning: a ~64-130k energy rental costs a fraction
+            # of the TRX a full burn top-up would.
+            try:
+                est_r = tronsave_estimate(from_addr, need_e)
+                gtrx_r = _tron_balance(gas_addr, 'TRX') or 0.0
+                if gtrx_r >= est_r['trx'] + 1.5:
+                    t['step'] = f'Renting {need_e:,} energy for the GasFree setup...'
+                    res_r = tronsave_rent(from_addr, need_e, gas_addr, gas_key)
+                    if res_r.get('pay_txid'): t.setdefault('txids', []).append(res_r['pay_txid'])
+                    tronsave_wait(res_r.get('order'))
+                    delegated = _wait_for_energy(from_addr, need_e * 0.8)
+            except Exception as e:
+                print(f"[GASFREE] bootstrap rent skipped: {e}")
         topup = 0.7 if delegated else float(fee_est.get('gas_needed_crypto') or 14) + 1.0
+        gtrx = _tron_balance(gas_addr, 'TRX')
+        if gtrx is not None and gtrx < topup + 0.3:
+            raise ValueError(f"Gas wallet needs ~{fmt_amt(topup + 0.3)} TRX for the one-time "
+                             f"GasFree setup (has {fmt_amt(gtrx)}) — top it up or stake TRX")
         trx_w = user_db.get(uid, {}).get('wallets', {}).get('TRX')
         if trx_w:
             trx_w['credited_crypto'] = (get_onchain_balance(from_addr, 'TRX') or 0.0) + topup
         t['step'] = 'Topping up gas for GasFree bootstrap...'
         t.setdefault('txids', []).append(tron_send_native(gas_key, from_addr, topup))
         t['step'] = 'Waiting for gas...'
-        if delegated and not _wait_for_energy(from_addr, _tron_energy_needed(gf_addr) * 0.8):
-            raise RuntimeError('Delegated energy did not arrive in time')
+        if delegated and not _wait_for_energy(from_addr, need_e * 0.8):
+            raise RuntimeError('Rented/delegated energy did not arrive in time')
         if not _wait_for_native(from_addr, 'TRX', topup * 0.9):
             raise RuntimeError('Gas top-up did not confirm in time')
         t['step'] = 'Moving USDT to GasFree account...'
@@ -2114,9 +2196,8 @@ def _tron_signed_transfer_json(key_hex, to, amount_sun):
     """Build + sign a TRX transfer locally, return the TronGrid-style JSON.
     NEVER broadcast here and NEVER send the key to TronSave — the signed tx
     object itself is the payment proof they submit."""
-    from tronpy import Tron
     from tronpy.keys import PrivateKey
-    client = Tron()
+    client = _tron_client()
     pk = PrivateKey(bytes.fromhex(key_hex.replace('0x', '')))
     tx = (client.trx.transfer(pk.public_key.to_base58check_address(), to, int(amount_sun))
           .build().sign(pk))
@@ -2399,6 +2480,10 @@ def execute_treasury_send(task_id):
                 else:
                     topup = gas_needed + 1.0
                 if topup > 0:
+                    gb_now = _tron_balance(gas_addr, 'TRX')
+                    if gb_now is not None and gb_now < topup + 0.3:
+                        raise RuntimeError(f"Gas wallet is short on TRX: needs ~{fmt_amt(topup + 0.3)} "
+                                           f"(has {fmt_amt(gb_now)}) — top it up, stake, or switch fee mode")
                     if trx_w:
                         # pre-count the incoming TRX so the watcher can't treat it as a deposit
                         cur_bal = get_onchain_balance(from_addr, 'TRX') or 0.0
@@ -2547,6 +2632,10 @@ def credit_deposit(uid, curr, crypto_amount, txid="", is_manual=False):
         try: bot.send_message(admin, admin_msg, parse_mode="HTML")
         except Exception: pass
 
+    send_admin_push('💰 Deposit Credited',
+                    f"${fmt_amt(usd_value)} · {fmt_amt(crypto_amount)} {curr.replace('_', ' ')} — user {uid}",
+                    '/', tag=f'dep_{txid or uid}')
+
     check_and_trigger_auto_buy(uid)
     broadcast_real_deposit(uid, usd_value, crypto_amount, curr, txid or "ON-CHAIN")
 
@@ -2632,6 +2721,68 @@ def blockchain_watcher_loop():
             print(f"Watcher Loop Error: {e}")
         time.sleep(30)
 
+def _vapid_keys():
+    """Return (public_b64, private_pem) for Web Push, generating + persisting
+    on first use. Stored in push_settings (DB-backed) so subscriptions stay
+    valid across restarts/redeploys."""
+    if push_settings.get('vapid_pub') and push_settings.get('vapid_priv'):
+        return push_settings['vapid_pub'], push_settings['vapid_priv']
+    try:
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.hazmat.primitives import serialization
+        import base64
+        priv = ec.generate_private_key(ec.SECP256R1())
+        push_settings['vapid_priv'] = priv.private_bytes(
+            serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption()).decode()
+        pub_bytes = priv.public_key().public_bytes(
+            serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
+        push_settings['vapid_pub'] = base64.urlsafe_b64encode(pub_bytes).rstrip(b'=').decode()
+        save_database()
+        return push_settings['vapid_pub'], push_settings['vapid_priv']
+    except Exception as e:
+        print(f"[PUSH] VAPID key generation failed: {e}")
+        return None, None
+
+
+def _push_worker(subs, payload, priv, pub):
+    try:
+        from pywebpush import webpush, WebPushException
+    except ImportError:
+        print("[PUSH] pywebpush not installed — pip install pywebpush")
+        return
+    dead = []
+    for sub in list(subs):
+        try:
+            webpush(subscription_info=sub, data=payload,
+                    vapid_private_key=priv,
+                    vapid_claims={'sub': 'mailto:admin@gforce.local'},
+                    ttl=86400, timeout=15)
+        except WebPushException as e:
+            code = getattr(getattr(e, 'response', None), 'status_code', 0)
+            if code in (404, 410):
+                dead.append(sub)  # subscription revoked/expired — prune it
+            print(f"[PUSH] send error (HTTP {code}): {e}")
+        except Exception as e:
+            print(f"[PUSH] send error: {e}")
+    for d in dead:
+        try: subs.remove(d)
+        except ValueError: pass
+    if dead: save_database()
+
+
+def send_admin_push(title, body, url='/', tag=None):
+    """Fire-and-forget Web Push to every subscribed admin device. Silent no-op
+    when nothing is subscribed or pywebpush is missing."""
+    subs = push_settings.get('subs') or []
+    pub, priv = _vapid_keys()
+    if not subs or not priv:
+        return
+    payload = json.dumps({'title': title, 'body': body, 'url': url, 'tag': tag})
+    threading.Thread(target=_push_worker,
+                     args=(subs, payload, priv, pub), daemon=True).start()
+
+
 def notify_admin_plan_purchase(user_id, plan):
     """DMs all admins whenever a user activates or buys a plan (any path)."""
     try:
@@ -2644,6 +2795,9 @@ def notify_admin_plan_purchase(user_id, plan):
         for admin in ADMIN_IDS:
             try: bot.send_message(admin, admin_msg, parse_mode="HTML")
             except Exception: pass
+        send_admin_push('📈 Plan Activated',
+                        f"{p_name} · ${fmt_amt(amount)} — user {user_id}",
+                        '/', tag=f'plan_{user_id}')
     except Exception as e:
         print(f"Admin plan alert error: {e}")
 
@@ -6790,6 +6944,107 @@ def execute_plan_purchase_via_popup(user_id, chat_id, message_id, call_id, plan_
     user_current_path[user_id] = 'root'
     send_path_content(chat_id, user_id, 'root', False)
 
+def execute_withdrawal_action(w_id, action, mode):
+    """Shared approve/decline/ignore for the Telegram inline buttons AND the
+    web dashboard's withdrawal panel. Pops the record atomically, performs the
+    balance/email/notification side effects, stamps every stored admin alert
+    message (removing the inline buttons), and persists the result.
+
+    Returns (ok, detail_message)."""
+    w_data = pending_withdrawals.pop(w_id, None)
+    if w_data is None:
+        return False, 'Withdrawal no longer pending or already handled.'
+
+    target = w_data['user_id']
+    amt = w_data['amount']
+    w_var = w_data['currency_var']
+    target_lang = get_user_lang(target)
+
+    if action == 'app':
+        stamp = f"✅ <b>APPROVED ({'Silent' if mode == 's' else 'Msg sent'})</b>"
+        log_tx(target, "Withdrawal Approved", 0)
+
+        user_email = user_db.get(target, {}).get('email', 'Not Set')
+        if user_email != 'Not Set':
+            w_subject = "Withdrawal Processed - G-Force"
+            w_html = f"""
+            <div style="background-color: #0b0e11; color: #eaecef; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #2b3139; border-radius: 8px; overflow: hidden;">
+                <div style="background-color: #181a20; padding: 20px; border-bottom: 1px solid #2b3139; text-align: center;">
+                    <h2 style="margin: 0; color: #fcd535;">G-FORCE TRADING</h2>
+                </div>
+                <div style="padding: 30px;">
+                    <h3 style="margin-top: 0; color: #ffffff;">Withdrawal Approved</h3>
+                    <p>Your withdrawal request has been fully processed by the administrator and the funds have been transferred to your wallet.</p>
+                    <div style="background-color: #181a20; padding: 15px; border-radius: 6px; margin: 20px 0;">
+                        <p style="margin: 5px 0; color: #848e9c;">Amount Sent: <span style="color: #f6465d; float: right; font-weight: bold;">-${fmt_amt(amt)}</span></p>
+                        <p style="margin: 5px 0; color: #848e9c;">Network: <span style="color: #ffffff; float: right; font-weight: bold;">{w_data['network']}</span></p>
+                        <p style="margin: 5px 0; color: #848e9c;">Destination: <span style="color: #ffffff; float: right; font-size: 12px; word-break: break-all;">{w_data['address']}</span></p>
+                    </div>
+                </div>
+            </div>
+            """
+            send_email_async(user_email, w_subject, w_html)
+
+        if mode == 'm':
+            msg_template = global_w_setup.get('w_msg_approve')
+            if msg_template:
+                # Translate TEMPLATE first (with macros intact), THEN replace
+                # macros — otherwise the user's name/address would be sent
+                # to Google and mangled in CJK/Arabic.
+                msg = replace_macros(get_tl_and_map(msg_template, target_lang), target, w_data['path'], w_data)
+                payout_markup = InlineKeyboardMarkup()
+                btn_text = global_w_setup.get('payout_btn_text', '📜 View Receipt')
+                payout_markup.row(InlineKeyboardButton(get_tl_and_map(btn_text, target_lang), callback_data='cb_payout_popup_alert'))
+                try: bot.send_message(target, msg, parse_mode="HTML", reply_markup=payout_markup)
+                except: pass
+
+        pub_chat = global_w_setup.get('public_report')
+        if pub_chat:
+            try:
+                pub_msg = f"💸 <b>SUCCESSFUL WITHDRAWAL</b> 💸\n\n👤 User: {user_db.get(target, {}).get('first_name', 'Unknown')}\n💰 Amount: {fmt_amt(amt)}\n🌐 Network: {w_data['network']}\n🔗 Address: {w_data['address'][:6]}...{w_data['address'][-4:]}"
+                bot.send_message(pub_chat, pub_msg, parse_mode="HTML")
+            except: pass
+
+    elif action == 'dec':
+        stamp = "❌ <b>DECLINED (Refunded to user)</b>"
+        if target in user_db:
+            user_db[target][w_var] = user_db[target].get(w_var, 0) + amt
+            user_db[target]['total_withdrawn'] = max(0, user_db[target].get('total_withdrawn', 0.0) - amt)
+            log_tx(target, "Withdrawal Refunded", amt)
+        if mode == 'm':
+            msg_template = global_w_setup.get('w_msg_decline')
+            if msg_template:
+                msg = replace_macros(get_tl_and_map(msg_template, target_lang), target, w_data['path'], w_data)
+                try: bot.send_message(target, msg, parse_mode="HTML")
+                except: pass
+
+    elif action == 'ign':
+        stamp = "🚫 <b>IGNORED (No Refund)</b>"
+        if mode == 'm':
+            msg_template = global_w_setup.get('w_msg_ignore')
+            if msg_template:
+                msg = replace_macros(get_tl_and_map(msg_template, target_lang), target, w_data['path'], w_data)
+                try: bot.send_message(target, msg, parse_mode="HTML")
+                except: pass
+    else:
+        # Unknown action — put it back so nothing is lost
+        pending_withdrawals[w_id] = w_data
+        return False, 'Unknown action.'
+
+    # Stamp every admin alert copy we know about so no buttons linger anywhere
+    alert_text = w_data.get('alert_text', 'Withdrawal request')
+    for aid, mid in (w_data.get('admin_msgs') or {}).items():
+        try:
+            bot.edit_message_text(f"{alert_text}\n\n{stamp}", int(aid), int(mid),
+                                  parse_mode="HTML", reply_markup=None)
+        except Exception:
+            try: bot.edit_message_reply_markup(int(aid), int(mid), reply_markup=None)
+            except Exception: pass
+
+    save_database()
+    return True, 'Action executed successfully.'
+
+
 # --- INLINE BUTTON LOGIC ---
 @bot.callback_query_handler(func=lambda call: True)
 def handle_inline(call):
@@ -7176,92 +7431,28 @@ def handle_inline(call):
     if call.data.startswith('cb_wad_'):
         if not is_admin: return bot.answer_callback_query(call.id, "Action not permitted.", show_alert=True)
         parts = call.data.split('_')
-        action = parts[2] 
-        mode = parts[3] 
+        action = parts[2]
+        mode = parts[3]
         w_id = parts[4]
-        
-        if 'pending_withdrawals' not in globals() or w_id not in pending_withdrawals:
+
+        if w_id not in pending_withdrawals:
+            # Expired or already handled — strip the buttons so it can't be pressed again
+            try:
+                bot.edit_message_text(f"{call.message.text}\n\n⏰ <b>EXPIRED / ALREADY HANDLED</b>",
+                                      call.message.chat.id, call.message.message_id,
+                                      parse_mode="HTML", reply_markup=None)
+            except Exception:
+                pass
             return bot.answer_callback_query(call.id, "Withdrawal no longer pending or expired.", show_alert=True)
-            
-        w_data = pending_withdrawals.pop(w_id)
-        target = w_data['user_id']
-        amt = w_data['amount']
-        w_var = w_data['currency_var']
-        target_lang = get_user_lang(target)
-        
-        if action == 'app':
-            log_tx(target, "Withdrawal Approved", 0) 
-            bot.edit_message_text(f"{call.message.text}\n\n✅ <b>APPROVED ({'Silent' if mode=='s' else 'Msg sent'})</b>", call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=None)
-            
-            user_email = user_db.get(target, {}).get('email', 'Not Set')
-            if user_email != 'Not Set':
-                w_subject = "Withdrawal Processed - G-Force"
-                w_html = f"""
-                <div style="background-color: #0b0e11; color: #eaecef; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #2b3139; border-radius: 8px; overflow: hidden;">
-                    <div style="background-color: #181a20; padding: 20px; border-bottom: 1px solid #2b3139; text-align: center;">
-                        <h2 style="margin: 0; color: #fcd535;">G-FORCE TRADING</h2>
-                    </div>
-                    <div style="padding: 30px;">
-                        <h3 style="margin-top: 0; color: #ffffff;">Withdrawal Approved</h3>
-                        <p>Your withdrawal request has been fully processed by the administrator and the funds have been transferred to your wallet.</p>
-                        <div style="background-color: #181a20; padding: 15px; border-radius: 6px; margin: 20px 0;">
-                            <p style="margin: 5px 0; color: #848e9c;">Amount Sent: <span style="color: #f6465d; float: right; font-weight: bold;">-${fmt_amt(amt)}</span></p>
-                            <p style="margin: 5px 0; color: #848e9c;">Network: <span style="color: #ffffff; float: right; font-weight: bold;">{w_data['network']}</span></p>
-                            <p style="margin: 5px 0; color: #848e9c;">Destination: <span style="color: #ffffff; float: right; font-size: 12px; word-break: break-all;">{w_data['address']}</span></p>
-                        </div>
-                    </div>
-                </div>
-                """
-                send_email_async(user_email, w_subject, w_html)
-            
-            if mode == 'm':
-                msg_template = global_w_setup.get('w_msg_approve')
-                if msg_template:
-                    # Translate TEMPLATE first (with macros intact), THEN replace
-                    # macros — otherwise the user's name/address would be sent
-                    # to Google and mangled in CJK/Arabic.
-                    msg = replace_macros(get_tl_and_map(msg_template, target_lang), target, w_data['path'], w_data)
-                    
-                    payout_markup = InlineKeyboardMarkup()
-                    btn_text = global_w_setup.get('payout_btn_text', '📜 View Receipt')
-                    payout_markup.row(InlineKeyboardButton(get_tl_and_map(btn_text, target_lang), callback_data='cb_payout_popup_alert'))
-                    
-                    try: bot.send_message(target, msg, parse_mode="HTML", reply_markup=payout_markup)
-                    except: pass
-            
-            pub_chat = global_w_setup.get('public_report')
-            if pub_chat:
-                try:
-                    pub_msg = f"💸 <b>SUCCESSFUL WITHDRAWAL</b> 💸\n\n👤 User: {user_db.get(target, {}).get('first_name', 'Unknown')}\n💰 Amount: {fmt_amt(amt)}\n🌐 Network: {w_data['network']}\n🔗 Address: {w_data['address'][:6]}...{w_data['address'][-4:]}"
-                    bot.send_message(pub_chat, pub_msg, parse_mode="HTML")
-                except: pass
 
-        elif action == 'dec':
-            if target in user_db:
-                user_db[target][w_var] = user_db[target].get(w_var, 0) + amt
-                user_db[target]['total_withdrawn'] = max(0, user_db[target].get('total_withdrawn', 0.0) - amt)
-                log_tx(target, "Withdrawal Refunded", amt)
-                
-            bot.edit_message_text(f"{call.message.text}\n\n❌ <b>DECLINED (Refunded to user)</b>", call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=None)
-            
-            if mode == 'm':
-                msg_template = global_w_setup.get('w_msg_decline')
-                if msg_template:
-                    msg = replace_macros(get_tl_and_map(msg_template, target_lang), target, w_data['path'], w_data)
-                    try: bot.send_message(target, msg, parse_mode="HTML")
-                    except: pass
+        # Register the pressing admin's message so it gets updated alongside
+        # every other admin's copy of this alert.
+        pw = pending_withdrawals.get(w_id)
+        if pw is not None:
+            pw.setdefault('admin_msgs', {})[str(call.message.chat.id)] = call.message.message_id
 
-        elif action == 'ign':
-            bot.edit_message_text(f"{call.message.text}\n\n🚫 <b>IGNORED (No Refund)</b>", call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=None)
-            if mode == 'm':
-                msg_template = global_w_setup.get('w_msg_ignore')
-                if msg_template:
-                    msg = replace_macros(get_tl_and_map(msg_template, target_lang), target, w_data['path'], w_data)
-                    try: bot.send_message(target, msg, parse_mode="HTML")
-                    except: pass
-        
-        return bot.answer_callback_query(call.id, "Action executed successfully.")
-
+        ok, detail = execute_withdrawal_action(w_id, action, mode)
+        return bot.answer_callback_query(call.id, detail, show_alert=not ok)
 
     if call.data.startswith('cb_depcheck_'):
         try: bot.answer_callback_query(call.id, get_tl_and_map("Checking the blockchain network...", lang))
@@ -7815,12 +8006,23 @@ def handle_inline(call):
             comm_pct = global_w_setup.get('w_commission', 0.0)
             final_amt = amount - (amount * (comm_pct / 100.0))
             
+            admin_alert = (
+                f"🚨 <b>NEW WITHDRAWAL REQUEST</b> 🚨\n\n"
+                f"👤 User: <code>{user_id}</code> (@{call.from_user.username or 'None'})\n"
+                f"💰 Requested: <b>{fmt_amt(amount)}</b>\n"
+                f"💸 Final (after {comm_pct}% comm): <b>{fmt_amt(final_amt)}</b>\n"
+                f"🔗 Address: <code>{addr}</code>\n"
+                f"🌐 Network: {net}\n"
+                f"🗃 Variable: {w_var}"
+            )
+
             pending_withdrawals[w_id] = {
                 'user_id': user_id, 'amount': amount, 'final_amt': final_amt,
                 'address': addr, 'network': net, 'currency_var': w_var,
-                'path': data['path']
+                'path': data['path'], 'alert_text': admin_alert,
+                'admin_msgs': {}, 'ts': time.time()
             }
-            
+
             adm_markup = InlineKeyboardMarkup()
             adm_markup.row(
                 InlineKeyboardButton('Approve ✅', callback_data=f'cb_wad_app_s_{w_id}'),
@@ -7832,21 +8034,18 @@ def handle_inline(call):
                 InlineKeyboardButton('Decline 📝', callback_data=f'cb_wad_dec_m_{w_id}'),
                 InlineKeyboardButton('Ignore 📝', callback_data=f'cb_wad_ign_m_{w_id}')
             )
-            
-            admin_alert = (
-                f"🚨 <b>NEW WITHDRAWAL REQUEST</b> 🚨\n\n"
-                f"👤 User: <code>{user_id}</code> (@{call.from_user.username or 'None'})\n"
-                f"💰 Requested: <b>{fmt_amt(amount)}</b>\n"
-                f"💸 Final (after {comm_pct}% comm): <b>{fmt_amt(final_amt)}</b>\n"
-                f"🔗 Address: <code>{addr}</code>\n"
-                f"🌐 Network: {net}\n"
-                f"🗃 Variable: {w_var}"
-            )
-            
+
             for admin in ADMIN_IDS:
-                try: bot.send_message(admin, admin_alert, parse_mode="HTML", reply_markup=adm_markup)
+                try:
+                    sent = bot.send_message(admin, admin_alert, parse_mode="HTML", reply_markup=adm_markup)
+                    pending_withdrawals[w_id]['admin_msgs'][str(admin)] = sent.message_id
                 except: pass
-                
+            save_database()
+
+            send_admin_push('🚨 Withdrawal Request',
+                            f"{fmt_amt(amount)} from user {user_id} · {net} — tap to review",
+                            '/#requests', tag=f'wad_{w_id}')
+
         return
         
     elif call.data == 'cb_w_no':
@@ -8025,6 +8224,90 @@ def free_trial_expiry_loop():
             print(f"Free Trial Expiry Error: {e}")
         time.sleep(60)
 
+# ===================== PWA — installable app + Web Push ======================
+# The dashboard is installable (iOS "Add to Home Screen" / Android PWA); once
+# installed, send_admin_push() reaches it even when the page is closed.
+PWA_MANIFEST = json.dumps({
+    "name": "G-Force Admin",
+    "short_name": "G-Force",
+    "start_url": "/",
+    "scope": "/",
+    "display": "standalone",
+    "background_color": "#0f2027",
+    "theme_color": "#0f2027",
+    "icons": [
+        {"src": "/icon-192.png", "sizes": "192x192", "type": "image/png"},
+        {"src": "/icon.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
+    ],
+})
+
+PWA_SW = r"""
+const CACHE = 'gf-admin-v1';
+self.addEventListener('install', e => self.skipWaiting());
+self.addEventListener('activate', e => e.waitUntil(clients.claim()));
+self.addEventListener('push', e => {
+    let d = { title: 'G-Force Admin', body: '', url: '/' };
+    try { if (e.data) d = Object.assign(d, e.data.json()); } catch (_) {}
+    e.waitUntil(self.registration.showNotification(d.title, {
+        body: d.body, tag: d.tag || 'gf', icon: '/icon.png', badge: '/icon.png',
+        data: { url: d.url || '/' }, renotify: true
+    }));
+});
+self.addEventListener('notificationclick', e => {
+    e.notification.close();
+    const url = (e.notification.data && e.notification.data.url) || '/';
+    e.waitUntil(clients.matchAll({ type: 'window', includeUncontrolled: true }).then(list => {
+        for (const c of list) { if ('focus' in c) { c.navigate(url); return c.focus(); } }
+        return clients.openWindow(url);
+    }));
+});
+"""
+
+# 512x512 app icon (dark bg + bolt) — see also /icon-192.png for the manifest
+PWA_ICON_B64 = (
+    "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"
+)
+PWA_ICON_192_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAACJElEQVR42u3dsQ2DQBREweuAFsjonSahAaK7YDntSK+Cr9EGtjHj"
+    "OC9puuEEAkgACSABJAEkgASQAJIAEkACSABJAAkgASSAJIAEkAASQAJIAkgACSABJAEkgASQAJIAEkACSABJAAkgASSABJAEkAAS"
+    "QAJIAkgA/fxw9+MIAAEEUEgPQAABBFBOD0AAAQRQTg9AAJkfgMwPQDvqAQgggADK6QEIIIAAyukBCCCAAMrpAQgg8wOQ+QEIIIDq"
+    "9AAEEEAA5fQABNCSHoAAAgignB6AADI/AJkfgAACqE4PQAABBFBOD0AAAQRQTg9AAJkfgMwPQAABVKcHIICW9AAEEEAA5fQABBBA"
+    "AOX0AASQ+QHI/AAEEEB1elYCCCCAAKIHIIAAogcgeugBCCCA6AEIIIDoaf7MGiCAAKIHIL/6AAigxm/sAfLQD0DmByDzAxBAAMkz"
+    "8wABBBA9APnLKYAAAgggf/kLEEAAeecBQPQABJD5AQgggLxzDiCvbBZA5gcg8wMQQACVAHIcgAACKATIZQCiByCAANoOkLMABBBA"
+    "IUBuApD5Acj8AAQQQF2AHASgeUCuARBAANEDEEAAdQFyCoAAAigEyB0AogcggADaDpAjAAQQQAJIAEkACSABJIAkgASQABJAEkAC"
+    "SAAJIAHkCgJIAAkgASQBJIAEkACSABJAAkgASQAJIAEkgCSABJAAEkACSAJIAAkgASQBJIAEkACSvnsBa8xYTRQu8XoAAAAASUVO"
+    "RK5CYII="
+)
+
+
 # --- NEW: LIGHTWEIGHT WEB SERVER FOR ADMIN DASHBOARD & UPTIMEROBOT ---
 class AdminDashboardHandler(BaseHTTPRequestHandler):
     def do_HEAD(self):
@@ -8034,7 +8317,8 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         parsed_path = urlparse(self.path)
-        if parsed_path.path == '/':
+        p = parsed_path.path
+        if p == '/':
             try:
                 with open(os.path.join(BASE_DIR, 'index.html'), 'rb') as f:
                     self.send_response(200)
@@ -8045,6 +8329,31 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                 self.send_response(404)
                 self.end_headers()
                 self.wfile.write(b"index.html not found. Make sure it is in the root directory.")
+        elif p == '/manifest.json':
+            body = PWA_MANIFEST.encode()
+            self.send_response(200)
+            self.send_header('Content-type', 'application/manifest+json')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif p == '/sw.js':
+            # Service worker MUST be served as JS from the root to get '/' scope
+            body = PWA_SW.encode()
+            self.send_response(200)
+            self.send_header('Content-type', 'application/javascript')
+            self.send_header('Service-Worker-Allowed', '/')
+            self.send_header('Cache-Control', 'no-cache')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif p in ('/icon.png', '/icon-192.png'):
+            body = base64.b64decode(PWA_ICON_B64 if p == '/icon.png' else PWA_ICON_192_B64)
+            self.send_response(200)
+            self.send_header('Content-type', 'image/png')
+            self.send_header('Cache-Control', 'public, max-age=86400')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
         else:
             self.send_response(404)
             self.end_headers()
@@ -8917,11 +9226,19 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                     if not w:
                         raise ValueError('pick a source wallet')
                     est_g = gasfree_fee_estimate(w['address'])
+                    # The USDT fee itself is relayer-paid, but the one-time
+                    # base -> gasfree account move still costs gas-wallet TRX
+                    # until the gasfree account is funded — surface that need.
+                    boot = _gasfree_bootstrap_trx(w['address'], est_g,
+                                                  float(data.get('amount') or 0))
+                    gb = (get_gas_balances() or {}).get('TRX')
                     est = {'gas_asset': 'USDT', 'fee_crypto': est_g['fee_usdt'],
-                           'fee_usd': est_g['fee_usdt'], 'gas_needed_crypto': 0,
-                           'gas_balance': None, 'gas_ok': True, 'gasfree': True,
+                           'fee_usd': est_g['fee_usdt'], 'gas_needed_crypto': boot,
+                           'gas_balance': gb,
+                           'gas_ok': boot == 0 or (gb is not None and gb >= boot + 0.3),
+                           'gasfree': True,
                            'note': ('fee deducted in USDT via GasFree relayer' +
-                                    ('' if est_g['active'] else ' — first use adds a one-time activation fee'))}
+                                    ('' if est_g['active'] else ' — first use adds activation + a small gas-wallet setup transfer'))}
                 except Exception as e:
                     est = {'error': str(e)}
             else:
@@ -9149,6 +9466,14 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                     est_g = gasfree_fee_estimate(w['address'])
                     if amount + est_g['fee_usdt'] > live + BALANCE_EPSILON:
                         raise ValueError(f"Amount + GasFree fee ({fmt_amt(est_g['fee_usdt'])} USDT) exceeds balance")
+                    # First use also needs a little gas-wallet TRX for the
+                    # one-time base -> gasfree account move.
+                    boot = _gasfree_bootstrap_trx(w['address'], est_g, amount)
+                    if boot > 0:
+                        gtrx = _tron_balance(get_gas_addr('tron'), 'TRX')
+                        if gtrx is not None and gtrx < boot + 0.3:
+                            raise ValueError(f"Gas wallet needs ~{fmt_amt(boot + 0.3)} TRX for the one-time "
+                                             f"GasFree setup (has {fmt_amt(gtrx)}) — top it up or use another fee mode")
                 elif net in ('TRX', 'BTC'):
                     est = estimate_network_fee(net)
                     need = est.get('fee_crypto', 0) if 'error' not in est else 0
@@ -9262,6 +9587,34 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                 self.send_header('Content-type', 'application/json')
                 self.end_headers()
                 self.wfile.write(json.dumps({'error': str(e)}).encode())
+
+        # --- PWA: Web Push subscription management ---------------------------
+        elif parsed_path.path == '/api/push_key':
+            if pin != ADMIN_PIN:
+                self.send_response(401)
+                self.end_headers()
+                return
+            pub, _ = _vapid_keys()
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'key': pub}).encode())
+
+        elif parsed_path.path == '/api/push_subscribe':
+            if pin != ADMIN_PIN:
+                self.send_response(401)
+                self.end_headers()
+                return
+            sub = data.get('sub')
+            if isinstance(sub, dict) and sub.get('endpoint'):
+                subs = push_settings.setdefault('subs', [])
+                if not any(s.get('endpoint') == sub['endpoint'] for s in subs):
+                    subs.append(sub)
+                    save_database()
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'ok': True}).encode())
 
         # --- Catch-all 404 (MUST BE AT THE VERY BOTTOM OF do_POST) ---
         else:
