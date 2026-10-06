@@ -1493,7 +1493,7 @@ def _tron_balance(addr, curr):
     for ep in TRON_FULLNODES:
         for _ in range(2):
             try:
-                resp = requests.get(f"{ep}v1/accounts/{addr}", headers=headers, timeout=8)
+                resp = requests.get(f"{ep}/v1/accounts/{addr}", headers=headers, timeout=8)
                 if resp.status_code == 429:
                     time.sleep(0.8)
                     continue
@@ -1550,7 +1550,7 @@ def _tron_account_resources(addr):
     network-wide totals needed to convert TRX stake <-> energy."""
     headers = {"TRON-PRO-API-KEY": TRONGRID_API_KEY} if TRONGRID_API_KEY else {}
     for ep in TRON_FULLNODES:
-        url = ep + 'wallet/getaccountresource'
+        url = ep + '/wallet/getaccountresource'
         for _ in range(2):
             try:
                 r = requests.post(url, json={"address": addr, "visible": True},
@@ -1871,7 +1871,7 @@ def evm_send_token(network, key_hex, to, amount_usdt):
 # TronGrid-compatible fullnodes. Without TRONGRID_API_KEY tronpy falls back to
 # shared demo keys — every build()/broadcast() then hits the public per-second
 # cap (429 storms). The resilient client retries on 429/5xx and fails over.
-TRON_FULLNODES = ('https://api.trongrid.io/', 'https://api.tronstack.io/')
+TRON_FULLNODES = ('https://api.trongrid.io', 'https://api.tronstack.io')
 
 def _tron_client():
     """tronpy client on the fullnode pool: API key attached when configured,
@@ -1899,7 +1899,7 @@ def _tron_client():
                         raise
             raise err
 
-    return Tron(_ResilientProvider(TRON_FULLNODES[0], api_key=TRONGRID_API_KEY or None))
+    return Tron(_ResilientProvider(TRON_FULLNODES[0] + '/', api_key=TRONGRID_API_KEY or None))
 
 
 def tron_send_native(key_hex, to, amount_trx):
