@@ -1808,7 +1808,96 @@ def get_gas_balances():
     return out
 
 
-# --- FEE ESTIMATION ----------------------------------------------------------
+# --- FEE ESTIMATION (per-wallet, live-simulated to match broadcast) -----------
+# Every wallet pays its own gas from its own native balance — there is no
+# central gas wallet. Estimates below mirror the broadcast path exactly so the
+# number shown in the dashboard is the number the chain will actually charge.
+_TRON_CHAIN_PARAMS_CACHE = {'ts': 0, 'data': None}
+
+def _tron_chain_params():
+    """Live TRON burn prices: {energy_fee_sun, bw_fee_sun}. Cached 5 min.
+
+    energy_fee_sun = SUN burned per unit of missing energy.
+    bw_fee_sun    = SUN burned per byte of missing bandwidth."""
+    now = time.time()
+    if _TRON_CHAIN_PARAMS_CACHE['data'] and now - _TRON_CHAIN_PARAMS_CACHE['ts'] < 300:
+        return _TRON_CHAIN_PARAMS_CACHE['data']
+    out = {'energy_fee_sun': 100, 'bw_fee_sun': 1000}  # post-Aug-2025 defaults
+    for _key in _ordered_tron_keys():
+        headers = _trongrid_headers(_key)
+        for ep in TRON_FULLNODES:
+            try:
+                r = requests.post(ep + '/wallet/getchainparameters', json={},
+                                  headers=headers, timeout=8)
+                if r.status_code in (429, 401):
+                    break
+                if r.status_code == 200:
+                    for p in (r.json().get('chainParameter') or []):
+                        k, v = p.get('key'), p.get('value')
+                        try:
+                            v = int(v)
+                        except Exception:
+                            continue
+                        if k == 'getEnergyFee':
+                            out['energy_fee_sun'] = v
+                        elif k == 'getTransactionFee':
+                            out['bw_fee_sun'] = v
+                    if out['energy_fee_sun'] and out['bw_fee_sun']:
+                        _TRON_CHAIN_PARAMS_CACHE.update({'ts': now, 'data': out})
+                        return out
+            except Exception:
+                continue
+        time.sleep(0.2)
+    return out
+
+
+def _tron_addr_to_eth_hex(base58_addr):
+    """TRON base58 (T...) -> 20-byte eth hex used inside contract parameters."""
+    try:
+        payload = _b58check_decode(base58_addr.strip())
+        if payload and len(payload) == 21 and payload[0] == 0x41:
+            return payload[1:].hex()
+    except Exception:
+        pass
+    return None
+
+
+def _tron_simulate_energy(from_addr, to_addr, amount_usdt):
+    """Exact energy the chain will charge for this USDT transfer, via
+    triggerconstantcontract (the same VM the broadcast runs). Returns int or
+    None when simulation is unavailable (fallback to the 64k/130k heuristic)."""
+    if not from_addr or not to_addr:
+        return None
+    try:
+        to_hex = _tron_addr_to_eth_hex(to_addr)
+        if not to_hex:
+            return None
+        units = int(round(float(amount_usdt or 1.0) * 1_000_000))
+        param = to_hex.rjust(64, '0') + hex(units)[2:].rjust(64, '0')
+        body = {"owner_address": from_addr, "contract_address": USDT_TRC20_CONTRACT,
+                "function_selector": "transfer(address,uint256)",
+                "parameter": param, "visible": True}
+        for _key in _ordered_tron_keys():
+            headers = _trongrid_headers(_key)
+            for ep in TRON_FULLNODES:
+                try:
+                    r = requests.post(ep + '/wallet/triggerconstantcontract',
+                                      json=body, headers=headers, timeout=10)
+                    if r.status_code in (429, 401):
+                        break
+                    if r.status_code == 200:
+                        j = r.json()
+                        eu = j.get('energy_used')
+                        if isinstance(eu, int) and eu > 0:
+                            return int(eu * 1.10) + 2000  # +10% + margin, like the real broadcast
+                except Exception:
+                    continue
+            time.sleep(0.2)
+    except Exception:
+        pass
+    return None
+
+
 def _evm_gas_price(endpoints):
     for endpoint, _ in endpoints:
         try:
@@ -1819,71 +1908,212 @@ def _evm_gas_price(endpoints):
             continue
     return None
 
-def estimate_network_fee(network, to_addr=None):
-    """Estimate the network fee for a send of `network` to `to_addr`.
-    Returns {gas_asset, fee_crypto, fee_usd, note} or {'error': ...}."""
-    if network == 'USDT_ERC20':
-        gp = _evm_gas_price(ETH_RPC_ENDPOINTS)
-        if gp is None: return {'error': 'Could not read ETH gas price'}
-        fee_eth = (gp * 65000) / 10**18
-        return {'gas_asset': 'ETH', 'fee_crypto': fee_eth,
-                'fee_usd': fee_eth * get_crypto_price('ETH'),
-                'gas_needed_crypto': fee_eth, 'note': 'gasPrice x 65,000 gas (USDT transfer)'}
-    if network == 'USDT_BEP20':
-        gp = _evm_gas_price(BSC_RPC_ENDPOINTS)
-        if gp is None: return {'error': 'Could not read BNB gas price'}
-        fee_bnb = (gp * 60000) / 10**18
-        return {'gas_asset': 'BNB', 'fee_crypto': fee_bnb,
-                'fee_usd': fee_bnb * get_crypto_price('BNB'),
-                'gas_needed_crypto': fee_bnb, 'note': 'gasPrice x 60,000 gas (USDT transfer)'}
-    if network == 'USDT_TRC20':
-        # TRC20 USDT transfer: ~64,300 energy if recipient already holds USDT,
-        # ~130,000 if not. If the gas wallet has staked TRX, that energy is
-        # delegated instead of burned -> the send only needs ~0.7 TRX bandwidth.
-        need = _tron_energy_needed(to_addr) if to_addr else 64300
-        energy_avail = 0
-        gas_tron = get_gas_addr('tron')
-        if gas_tron:
-            res = _tron_account_resources(gas_tron)
-            if res:
-                energy_avail = max(0, res['energy_limit'] - res['energy_used'])
-        if energy_avail >= need * 0.95:
-            fee_trx = 0.7   # tiny TRX top-up for bandwidth only
-            note = f'staked energy delegated (⚡ {int(energy_avail):,} available) — bandwidth top-up only'
-            delegated = True
-        else:
-            # Post-Aug-2025 burn is 100 SUN/unit (was 420): 64.3k -> ~6.5 TRX,
-            # 130k -> ~13 TRX. +margin -> 7 / 14.
-            fee_trx = 14.0 if need > 100000 else 7.0
-            note = f'energy burn estimate — stake TRX in your gas wallet to drop this to ~0.7 TRX'
-            delegated = False
-        return {'gas_asset': 'TRX', 'fee_crypto': fee_trx,
-                'fee_usd': fee_trx * get_crypto_price('TRX'),
-                'gas_needed_crypto': fee_trx, 'delegated': delegated,
-                'energy_available': energy_avail, 'energy_needed': need,
-                'note': note}
-    if network == 'TRX':
-        return {'gas_asset': 'TRX', 'fee_crypto': 1.1,
-                'fee_usd': 1.1 * get_crypto_price('TRX'),
-                'gas_needed_crypto': 0.0, 'note': 'bandwidth fee paid by the sending wallet'}
-    if network == 'BTC':
-        rate = None
-        for url in ("https://mempool.space/api/v1/fees/recommended",
-                    "https://blockstream.info/api/fee-estimates"):
+
+def _evm_estimate_token_gas(endpoints, from_addr, contract, to_addr, amount_units, fallback):
+    """Live eth_estimateGas for an ERC20/BEP20 transfer from -> to. Returns int."""
+    if not from_addr or not to_addr:
+        return fallback
+    try:
+        to_clean = (to_addr[2:] if to_addr.lower().startswith('0x') else to_addr).lower().rjust(64, '0')
+        amt_hex = hex(int(amount_units))[2:].rjust(64, '0')
+        data = '0xa9059cbb' + to_clean + amt_hex
+        for endpoint, _ in endpoints:
             try:
-                r = requests.get(url, timeout=8)
-                if 'recommended' in url:
-                    rate = r.json().get('fastestFee')
-                else:
-                    j = r.json(); rate = j.get('1') or j.get('3')
-                if rate: break
+                r = _rpc_call(endpoint, "eth_estimateGas",
+                              [{"from": from_addr, "to": contract, "data": data}, "latest"])
+                if r:
+                    return max(int(r, 16), 21000)
             except Exception:
                 continue
-        if rate is None: return {'error': 'Could not read BTC fee rate'}
-        fee_btc = (float(rate) * 250) / 10**8  # ~250 vB, 1-in 2-out legacy
+    except Exception:
+        pass
+    return fallback
+
+
+def _btc_fee_rate():
+    """Current fastest BTC rate in sat/vB, or None."""
+    for url in ("https://mempool.space/api/v1/fees/recommended",
+                "https://blockstream.info/api/fee-estimates"):
+        try:
+            r = requests.get(url, timeout=8)
+            if 'recommended' in url:
+                rate = r.json().get('fastestFee')
+            else:
+                j = r.json()
+                rate = j.get('1') or j.get('3')
+            if rate:
+                return float(rate)
+        except Exception:
+            continue
+    return None
+
+
+def _btc_estimate_fee(from_addr, amount_btc, fee_sat_vb=None):
+    """Mirror btc_send's coin selection so the quote equals the broadcast fee.
+    Returns (fee_btc, vsize, rate) or (None, None, rate)."""
+    rate = float(fee_sat_vb) if fee_sat_vb else _btc_fee_rate()
+    if not rate:
+        return None, None, None
+    if not from_addr or not (amount_btc or 0) > 0:
+        # no wallet context: legacy ~250 vB fallback (1-in 2-out)
+        return (rate * 250) / 10**8, 250, rate
+    try:
+        utxos = None
+        for base in ("https://mempool.space/api", "https://blockstream.info/api"):
+            try:
+                r = requests.get(f"{base}/address/{from_addr}/utxo", timeout=10)
+                if r.status_code == 200:
+                    utxos = r.json()
+                    break
+            except Exception:
+                continue
+        if not utxos:
+            return (rate * 250) / 10**8, 250, rate
+        amount_sat = int(float(amount_btc) * 10**8)
+        utxos.sort(key=lambda u: u['value'], reverse=True)
+        picked, total = [], 0
+        est_vb = 0
+        for u in utxos:
+            picked.append(u)
+            total += u['value']
+            est_vb = len(picked) * 148 + 2 * 34 + 10
+            if total >= amount_sat + int(rate * est_vb):
+                break
+        fee_sat = int(rate * est_vb)
+        return fee_sat / 10**8, est_vb, rate
+    except Exception:
+        return (rate * 250) / 10**8, 250, rate
+
+
+def estimate_network_fee(network, to_addr=None, from_addr=None, amount=None):
+    """Estimate the network fee for a send of `network` to `to_addr`.
+
+    Per-wallet model: `from_addr` is the sending wallet (pays its own gas) and
+    `amount` is the token amount being sent. Both are optional for backward
+    compatibility — without them we return the worst-case (no resources).
+    Returns {gas_asset, fee_crypto, fee_usd, ...} or {'error': ...}."""
+    if network == 'USDT_ERC20':
+        eps, dec, sym, fallback_gas = ETH_RPC_ENDPOINTS, 6, 'ETH', 65000
+        gp = _evm_gas_price(eps)
+        if gp is None:
+            return {'error': 'Could not read ETH gas price'}
+        units = int(float(amount or 1.0) * 10**dec) if amount else 0
+        gas_limit = _evm_estimate_token_gas(eps, from_addr, USDT_ERC20_CONTRACT,
+                                           to_addr, units, fallback_gas) if (from_addr and to_addr) else fallback_gas
+        fee = (gp * gas_limit) / 10**18
+        out = {'gas_asset': 'ETH', 'fee_crypto': fee,
+               'fee_usd': fee * get_crypto_price('ETH'),
+               'gas_needed_crypto': fee, 'gas_limit': gas_limit,
+               'note': f'live gasPrice x {gas_limit:,} gas (simulated transfer)'}
+        if from_addr:
+            try:
+                bal = _evm_native_balance(eps, from_addr)
+            except Exception:
+                bal = None
+            out['gas_balance'] = bal
+            out['wallet_addr'] = from_addr
+            out['gas_ok'] = bal is not None and bal >= fee
+        return out
+    if network == 'USDT_BEP20':
+        eps, dec, sym, fallback_gas = BSC_RPC_ENDPOINTS, 18, 'BNB', 60000
+        gp = _evm_gas_price(eps)
+        if gp is None:
+            return {'error': 'Could not read BNB gas price'}
+        units = int(float(amount or 1.0) * 10**dec) if amount else 0
+        gas_limit = _evm_estimate_token_gas(eps, from_addr, USDT_BEP20_CONTRACT,
+                                           to_addr, units, fallback_gas) if (from_addr and to_addr) else fallback_gas
+        fee = (gp * gas_limit) / 10**18
+        out = {'gas_asset': 'BNB', 'fee_crypto': fee,
+               'fee_usd': fee * get_crypto_price('BNB'),
+               'gas_needed_crypto': fee, 'gas_limit': gas_limit,
+               'note': f'live gasPrice x {gas_limit:,} gas (simulated transfer)'}
+        if from_addr:
+            try:
+                bal = _evm_native_balance(eps, from_addr)
+            except Exception:
+                bal = None
+            out['gas_balance'] = bal
+            out['wallet_addr'] = from_addr
+            out['gas_ok'] = bal is not None and bal >= fee
+        return out
+    if network == 'USDT_TRC20':
+        # Exact energy via chain simulation; burn priced from live chain params.
+        # Bandwidth: ~350 bytes for a TRC20 call; free quota covers it when available.
+        BW_NEEDED = 350
+        sim = _tron_simulate_energy(from_addr, to_addr, amount) if (from_addr and to_addr) else None
+        need = sim or (_tron_energy_needed(to_addr) if to_addr else 64300)
+        params = _tron_chain_params()
+        e_fee, b_fee = params['energy_fee_sun'], params['bw_fee_sun']
+        if from_addr:
+            res = _tron_account_resources(from_addr)
+            if res:
+                e_avail = max(0, res['energy_limit'] - res['energy_used'])
+                bw_free = max(0, res.get('freenet', 0) + res.get('net', 0))
+            else:
+                e_avail, bw_free = 0, 0
+            e_short = max(0, need - e_avail)
+            bw_short = max(0, BW_NEEDED - bw_free)
+            fee_trx = (e_short * e_fee + bw_short * b_fee) / 1_000_000
+            try:
+                src_trx = _tron_balance(from_addr, 'TRX')
+            except Exception:
+                src_trx = None
+            detail = (f'simulated {need:,} energy' if sim else f'~{need:,} energy')
+            note = (f'{detail} · shortfall {e_short:,} x {e_fee} sun'
+                    + (f' + {bw_short} bw x {b_fee} sun' if bw_short else '')
+                    + (' — wallet covers it (free resources)' if fee_trx == 0 else ''))
+            return {'gas_asset': 'TRX', 'fee_crypto': fee_trx,
+                    'fee_usd': fee_trx * get_crypto_price('TRX'),
+                    'gas_needed_crypto': fee_trx, 'delegated': False,
+                    'energy_available': e_avail, 'energy_needed': need,
+                    'energy_simulated': bool(sim),
+                    'bandwidth_free': bw_free, 'bandwidth_needed': BW_NEEDED,
+                    'gas_balance': src_trx, 'wallet_addr': from_addr,
+                    'gas_ok': src_trx is not None and src_trx >= fee_trx,
+                    'note': note.strip()}
+        # No source context (legacy callers): worst-case burn, live unit price.
+        fee_trx = (need * e_fee + BW_NEEDED * b_fee) / 1_000_000
+        return {'gas_asset': 'TRX', 'fee_crypto': fee_trx,
+                'fee_usd': fee_trx * get_crypto_price('TRX'),
+                'gas_needed_crypto': fee_trx, 'delegated': False,
+                'energy_available': 0, 'energy_needed': need,
+                'energy_simulated': False,
+                'note': f'worst-case burn: ~{need:,} energy x {e_fee} sun (top up the sending wallet)'}
+    if network == 'TRX':
+        # Native transfer burns bandwidth only — no energy involved.
+        BW_NEEDED = 268
+        params = _tron_chain_params()
+        b_fee = params['bw_fee_sun']
+        if from_addr:
+            res = _tron_account_resources(from_addr)
+            bw_free = max(0, res.get('freenet', 0) + res.get('net', 0)) if res else 0
+            bw_short = max(0, BW_NEEDED - bw_free)
+            fee_trx = (bw_short * b_fee) / 1_000_000
+            try:
+                src_trx = _tron_balance(from_addr, 'TRX')
+            except Exception:
+                src_trx = None
+            return {'gas_asset': 'TRX', 'fee_crypto': fee_trx,
+                    'fee_usd': fee_trx * get_crypto_price('TRX'),
+                    'gas_needed_crypto': 0.0, 'wallet_addr': from_addr,
+                    'gas_balance': src_trx,
+                    'gas_ok': src_trx is not None and (float(amount or 0) + fee_trx) <= (src_trx + 1e-9),
+                    'note': ('free bandwidth covers it' if fee_trx == 0
+                             else f'bandwidth burn: {bw_short} bytes x {b_fee} sun')}
+        fee_trx = BW_NEEDED * b_fee / 1_000_000
+        return {'gas_asset': 'TRX', 'fee_crypto': fee_trx,
+                'fee_usd': fee_trx * get_crypto_price('TRX'),
+                'gas_needed_crypto': 0.0, 'note': 'bandwidth burn (paid by the sending wallet)'}
+    if network == 'BTC':
+        amt = float(amount) if amount else 0.0
+        fee_btc, vsize, rate = _btc_estimate_fee(from_addr, amt)
+        if fee_btc is None:
+            return {'error': 'Could not read BTC fee rate'}
         return {'gas_asset': 'BTC', 'fee_crypto': fee_btc,
                 'fee_usd': fee_btc * get_crypto_price('BTC'),
-                'gas_needed_crypto': 0.0, 'note': f'{rate} sat/vB x ~250 vB (deducted from the send)'}
+                'gas_needed_crypto': 0.0, 'vsize': vsize,
+                'wallet_addr': from_addr,
+                'note': f'{rate:g} sat/vB x ~{vsize} vB (same coin selection as broadcast)'}
     return {'error': 'Unknown network'}
 
 
@@ -1914,7 +2144,8 @@ def evm_send_native(network, key_hex, to, amount_native):
     return _evm_send(eps, cid, key_hex, to, int(amount_native * 10**18), gas_limit=21000)
 
 def evm_send_token(network, key_hex, to, amount_usdt):
-    """Send USDT on BSC (18 dec) or ETH (6 dec)."""
+    """Send USDT on BSC (18 dec) or ETH (6 dec). Gas limit is simulated live
+    (same method as the fee estimate) so the broadcast burns what was quoted."""
     if network == 'USDT_BEP20':
         eps, cid, contract, dec = BSC_RPC_ENDPOINTS, 56, USDT_BEP20_CONTRACT, 18
     else:
@@ -1922,7 +2153,16 @@ def evm_send_token(network, key_hex, to, amount_usdt):
     to_clean = to[2:] if to.lower().startswith('0x') else to
     data = bytes.fromhex('a9059cbb' + to_clean.lower().rjust(64, '0') +
                          hex(int(amount_usdt * 10**dec))[2:].rjust(64, '0'))
-    return _evm_send(eps, cid, key_hex, contract, 0, data=data, gas_limit=100000)
+    try:
+        from eth_account import Account as _Acct
+        _from = _Acct.from_key(key_hex if key_hex.startswith('0x') else '0x' + key_hex).address
+        _units = int(amount_usdt * 10**dec)
+        _est = _evm_estimate_token_gas(eps, _from, contract, to, _units,
+                                      65000 if network == 'USDT_ERC20' else 60000)
+        gas_limit = int(_est * 1.2) + 5000
+    except Exception:
+        gas_limit = 100000
+    return _evm_send(eps, cid, key_hex, contract, 0, data=data, gas_limit=gas_limit)
 
 # TronGrid-compatible fullnodes. Without TRONGRID_API_KEY tronpy falls back to
 # shared demo keys — every build()/broadcast() then hits the public per-second
@@ -2068,21 +2308,18 @@ def gasfree_fee_estimate(user_addr):
             'deadline_secs': prov.get('config', {}).get('defaultDeadlineDuration', 180)}
 
 def _gasfree_bootstrap_trx(from_addr, est_g, amount):
-    """TRX the gas wallet must spend on the one-time base->gasfree USDT move.
-    0 when the gasfree account already holds amount+fee. Mirrors gasfree_send's
-    stake -> rent -> burn choice."""
+    """TRX the SENDING wallet itself must hold for the one-time base->gasfree
+    USDT move. 0 when the gasfree account already holds amount+fee."""
     need_units = int(round((amount + est_g['fee_usdt']) * 1e6))
     gf_addr = est_g.get('gasfree_address')
     gf_units = int((_tron_balance(gf_addr, 'USDT_TRC20') or 0.0) * 1e6) if gf_addr else 0
     if gf_units >= need_units:
         return 0.0
-    fee_est = estimate_network_fee('USDT_TRC20', gf_addr)
-    burn = 0.7 if fee_est.get('delegated') else float(fee_est.get('gas_needed_crypto') or 14) + 1.0
-    try:
-        est_r = tronsave_estimate(from_addr, _tron_energy_needed(gf_addr))
-        return min(burn, est_r['trx'] + 1.1)
-    except Exception:
-        return burn
+    short_usdt = (need_units - gf_units) / 1e6
+    fee_est = estimate_network_fee('USDT_TRC20', gf_addr, from_addr, short_usdt)
+    if 'error' not in fee_est:
+        return float(fee_est.get('fee_crypto') or 0)
+    return 14.0
 
 def _k256(data):
     """Keccak-256 (not SHA3). Lazy: eth-utils ships with tronpy/eth-account."""
@@ -2122,8 +2359,11 @@ def _tip712_sign(key_hex, token, provider, user, receiver, value, maxfee, deadli
     return (sig + bytes([27 + recid])).hex(), digest
 
 def gasfree_send(t, uid, w, to_addr, amount):
-    """Full GasFree USDT send for a treasury task: fund the gasfree account if
-    needed (one-time small gas spend), then submit the TIP-712 authorization."""
+    """Full GasFree USDT send for a treasury task (per-wallet model).
+
+    Each wallet pays its own way: the USDT fee goes to the relayer and any
+    one-time base -> gasfree bootstrap burn comes out of the SAME wallet's TRX.
+    Top up TRX directly to the sending wallet when it is short."""
     from_addr, priv = w['address'], w['private_key']
     est_g = gasfree_fee_estimate(from_addr)
     if not est_g['allow']:
@@ -2134,58 +2374,21 @@ def gasfree_send(t, uid, w, to_addr, amount):
 
     gf_units = int((_tron_balance(gf_addr, 'USDT_TRC20') or 0.0) * 1e6)
     if gf_units < need_units:
-        # Bootstrap: move USDT base -> gasfree address. Still needs a little
-        # gas once (delegated staked energy if available, else TRX top-up).
+        # Bootstrap: move USDT base -> gasfree address. The burn for this move
+        # comes out of the sending wallet's own TRX — no central wallet.
         base_units = int((_tron_balance(from_addr, 'USDT_TRC20') or 0.0) * 1e6)
         if base_units + gf_units < need_units:
             raise ValueError("USDT balance too low to cover amount + GasFree fee")
         short_usdt = (need_units - gf_units) / 1e6
-        fee_est = estimate_network_fee('USDT_TRC20', gf_addr)
-        gas_addr, gas_key = get_gas_addr('tron'), get_gas_key('tron')
-        if not gas_addr or not gas_key:
-            raise ValueError("GasFree bootstrap needs a little gas — no TRX gas wallet found")
-        need_e = _tron_energy_needed(gf_addr)
-        delegated = False
-        if fee_est.get('delegated'):
-            res = _tron_account_resources(gas_addr)
-            if res and res['total_energy']:
-                dsun = int(need_e * res['total_weight'] / res['total_energy'] * 1.05)
-                remaining = res['staked_sun'] - res['delegated_sun']
-                if remaining > dsun * 0.5:
-                    t['step'] = 'Delegating energy for GasFree bootstrap...'
-                    t.setdefault('txids', []).append(tron_delegate_energy(gas_key, from_addr, min(dsun, remaining)))
-                    delegated = True
-        if not delegated:
-            # Rent before burning: a ~64-130k energy rental costs a fraction
-            # of the TRX a full burn top-up would.
-            try:
-                est_r = tronsave_estimate(from_addr, need_e)
-                gtrx_r = _tron_balance(gas_addr, 'TRX') or 0.0
-                if gtrx_r >= est_r['trx'] + 1.5:
-                    t['step'] = f'Renting {need_e:,} energy for the GasFree setup...'
-                    res_r = tronsave_rent(from_addr, need_e, gas_addr, gas_key)
-                    if res_r.get('pay_txid'): t.setdefault('txids', []).append(res_r['pay_txid'])
-                    tronsave_wait(res_r.get('order'))
-                    delegated = _wait_for_energy(from_addr, need_e * 0.8)
-            except Exception as e:
-                print(f"[GASFREE] bootstrap rent skipped: {e}")
-        topup = 0.7 if delegated else float(fee_est.get('gas_needed_crypto') or 14) + 1.0
-        gtrx = _tron_balance(gas_addr, 'TRX')
-        if gtrx is not None and gtrx < topup + 0.3:
-            raise ValueError(f"Gas wallet needs ~{fmt_amt(topup + 0.3)} TRX for the one-time "
-                             f"GasFree setup (has {fmt_amt(gtrx)}) — top it up or stake TRX")
-        trx_w = user_db.get(uid, {}).get('wallets', {}).get('TRX')
-        if trx_w:
-            trx_w['credited_crypto'] = (get_onchain_balance(from_addr, 'TRX') or 0.0) + topup
-        t['step'] = 'Topping up gas for GasFree bootstrap...'
-        t.setdefault('txids', []).append(tron_send_native(gas_key, from_addr, topup))
-        t['step'] = 'Waiting for gas...'
-        if delegated and not _wait_for_energy(from_addr, need_e * 0.8):
-            raise RuntimeError('Rented/delegated energy did not arrive in time')
-        if not _wait_for_native(from_addr, 'TRX', topup * 0.9):
-            raise RuntimeError('Gas top-up did not confirm in time')
-        t['step'] = 'Moving USDT to GasFree account...'
-        t.setdefault('txids', []).append(tron_send_token(priv, gf_addr, short_usdt))
+        boot_est = estimate_network_fee('USDT_TRC20', gf_addr, from_addr, short_usdt)
+        boot_need = float(boot_est.get('fee_crypto') or 0) if 'error' not in boot_est else 14.0
+        src_trx = _tron_balance(from_addr, 'TRX') or 0.0
+        if src_trx < boot_need:
+            raise ValueError(f"Top up TRX directly to {from_addr} — GasFree setup needs ~{fmt_amt(boot_need)} TRX (it holds {fmt_amt(src_trx)})")
+        t['step'] = 'Moving USDT to GasFree account (wallet pays its own gas)...'
+        t.setdefault('txids', []).append(
+            tron_send_token(priv, gf_addr, short_usdt,
+                            fee_limit_trx=max(25.0, boot_need + 10.0)))
         end = time.time() + 90
         while time.time() < end:
             if int((_tron_balance(gf_addr, 'USDT_TRC20') or 0.0) * 1e6) >= need_units:
@@ -2476,8 +2679,11 @@ def _wait_for_native(addr, network_coin, target, timeout=90):
 
 def execute_treasury_send(task_id):
     """Runs a treasury send in a background thread, updating send_tasks[task_id].
-    For token sends the admin gas wallet funds the sending address first
-    (two-step); for BTC/TRX the fee rides on the send itself."""
+
+    PER-WALLET GAS MODEL: every wallet pays its own network fee from its own
+    native balance (TRX for TRC20/TRX, BNB for BEP20, ETH for ERC20, BTC for
+    BTC). Top up gas directly to the sending wallet's address — there is no
+    central gas wallet, no cross-wallet top-up, no delegation."""
     t = send_tasks[task_id]
     net, uid, to_addr, amount = t['network'], t['uid'], t['to_addr'], t['amount']
     try:
@@ -2490,130 +2696,86 @@ def execute_treasury_send(task_id):
             gasfree_send(t, uid, w, to_addr, amount)
 
         elif net in ('USDT_TRC20', 'USDT_BEP20', 'USDT_ERC20'):
-            est = estimate_network_fee(net, to_addr)
-            if 'error' in est: raise RuntimeError(est['error'])
-            gas_needed = float(est.get('gas_needed_crypto') or est.get('fee_crypto'))
-            gas_asset = est['gas_asset']
-            gas_chain = 'tron' if gas_asset == 'TRX' else 'evm'
-            gas_addr, gas_key = get_gas_addr(gas_chain), get_gas_key(gas_chain)
-            if not gas_addr or not gas_key:
-                raise ValueError(f"Gas wallet {gas_asset} not configured (no manual key and no MASTER_SEED)")
-
-            trx_w = user_db.get(uid, {}).get('wallets', {}).get('TRX')
-            if gas_asset == 'TRX':
-                need_energy = _tron_energy_needed(to_addr)
-                src_free = _tron_self_sufficient(from_addr, need_energy)
-                delegated = False
-                if src_free:
-                    # the wallet already holds rented/delegated energy from an
-                    # earlier buy — the send burns it for ~0 TRX total
+            if net == 'USDT_TRC20' and t.get('fee_mode') == 'rent':
+                # Per-wallet rent: the sending wallet pays the TronSave rental
+                # from its own TRX (same address holds both USDT + TRX).
+                sim_need = (_tron_simulate_energy(from_addr, to_addr, amount)
+                            or _tron_energy_needed(to_addr))
+                if _tron_self_sufficient(from_addr, sim_need):
                     t['step'] = 'Wallet already charged — burning its own energy...'
-                elif t.get('fee_mode') == 'rent':
-                    t['step'] = f'Renting {need_energy:,} energy (gas wallet pays)...'
-                    res_r = tronsave_rent(from_addr, need_energy, gas_addr, gas_key)
+                else:
+                    est_r = tronsave_estimate(from_addr, sim_need)
+                    rent_cost = est_r['trx'] + 0.4  # rental + pay-tx bandwidth
+                    src_trx = _tron_balance(from_addr, 'TRX') or 0.0
+                    if src_trx < rent_cost + 0.5:
+                        raise ValueError(
+                            f"Top up TRX directly to {from_addr} — renting {sim_need:,} energy "
+                            f"needs ~{fmt_amt(rent_cost + 0.5)} TRX (it holds {fmt_amt(src_trx)})")
+                    t['step'] = f'Renting {sim_need:,} energy (wallet pays its own TRX)...'
+                    res_r = tronsave_rent(from_addr, sim_need, from_addr, priv)
                     t['rent_cost_trx'] = res_r.get('trx')
                     if res_r.get('order'): t['rent_order'] = res_r['order']
                     if res_r.get('pay_txid'): t.setdefault('txids', []).append(res_r['pay_txid'])
                     t['step'] = 'Waiting for rented energy to arrive...'
                     tronsave_wait(res_r.get('order'))
-                    if not _wait_for_energy(from_addr, need_energy * 0.8):
+                    if not _wait_for_energy(from_addr, sim_need * 0.8):
                         raise RuntimeError('Rented energy did not arrive in time — check TronSave, then retry')
-                    delegated = True
-                elif est.get('delegated'):
-                    res = _tron_account_resources(gas_addr)
-                    if res and res['total_energy']:
-                        ratio = res['total_weight'] / res['total_energy']  # sun per energy
-                        delegate_sun = int(need_energy * ratio * 1.05)
-                        remaining = res['staked_sun'] - res['delegated_sun']
-                        if remaining > delegate_sun * 0.5:
-                            t['step'] = 'Delegating staked energy (gas stays in your wallet)...'
-                            t['gas_txid'] = tron_delegate_energy(gas_key, from_addr,
-                                                                 min(delegate_sun, remaining))
-                            t['txids'] = [t['gas_txid']]
-                            delegated = True
-                # trx mode last resort before burning: auto-rent when cheaper
-                if not delegated and not src_free and t.get('fee_mode') == 'trx':
-                    try:
-                        est_r = tronsave_estimate(from_addr, need_energy)
-                        gtrx = _tron_balance(gas_addr, 'TRX') or 0.0
-                        if est_r['trx'] + 1.1 < gas_needed and gtrx >= est_r['trx'] + 1.5:
-                            t['step'] = f'Auto-renting {need_energy:,} energy (cheaper than a TRX burn)...'
-                            res_r = tronsave_rent(from_addr, need_energy, gas_addr, gas_key)
-                            t['rent_cost_trx'] = res_r.get('trx')
-                            if res_r.get('order'): t['rent_order'] = res_r['order']
-                            if res_r.get('pay_txid'): t.setdefault('txids', []).append(res_r['pay_txid'])
-                            tronsave_wait(res_r.get('order'))
-                            if not _wait_for_energy(from_addr, need_energy * 0.8):
-                                raise RuntimeError('Rented energy did not arrive in time')
-                            delegated = True
-                    except Exception as e:
-                        print(f"[TREASURY] auto-rent skipped/failed: {e}")
-                if src_free:
-                    topup = 0.0
-                elif delegated:
-                    # skip the bandwidth top-up when the wallet's free daily
-                    # bandwidth already covers the transfer — saves ~30s.
-                    # Otherwise the SOURCE pays it first from its own TRX;
-                    # gas only sends the shortfall (like Trust Wallet).
-                    res_bw = _tron_account_resources(from_addr) or {}
-                    if (res_bw.get('freenet', 0) + res_bw.get('net', 0)) >= 400:
-                        topup = 0.0
-                    else:
-                        src_trx_bw = _tron_balance(from_addr, 'TRX') or 0.0
-                        topup = max(0.0, 0.7 - src_trx_bw)
+                t['step'] = 'Broadcasting token transfer...'
+                t['txid'] = tron_send_token(priv, to_addr, amount,
+                                            fee_limit_trx=max(25.0, 7.0 + 10.0))
+                t.setdefault('txids', []).append(t['txid'])
+            else:
+                # Standard per-wallet send: live estimate, wallet must cover it.
+                est = estimate_network_fee(net, to_addr, from_addr, amount)
+                if 'error' in est: raise RuntimeError(est['error'])
+                fee = float(est.get('fee_crypto') or 0)
+                gas_asset = est['gas_asset']
+                src_bal = est.get('gas_balance')
+                if src_bal is None:
+                    # balance read failed — re-read directly before failing
+                    if gas_asset == 'TRX':
+                        src_bal = _tron_balance(from_addr, 'TRX')
+                    elif gas_asset == 'BNB':
+                        src_bal = _evm_native_balance(BSC_RPC_ENDPOINTS, from_addr)
+                    elif gas_asset == 'ETH':
+                        src_bal = _evm_native_balance(ETH_RPC_ENDPOINTS, from_addr)
+                if src_bal is None:
+                    raise RuntimeError(f"Could not read the wallet's {gas_asset} balance — retry in a moment")
+                if src_bal < fee:
+                    raise ValueError(
+                        f"Insufficient {gas_asset} in the sending wallet — top up {gas_asset} "
+                        f"directly to {from_addr} (needs ~{fmt_amt(fee)} {gas_asset}, "
+                        f"it holds {fmt_amt(src_bal)} {gas_asset})")
+                t['fee_crypto'] = fee
+                t['step'] = 'Broadcasting token transfer (wallet pays its own gas)...'
+                if net == 'USDT_TRC20':
+                    t['txid'] = tron_send_token(priv, to_addr, amount,
+                                                fee_limit_trx=max(25.0, fee + 10.0))
                 else:
-                    # Each wallet pays from itself first (Trust-Wallet style):
-                    # source TRX covers as much of the burn as it can, gas
-                    # wallet only tops up the shortfall.
-                    src_trx = _tron_balance(from_addr, 'TRX') or 0.0
-                    topup = max(0.0, gas_needed + 1.0 - src_trx)
-                    if topup > 0 and src_trx > 0:
-                        t['src_covered_trx'] = min(src_trx, gas_needed + 1.0)
-                if topup > 0:
-                    gb_now = _tron_balance(gas_addr, 'TRX')
-                    if gb_now is not None and gb_now < topup + 0.3:
-                        src_have = _tron_balance(from_addr, 'TRX') or 0.0
-                        raise RuntimeError(f"Gas wallet is short on TRX: needs ~{fmt_amt(topup + 0.3)} "
-                                           f"(has {fmt_amt(gb_now)}, source covers {fmt_amt(src_have)}) — top it up, stake, or switch fee mode")
-                    if trx_w:
-                        # pre-count the incoming TRX so the watcher can't treat it as a deposit
-                        cur_bal = get_onchain_balance(from_addr, 'TRX') or 0.0
-                        trx_w['credited_crypto'] = cur_bal + topup
-                    t['topup_txid'] = tron_send_native(gas_key, from_addr, topup)
-                    t.setdefault('txids', []).append(t['topup_txid'])
-                    t['step'] = 'Waiting for gas confirmation...'
-                    if delegated and not _wait_for_energy(from_addr, need_energy * 0.8):
-                        raise RuntimeError("Delegated energy did not arrive in time; retry")
-                    if not _wait_for_native(from_addr, 'TRX', topup * 0.9):
-                        raise RuntimeError("Gas top-up did not confirm in time; check the gas tx then retry")
-                elif delegated and not src_free:
-                    # no top-up needed — just confirm the delegated energy landed
-                    if not _wait_for_energy(from_addr, need_energy * 0.8):
-                        raise RuntimeError("Delegated energy did not arrive in time; retry")
-            else:
-                t['step'] = f'Funding gas ({gas_asset} from your gas wallet)...'
-                t['gas_txid'] = evm_send_native(gas_asset, gas_key, from_addr, gas_needed)
-                t['txids'] = [t['gas_txid']]
-                t['step'] = 'Waiting for gas confirmation...'
-                if not _wait_for_native(from_addr, gas_asset, gas_needed * 0.9):
-                    raise RuntimeError("Gas top-up did not confirm in time; check the gas tx then retry")
-            t['step'] = 'Broadcasting token transfer...'
-            if net == 'USDT_TRC20':
-                t['txid'] = tron_send_token(priv, to_addr, amount)
-            else:
-                t['txid'] = evm_send_token(net, priv, to_addr, amount)
-            t['txids'].append(t['txid'])
+                    t['txid'] = evm_send_token(net, priv, to_addr, amount)
+                t.setdefault('txids', []).append(t['txid'])
 
             # resync the watcher's mark to post-send balances
             try:
                 nb = get_onchain_balance(from_addr, net)
                 if nb is not None: w['credited_crypto'] = nb
-                if gas_asset == 'TRX' and trx_w:
+                trx_w = user_db.get(uid, {}).get('wallets', {}).get('TRX')
+                if net == 'USDT_TRC20' and trx_w and trx_w.get('address') == from_addr:
                     tb = get_onchain_balance(from_addr, 'TRX')
                     if tb is not None: trx_w['credited_crypto'] = tb
             except Exception: pass
 
         elif net == 'TRX':
+            est = estimate_network_fee('TRX', to_addr, from_addr, amount)
+            fee = float(est.get('fee_crypto') or 0) if 'error' not in est else 0.0
+            live = get_onchain_balance(from_addr, 'TRX')
+            if live is None:
+                raise ValueError("Could not read the source wallet balance right now")
+            if amount + fee > live + BALANCE_EPSILON:
+                raise ValueError(
+                    f"Amount + network fee ({fmt_amt(fee)} TRX) exceeds the wallet balance "
+                    f"({fmt_amt(live)} TRX) — top up TRX directly to {from_addr}")
+            t['fee_crypto'] = fee
             t['step'] = 'Broadcasting TRX transfer...'
             t['txid'] = tron_send_native(priv, to_addr, amount)
             t['txids'] = [t['txid']]
@@ -2623,10 +2785,12 @@ def execute_treasury_send(task_id):
             except Exception: pass
 
         elif net == 'BTC':
-            est = estimate_network_fee('BTC')
+            est = estimate_network_fee('BTC', to_addr, from_addr, amount)
             if 'error' in est: raise RuntimeError(est['error'])
+            t['fee_crypto'] = float(est.get('fee_crypto') or 0)
             t['step'] = 'Broadcasting BTC transaction...'
-            rate = round(est['fee_crypto'] * 10**8 / 250)
+            vsize = est.get('vsize') or 250
+            rate = round(float(est['fee_crypto']) * 10**8 / vsize)
             t['txid'] = btc_send(priv, to_addr, amount, max(1, rate))
             t['txids'] = [t['txid']]
             try:
@@ -9182,6 +9346,22 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
             assets = {a: {'total_crypto': 0.0, 'total_usd': 0.0, 'wallets': []} for a in SEND_ASSETS}
+            # Per-wallet gas: each wallet's own native balance (pays its own fee).
+            # TRON wallets share one address for TRX + USDT_TRC20, so build a
+            # lookup of TRX balances to attach to every wallet entry.
+            _trx_by_addr, _trx_by_uid = {}, {}
+            for uid, udata in user_db.items():
+                _wtrx = (udata.get('wallets', {}) or {}).get('TRX')
+                if _wtrx and _wtrx.get('address'):
+                    try:
+                        _b = _wtrx.get('live_balance')
+                        if _b is None:
+                            _b = get_onchain_balance(_wtrx.get('address'), 'TRX')
+                        if _b is not None:
+                            _trx_by_addr[_wtrx.get('address')] = _b
+                            _trx_by_uid[str(uid)] = _b
+                    except Exception:
+                        pass
             for uid, udata in user_db.items():
                 uname = udata.get('username', str(uid))
                 fname = udata.get('first_name', 'Unknown')
@@ -9196,10 +9376,28 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                     a = assets[net]
                     a['total_crypto'] += live
                     a['total_usd'] += live * price
+                    # native gas held BY THIS WALLET (top up gas directly here)
+                    gas_asset = NETWORK_GAS.get(net, '')
+                    gas_bal = None
+                    try:
+                        if net in ('USDT_TRC20', 'TRX'):
+                            gas_bal = _trx_by_addr.get(wdata.get('address'),
+                                                       _trx_by_uid.get(str(uid)))
+                            if gas_bal is None and wdata.get('address'):
+                                gas_bal = _tron_balance(wdata.get('address'), 'TRX')
+                        elif net == 'USDT_BEP20' and wdata.get('address'):
+                            gas_bal = _evm_native_balance(BSC_RPC_ENDPOINTS, wdata.get('address'))
+                        elif net == 'USDT_ERC20' and wdata.get('address'):
+                            gas_bal = _evm_native_balance(ETH_RPC_ENDPOINTS, wdata.get('address'))
+                        elif net == 'BTC':
+                            gas_bal = live  # fee rides inside the BTC send itself
+                    except Exception:
+                        gas_bal = None
                     a['wallets'].append({
                         'uid': uid, 'name': name, 'first': fname,
                         'address': wdata.get('address', ''),
                         'balance': live, 'usd': live * price,
+                        'gas_asset': gas_asset, 'gas_balance': gas_bal,
                     })
             for a in assets.values():
                 a['wallets'].sort(key=lambda x: -x['balance'])
@@ -9280,104 +9478,68 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps({'valid': ok}).encode())
 
-        # --- TREASURY: live fee estimate ---
+        # --- TREASURY: live fee estimate (per-wallet: wallet pays its own gas) ---
         elif parsed_path.path == '/api/estimate_fee':
             if pin != ADMIN_PIN:
                 self.send_response(401)
                 self.end_headers()
                 return
             net = str(data.get('network', ''))
+            try:
+                _uid = int(data.get('uid', 0))
+            except Exception:
+                _uid = 0
+            _w = user_db.get(_uid, {}).get('wallets', {}).get(net) if _uid else None
+            _from = _w.get('address') if _w else None
+            _to = data.get('to_addr') or (_w.get('address') if _w else None)
+            try:
+                _amt = float(data.get('amount') or 0) or 0.0
+            except Exception:
+                _amt = 0.0
             if str(data.get('fee_mode', 'trx')) == 'rent' and net == 'USDT_TRC20':
                 try:
-                    uid = int(data.get('uid', 0))
-                    w = user_db.get(uid, {}).get('wallets', {}).get(net) if uid else None
-                    if not w:
+                    if not _w:
                         raise ValueError('pick a source wallet')
-                    energy = _tron_energy_needed(data.get('to_addr') or w['address'])
-                    gb = (get_gas_balances() or {}).get('TRX')
-                    if _tron_self_sufficient(w['address'], energy):
+                    energy = (_tron_simulate_energy(_from, data.get('to_addr') or _from, _amt)
+                              or _tron_energy_needed(data.get('to_addr') or _from))
+                    src_trx = _tron_balance(_from, 'TRX')
+                    if _tron_self_sufficient(_from, energy):
                         est = {'gas_asset': 'TRX', 'fee_crypto': 0, 'fee_usd': 0,
-                               'gas_needed_crypto': 0, 'gas_balance': gb, 'gas_ok': True,
+                               'gas_needed_crypto': 0, 'gas_balance': src_trx, 'gas_ok': True,
+                               'wallet_addr': _from,
                                'rented': True, 'charged': True,
                                'note': 'wallet already holds enough energy — ~0 TRX'}
                     else:
-                        est_r = tronsave_estimate(w['address'], energy)
-                        cost = est_r['trx'] + 1.1   # rent + ~0.4 pay-tx + ~0.7 bandwidth top-up
+                        est_r = tronsave_estimate(_from, energy)
+                        cost = est_r['trx'] + 0.4   # rental + pay-tx bandwidth, wallet pays itself
                         est = {'gas_asset': 'TRX', 'fee_crypto': cost,
                                'fee_usd': cost * get_crypto_price('TRX'),
-                               'gas_needed_crypto': cost, 'gas_balance': gb,
-                               'gas_ok': gb is not None and gb >= cost, 'rented': True,
-                               'note': 'rented energy via TronSave — gas wallet pays ~on-chain'}
+                               'gas_needed_crypto': cost, 'gas_balance': src_trx,
+                               'wallet_addr': _from,
+                               'gas_ok': src_trx is not None and src_trx >= cost + 0.5, 'rented': True,
+                               'note': 'rented energy via TronSave — this wallet pays ~on-chain'}
                 except Exception as e:
                     est = {'error': str(e)}
             elif str(data.get('fee_mode', 'trx')) == 'usdt' and net == 'USDT_TRC20':
                 try:
-                    uid = int(data.get('uid', 0))
-                    w = user_db.get(uid, {}).get('wallets', {}).get(net) if uid else None
-                    if not w:
+                    if not _w:
                         raise ValueError('pick a source wallet')
-                    est_g = gasfree_fee_estimate(w['address'])
+                    est_g = gasfree_fee_estimate(_from)
                     # The USDT fee itself is relayer-paid, but the one-time
-                    # base -> gasfree account move still costs gas-wallet TRX
-                    # until the gasfree account is funded — surface that need.
-                    boot = _gasfree_bootstrap_trx(w['address'], est_g,
-                                                  float(data.get('amount') or 0))
-                    gb = (get_gas_balances() or {}).get('TRX')
+                    # base -> gasfree account move burns THIS wallet's TRX.
+                    boot = _gasfree_bootstrap_trx(_from, est_g, _amt)
+                    src_trx = _tron_balance(_from, 'TRX')
                     est = {'gas_asset': 'USDT', 'fee_crypto': est_g['fee_usdt'],
                            'fee_usd': est_g['fee_usdt'], 'gas_needed_crypto': boot,
-                           'gas_balance': gb,
-                           'gas_ok': boot == 0 or (gb is not None and gb >= boot + 0.3),
+                           'gas_balance': src_trx, 'wallet_addr': _from,
+                           'gas_ok': boot == 0 or (src_trx is not None and src_trx >= boot),
                            'gasfree': True,
                            'note': ('fee deducted in USDT via GasFree relayer' +
-                                    ('' if est_g['active'] else ' — first use adds activation + a small gas-wallet setup transfer'))}
+                                    ('' if est_g['active'] else ' — first use adds activation; bootstrap burns this wallet\'s TRX'))}
                 except Exception as e:
                     est = {'error': str(e)}
             else:
-                est = estimate_network_fee(net, data.get('to_addr') or None)
-                # TRC20 trx mode: mirror the executor — free if the wallet is
-                # already charged, else auto-rent if it beats a TRX burn
-                if net == 'USDT_TRC20' and 'error' not in est and not est.get('delegated'):
-                    try:
-                        uid2 = int(data.get('uid', 0))
-                        w2 = user_db.get(uid2, {}).get('wallets', {}).get(net) if uid2 else None
-                        if w2:
-                            need_e = _tron_energy_needed(data.get('to_addr') or w2['address'])
-                            if _tron_self_sufficient(w2['address'], need_e):
-                                est.update({'fee_crypto': 0.0, 'fee_usd': 0.0,
-                                            'gas_needed_crypto': 0.0, 'charged': True,
-                                            'note': 'wallet already holds energy — ~0 TRX'})
-                            else:
-                                est_r = tronsave_estimate(w2['address'], need_e)
-                                if est_r['trx'] + 1.1 < float(est.get('gas_needed_crypto') or 999):
-                                    est.update({'fee_crypto': est_r['trx'] + 1.1,
-                                                'fee_usd': (est_r['trx'] + 1.1) * get_crypto_price('TRX'),
-                                                'gas_needed_crypto': est_r['trx'] + 1.1,
-                                                'auto_rent': True,
-                                                'note': 'auto-rented energy — cheaper than burning TRX'})
-                    except Exception:
-                        pass
-                if 'error' not in est:
-                    gas = get_gas_balances()
-                    have = gas.get(est['gas_asset'])
-                    est['gas_balance'] = have
-                    # Net display: source wallet pays first from its own TRX,
-                    # gas only covers the shortfall (Trust-Wallet style).
-                    try:
-                        if net == 'USDT_TRC20' and not est.get('delegated') and not est.get('charged') and not est.get('auto_rent') and not est.get('rented'):
-                            _uid = int(data.get('uid', 0))
-                            _w = user_db.get(_uid, {}).get('wallets', {}).get(net) if _uid else None
-                            if _w and _w.get('address'):
-                                _src = _tron_balance(_w['address'], 'TRX') or 0.0
-                                _full = float(est.get('gas_needed_crypto', 0) or 0) + 1.0
-                                _net = max(0.0, _full - _src)
-                                est['gas_needed_crypto'] = _net
-                                est['src_covered_trx'] = min(_src, _full)
-                                if _src > 0:
-                                    est['note'] = (est.get('note', '') + f' — source covers {fmt_amt(min(_src, _full))} TRX').strip()
-                    except Exception:
-                        pass
-                    est['gas_ok'] = (have is not None and est.get('gas_needed_crypto', 0) > 0
-                                     and have >= est['gas_needed_crypto']) or est.get('gas_needed_crypto', 0) == 0
+                est = estimate_network_fee(net, _to, _from, _amt if _amt > 0 else None)
             self.send_response(200)
             self.send_header('Content-type', 'application/json')
             self.end_headers()
@@ -9601,36 +9763,45 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                 if fee_mode in ('usdt', 'rent') and net != 'USDT_TRC20':
                     raise ValueError("USDT/rent fee modes are only available for USDT TRC20")
                 if fee_mode == 'rent':
-                    if not get_gas_key('tron'):
-                        raise ValueError("TRON gas wallet not configured — rent needs it to pay on-chain")
-                    need_e = _tron_energy_needed(to_addr)
+                    # Per-wallet rent: the sending wallet pays from its own TRX.
+                    need_e = (_tron_simulate_energy(w['address'], to_addr, amount)
+                              or _tron_energy_needed(to_addr))
                     if not _tron_self_sufficient(w['address'], need_e):
                         est_r = tronsave_estimate(w['address'], need_e)
-                        gtrx = _tron_balance(get_gas_addr('tron'), 'TRX') or 0.0
-                        if gtrx < est_r['trx'] + 1.5:
-                            burn = 14.0 if need_e > 100000 else 7.0
-                            hint = (f" — rent spiked, TRX burn (~{fmt_amt(burn + 1.0)} TRX) is cheaper right now, "
-                                    f"switch Fee mode back to TRX") if est_r['trx'] + 1.1 > burn else ""
-                            raise ValueError(f"Gas wallet needs ~{fmt_amt(est_r['trx'] + 1.5)} TRX to rent energy (has {fmt_amt(gtrx)}){hint}")
+                        src_trx = _tron_balance(w['address'], 'TRX') or 0.0
+                        if src_trx < est_r['trx'] + 0.5:
+                            burn_est = estimate_network_fee(net, to_addr, w['address'], amount)
+                            burn = float(burn_est.get('fee_crypto') or 7.0) if 'error' not in burn_est else 7.0
+                            hint = (f" — rent spiked, plain TRX burn (~{fmt_amt(burn)} TRX) is cheaper right now, "
+                                    f"switch Fee mode back to TRX") if est_r['trx'] + 0.4 > burn else ""
+                            raise ValueError(f"Top up TRX directly to {w['address']} — renting energy needs ~{fmt_amt(est_r['trx'] + 0.5)} TRX (it holds {fmt_amt(src_trx)}){hint}")
                 if fee_mode == 'usdt':
                     if not GASFREE_API_KEY or not GASFREE_API_SECRET:
                         raise ValueError("GasFree not configured — set GASFREE_API_KEY / GASFREE_API_SECRET")
                     est_g = gasfree_fee_estimate(w['address'])
                     if amount + est_g['fee_usdt'] > live + BALANCE_EPSILON:
                         raise ValueError(f"Amount + GasFree fee ({fmt_amt(est_g['fee_usdt'])} USDT) exceeds balance")
-                    # First use also needs a little gas-wallet TRX for the
-                    # one-time base -> gasfree account move.
+                    # First use also burns THIS wallet's TRX for the one-time
+                    # base -> gasfree account move.
                     boot = _gasfree_bootstrap_trx(w['address'], est_g, amount)
                     if boot > 0:
-                        gtrx = _tron_balance(get_gas_addr('tron'), 'TRX')
-                        if gtrx is not None and gtrx < boot + 0.3:
-                            raise ValueError(f"Gas wallet needs ~{fmt_amt(boot + 0.3)} TRX for the one-time "
-                                             f"GasFree setup (has {fmt_amt(gtrx)}) — top it up or use another fee mode")
+                        src_trx = _tron_balance(w['address'], 'TRX')
+                        if src_trx is not None and src_trx < boot:
+                            raise ValueError(f"Top up TRX directly to {w['address']} — one-time "
+                                             f"GasFree setup needs ~{fmt_amt(boot)} TRX (it holds {fmt_amt(src_trx)})")
                 elif net in ('TRX', 'BTC'):
-                    est = estimate_network_fee(net)
+                    est = estimate_network_fee(net, to_addr, w['address'], amount)
                     need = est.get('fee_crypto', 0) if 'error' not in est else 0
                     if amount + need > live + BALANCE_EPSILON:
-                        raise ValueError(f"Amount + network fee ({fmt_amt(need)} {NETWORK_GAS[net]}) exceeds balance")
+                        raise ValueError(f"Amount + network fee ({fmt_amt(need)} {NETWORK_GAS[net]}) exceeds the wallet balance ({fmt_amt(live)} {NETWORK_GAS[net]}) — top up {NETWORK_GAS[net]} directly to {w['address']}")
+                elif net in ('USDT_TRC20', 'USDT_BEP20', 'USDT_ERC20'):
+                    # Token send: the wallet's own native balance must cover the live fee.
+                    est = estimate_network_fee(net, to_addr, w['address'], amount)
+                    if 'error' not in est:
+                        fee = float(est.get('fee_crypto') or 0)
+                        src_bal = est.get('gas_balance')
+                        if src_bal is not None and src_bal < fee:
+                            raise ValueError(f"Insufficient {est.get('gas_asset')} in the sending wallet — top up {est.get('gas_asset')} directly to {w['address']} (needs ~{fmt_amt(fee)}, holds {fmt_amt(src_bal)})")
                 task_id = uuid.uuid4().hex[:12]
                 send_tasks[task_id] = {'status': 'running', 'step': 'Queued',
                                        'network': net, 'uid': uid, 'to_addr': to_addr,

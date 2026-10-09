@@ -742,61 +742,7 @@
                         <div class="t-hero glass">
                             <div class="t-label">TOTAL BALANCE</div>
                             <div class="t-total" id="tTotal">$0.00</div>
-                            <div class="t-gas-row" id="tGasRow"></div>
-                            <div class="gas-gear" onclick="toggleGasPanel()">⚙️ Gas Wallet Settings</div>
-                        </div>
-
-                        <div id="gasPanel" class="glass" style="display:none; padding:20px; margin-bottom:18px;">
-                            <h3 style="margin-top:0;">⛽ Gas Wallet</h3>
-                            <div id="gasAutoInfo" style="margin-bottom:12px;"></div>
-                            <p style="color:#aaa; font-size:0.85em;">Your gas wallet is generated automatically from your master seed — just send <b>TRX</b>, <b>BNB</b> and/or <b>ETH</b> to the addresses above to load it. Nothing to paste, nothing to import.</p>
-                            <div id="gasEnergyRow" style="margin:10px 0;"></div>
-                            <div style="display:flex; gap:8px; align-items:flex-end;">
-                                <div class="form-group" style="flex:1; margin:0;"><label>⚡ Stake TRX → near-free USDT-TRC20 sends (~0.7 TRX instead of ~14–55)</label><input id="gwStakeAmt" placeholder="TRX amount (e.g. 3000)"></div>
-                                <button style="flex-shrink:0;" onclick="stakeGas()">⚡ Stake</button>
-                            </div>
-                            <div id="stakeStatus" style="margin-top:6px; font-size:0.85em;"></div>
-                            <hr style="border:none; border-top:1px solid rgba(255,255,255,.08); margin:16px 0;">
-                            <h4 style="margin:0 0 10px;">⚡💰 Rent Energy — pay-as-you-go</h4>
-                            <div style="display:flex; align-items:center; gap:16px; flex-wrap:wrap;">
-                                <div id="rentRing" style="flex-shrink:0;"></div>
-                                <div style="flex:1; min-width:200px;">
-                                    <div class="form-group" style="margin-bottom:8px;">
-                                        <label>Charge wallet</label>
-                                        <select id="rentTarget" onchange="refreshRentRing(); quoteRent();"></select>
-                                    </div>
-                                    <div style="display:flex; gap:8px;">
-                                        <select id="rentDur" onchange="quoteRent()" style="flex:0 0 68px; width:68px; min-width:0; padding:12px 6px;">
-                                            <option value="1" selected>1h</option>
-                                            <option value="24">24h</option>
-                                            <option value="72">3d</option>
-                                        </select>
-                                        <input id="rentAmt" type="number" min="0" placeholder="Energy (65000 ≈ 1 send)" oninput="quoteRent()" style="flex:1; min-width:0;">
-                                        <button style="flex-shrink:0;" onclick="buyEnergy()">Buy</button>
-                                    </div>
-                                    <div id="rentQuote" style="font-size:0.8em; color:#aaa; margin-top:6px;"></div>
-                                    <div id="rentStatus" style="font-size:0.82em; margin-top:4px;"></div>
-                                </div>
-                            </div>
-                            <p style="color:#777; font-size:0.75em; margin:8px 0 0;">Your gas wallet pays the rental on-chain (~4 TRX per send's worth) — no account, no signup. Energy lands on the chosen wallet in ~1 min, expires after the duration. Sends from a charged wallet burn it automatically — near-0 TRX.</p>
-                            <hr style="border:none; border-top:1px solid rgba(255,255,255,.08); margin:16px 0;">
-                            <h4 style="margin:0 0 10px;">⛽ Manual Gas Top-Up — gas wallet → USDT wallet</h4>
-                            <div id="topupGasBal" style="font-size:0.82em; color:#aaa; margin-bottom:8px;">Gas wallet: loading…</div>
-                            <div class="form-group" style="margin-bottom:8px;">
-                                <label>Target wallet (holds USDT)</label>
-                                <select id="topupTarget" onchange="onTopupTarget()"></select>
-                            </div>
-                            <div id="topupInfo" style="font-size:0.8em; color:#aaa; margin-bottom:8px;"></div>
-                            <div class="form-group" style="margin-bottom:8px; display:none;" id="topupCustomRow">
-                                <label>Custom TRON address</label>
-                                <input id="topupCustom" placeholder="T... address">
-                            </div>
-                            <div style="display:flex; gap:8px;">
-                                <input id="topupAmt" type="text" inputmode="decimal" placeholder="TRX amount or MAX" style="flex:1; min-width:0;">
-                                <button style="flex-shrink:0;" onclick="setTopupMax()">MAX</button>
-                                <button style="flex-shrink:0;" onclick="sendGasTopup()">📤 Send Gas</button>
-                            </div>
-                            <div id="topupStatus" style="font-size:0.82em; margin-top:6px;"></div>
+                            <div style="color:#888; font-size:0.82em; margin-top:6px;">⛽ Each wallet pays its own gas — top up gas directly to the wallet address below.</div>
                         </div>
 
                         <div class="glass" id="assetList"></div>
@@ -850,16 +796,16 @@
                                 <input id="sndAmt" type="number" min="0" step="any" placeholder="0.00" oninput="onSendInput()">
                             </div>
                             <div class="form-group" id="feeModeRow" style="display:none;">
-                                <label>Fee mode</label>
+                                <label>Fee mode (this wallet pays)</label>
                                 <select id="sndFeeMode" onchange="onSendInput()">
-                                    <option value="trx">⚡ TRX / energy — auto cheapest (stake → rent)</option>
-                                    <option value="rent">⚡💰 Rent energy (~4 TRX via TronSave)</option>
-                                    <option value="usdt">💵 Pay fee in USDT (GasFree — no TRX needed)</option>
+                                    <option value="trx">TRX burn — this wallet pays</option>
+                                    <option value="rent">Rent energy — this wallet pays</option>
+                                    <option value="usdt">Pay fee in USDT (GasFree)</option>
                                 </select>
                             </div>
                             <div class="glass" style="padding:12px; margin-bottom:12px; background:rgba(0,0,0,0.25);">
-                                <div class="fee-line" style="border:none;"><span>Network fee</span><span id="sndFee" class="fee-ok">—</span></div>
-                                <div class="fee-line"><span>Gas wallet</span><span id="sndGas">—</span></div>
+                                <div class="fee-line" style="border:none;"><span>Network fee (live)</span><span id="sndFee" class="fee-ok">—</span></div>
+                                <div class="fee-line"><span>Wallet gas (pays fee)</span><span id="sndGas">—</span></div>
                                 <div class="fee-line" id="sndFeeHintRow" style="display:none;"><span></span><span id="sndFeeHint" style="color:#fbbf24; font-size:0.85em;"></span></div>
                             </div>
                             <button class="t-action send" id="sndBtn" onclick="reviewSend()">Review & Send</button>
@@ -996,47 +942,6 @@
             balData = data;
             document.getElementById('tTotal').textContent = '$' + Number(data.total_usd).toLocaleString(undefined, { maximumFractionDigits: 2 });
 
-            const gasNames = { TRX: 'TRX', BNB: 'BNB', ETH: 'ETH', BTC: 'BTC' };
-            document.getElementById('tGasRow').innerHTML = Object.entries(gasNames).map(([k, lbl]) => {
-                const v = data.gas[k];
-                return `<span class="gas-chip">⛽ ${lbl} <b>${v === null ? '—' : fmtCrypto(v, 'TRX')}</b></span>`;
-            }).join('') || '';
-            const ga = data.gas_addresses || {};
-            const rows = [
-                ['EVM (BNB + ETH gas)', ga.evm], ['TRON (TRX gas)', ga.tron], ['BTC', ga.btc]
-            ].filter(r => r[1]);
-            document.getElementById('gasAutoInfo').innerHTML = rows.length
-                ? `<div style="color:#8f8; font-size:0.85em; margin-bottom:6px;">✅ Your gas wallet${data.gas_source === 'manual' ? ' (manual override)' : ' — auto from your master seed'}:</div>` +
-                  rows.map(([lbl, a]) => `<div class="addr-pill"><span style="overflow-wrap:anywhere;"><b>${lbl}</b><br>${a}</span>
-                      <button class="btn-outline" style="padding:4px 10px; flex-shrink:0;" onclick="navigator.clipboard.writeText('${a}')">Copy</button></div>`).join('')
-                : '<div style="color:#f88; font-size:0.85em;">⚠️ No gas wallet — set MASTER_SEED_PHRASE in .env.</div>';
-            const ge = data.gas_energy;
-            const CIRC = 238.76;
-            const pct = ge && ge.total > 0 ? Math.min(100, ge.available / ge.total * 100) : 0;
-            const sends = ge ? Math.floor(ge.available / 64300) : 0;
-            document.getElementById('gasEnergyRow').innerHTML =
-                `<div style="display:flex; align-items:center; gap:16px;">
-                    <div style="position:relative; width:92px; height:92px; flex-shrink:0;">
-                        <svg viewBox="0 0 90 90" style="width:92px; height:92px; transform:rotate(-90deg);">
-                            <circle cx="45" cy="45" r="38" fill="none" stroke="rgba(255,255,255,.08)" stroke-width="9"/>
-                            <circle cx="45" cy="45" r="38" fill="none" stroke="${pct > 20 ? '#4ade80' : '#f87171'}" stroke-width="9" stroke-linecap="round"
-                                    stroke-dasharray="${CIRC}" stroke-dashoffset="${CIRC * (1 - pct / 100)}"
-                                    style="transition:stroke-dashoffset .8s, stroke .4s; filter: drop-shadow(0 0 6px ${pct > 20 ? 'rgba(74,222,128,.55)' : 'rgba(248,113,113,.55)'});"/>
-                        </svg>
-                        <div style="position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center;">
-                            <b style="color:#fff; font-size:1.05em;">${Math.round(pct)}%</b>
-                        </div>
-                    </div>
-                    <div style="min-width:0;">
-                        <div style="color:#ddd; font-size:0.9em;">⚡ <b>${ge ? Math.floor(ge.available).toLocaleString() : 0}</b> / ${ge ? Math.floor(ge.total).toLocaleString() : 0} energy left</div>
-                        <div style="color:#888; font-size:0.78em; margin-top:3px;">${ge && ge.total > 0
-                            ? `staked ${fmtCrypto(ge.staked_trx, 'TRX')} TRX · ≈ <b style="color:#4ade80;">${sends} TRC20 send${sends === 1 ? '' : 's'}</b> covered (~0.7 TRX each)`
-                            : 'no TRX staked — sends still work, they just cost ~14–55 TRX each'}</div>
-                    </div>
-                </div>`;
-            refreshRentTargets(); refreshTopupTargets();
-            if (document.getElementById('gasPanel').style.display !== 'none') refreshRentRing();
-
             document.getElementById('assetList').innerHTML = Object.entries(ASSET_META).map(([net, m]) => {
                 const a = data.assets[net] || { total_crypto: 0, total_usd: 0, wallets: [] };
                 return `<div class="asset-row" onclick="openAssetDetail('${net}')">
@@ -1066,14 +971,30 @@
             document.getElementById('adCrypto').textContent = fmtCrypto(a.total_crypto, net) + ' ' + net.split('_')[0];
             document.getElementById('rcvTitle').textContent = '📥 Receive ' + m.label;
             document.getElementById('sndTitle').textContent = '📤 Send ' + m.label;
+            // Per-wallet receive: every wallet address accepts BOTH the token AND
+            // its gas. Top up gas directly to the wallet that will send.
             const gasCoin = { USDT_TRC20: 'TRX', TRX: 'TRX', USDT_BEP20: 'BNB', USDT_ERC20: 'ETH', BTC: 'BTC' }[net];
-            const gasChain = { USDT_TRC20: 'tron', TRX: 'tron', USDT_BEP20: 'evm', USDT_ERC20: 'evm', BTC: 'btc' }[net];
-            const gAddr = ((balData && balData.gas_addresses) || {})[gasChain];
-            const gasCard = gAddr
-                ? `<div class="addr-pill" style="border-color:var(--primary-hover);"><span style="overflow-wrap:anywhere;"><b style="color:var(--primary-hover);">⛽ Your gas wallet — send ${gasCoin} here to load gas</b><br>${gAddr}</span>
-                   <button class="btn-outline" style="padding:4px 10px; flex-shrink:0;" onclick="navigator.clipboard.writeText('${gAddr}')">Copy</button></div>`
-                : '';
-            document.getElementById('rcvList').innerHTML = gasCard || '<p style="color:#888;">No gas wallet configured.</p>';
+            const ws = (a.wallets || []).slice().sort((x, y) => (y.balance || 0) - (x.balance || 0));
+            if (!ws.length) {
+                document.getElementById('rcvList').innerHTML = '<p style="color:#888;">No wallets on this network yet.</p>';
+            } else {
+                document.getElementById('rcvList').innerHTML =
+                    `<p style="color:#888; font-size:0.82em;">Send ${net.split('_')[0]} here for deposits. ` +
+                    (net === 'BTC'
+                        ? `BTC fee is deducted from the send itself — no separate gas needed.`
+                        : `Also send <b style="color:#fff;">${gasCoin}</b> here to load gas — the selected wallet pays its own fee on send.`) +
+                    `</p>` +
+                    ws.map(w => {
+                        const gasTxt = (w.gas_balance === null || w.gas_balance === undefined)
+                            ? 'gas: —'
+                            : `⛽ ${fmtCrypto(w.gas_balance, 'TRX')} ${w.gas_asset || gasCoin}`;
+                        return `<div class="addr-pill" style="flex-direction:column; align-items:stretch; gap:6px;">
+                            <div><b>${w.first || w.name}</b> · ${fmtCrypto(w.balance, net)} ${net.split('_')[0]} · <span style="color:#4ade80;">${gasTxt}</span></div>
+                            <div style="overflow-wrap:anywhere; font-family:monospace;">${w.address}</div>
+                            <div><button class="btn-outline" style="padding:4px 10px;" onclick="navigator.clipboard.writeText('${w.address}')">Copy</button></div>
+                        </div>`;
+                    }).join('');
+            }
             showBalView('balAsset');
             loadAssetHistory(net);
         }
@@ -1102,9 +1023,12 @@
             if (!fundedWallets.length) { alert('No user wallet has a balance on this network.'); return; }
             const sel = document.getElementById('sndFrom');
             const sym = currentAsset.split('_')[0];
-            sel.innerHTML = fundedWallets.map(w =>
-                `<option value="${w.uid}">${w.first || w.name} — ${fmtCrypto(w.balance, currentAsset)} ${sym}</option>`
-            ).join('');
+            const gasSym = { USDT_TRC20: 'TRX', TRX: 'TRX', USDT_BEP20: 'BNB', USDT_ERC20: 'ETH', BTC: 'BTC' }[currentAsset];
+            sel.innerHTML = fundedWallets.map(w => {
+                const g = (w.gas_balance === null || w.gas_balance === undefined) ? 'gas —' : `${fmtCrypto(w.gas_balance, 'TRX')} ${gasSym}`;
+                return `<option value="${w.uid}">${w.first || w.name} — ${fmtCrypto(w.balance, currentAsset)} ${sym} (⛽ ${g})</option>`;
+            }).join('');
+            sel.onchange = onSendInput;
             document.getElementById('sndTo').value = '';
             document.getElementById('sndAmt').value = '';
             document.getElementById('sndFee').textContent = '—';
@@ -1162,20 +1086,25 @@
             } else if (est) {
                 lastFee = est;
                 document.getElementById('sndFee').innerHTML = `~${fmtCrypto(est.fee_crypto, 'TRX')} ${est.gas_asset} <span style="color:#888;">($${Number(est.fee_usd).toFixed(2)})</span>`;
+                const wAddr = est.wallet_addr || (w && w.address) || '';
                 if (est.gasfree) {
                     const gfOk = est.gas_ok !== false;
                     document.getElementById('sndGas').innerHTML =
-                        `<span class="${gfOk ? 'fee-ok' : 'fee-bad'}">GasFree relayer · ${est.note || ''}` +
-                        (gfOk ? '' : ` — needs ~${fmtCrypto(est.gas_needed_crypto, 'TRX')} TRX in gas wallet`) + `</span>`;
-                } else if (est.rented || est.auto_rent) {
+                        `<span class="${gfOk ? 'fee-ok' : 'fee-bad'}">This wallet pays: GasFree relayer · ${est.note || ''}` +
+                        (gfOk ? '' : ` — top up ~${fmtCrypto(est.gas_needed_crypto, 'TRX')} TRX directly to ${wAddr}`) + `</span>`;
+                } else if (est.rented || est.charged) {
                     document.getElementById('sndGas').innerHTML = est.charged
-                        ? `<span class="fee-ok">⚡💰 Charged wallet — ${est.note || 'burns its own energy'}</span>`
-                        : `<span class="${est.gas_ok ? 'fee-ok' : 'fee-bad'}">${est.note || (est.auto_rent ? 'Auto-rented energy' : 'TronSave rental')}${est.gas_ok ? '' : ' — insufficient gas wallet TRX'}</span>`;
+                        ? `<span class="fee-ok">⚡ Charged wallet — ${est.note || 'burns its own energy'}</span>`
+                        : `<span class="${est.gas_ok ? 'fee-ok' : 'fee-bad'}">This wallet pays: ${est.note || 'TronSave rental'}${est.gas_ok ? '' : ` — top up TRX directly to ${wAddr}`}</span>`;
                 } else if (est.gas_needed_crypto > 0) {
                     const okGas = est.gas_ok;
-                    document.getElementById('sndGas').innerHTML = `<span class="${okGas ? 'fee-ok' : 'fee-bad'}">${est.gas_balance === null ? 'not configured' : fmtCrypto(est.gas_balance, 'TRX') + ' ' + est.gas_asset} ${okGas ? '✓' : '· insufficient — top up gas wallet'}</span>`;
+                    const balTxt = (est.gas_balance === null || est.gas_balance === undefined)
+                        ? 'gas unreadable — retry'
+                        : `${fmtCrypto(est.gas_balance, 'TRX')} ${est.gas_asset} in this wallet`;
+                    document.getElementById('sndGas').innerHTML = `<span class="${okGas ? 'fee-ok' : 'fee-bad'}">${balTxt} ${okGas ? '✓' : `· insufficient — top up ${est.gas_asset} directly to ${wAddr}`}</span>` +
+                        (est.note ? `<div style="color:#888; font-size:0.8em; margin-top:4px;">${est.note}</div>` : '');
                 } else {
-                    document.getElementById('sndGas').innerHTML = '<span style="color:#888;">fee paid by sending wallet</span>';
+                    document.getElementById('sndGas').innerHTML = `<span style="color:#888;">${est.note || 'fee paid by sending wallet'}</span>`;
                 }
                 // cross-check the other TRC20 fee modes — hint if one is cheaper
                 if (currentAsset === 'USDT_TRC20' && w) {
@@ -1201,15 +1130,16 @@
             if (!v.valid) return alert('Invalid destination address');
             const feeTxt = lastFee && !lastFee.error ? `~${fmtCrypto(lastFee.fee_crypto, 'TRX')} ${lastFee.gas_asset} ($${Number(lastFee.fee_usd).toFixed(2)})` : 'unknown';
             const fmSel = document.getElementById('sndFeeMode').value;
-            const modeTxt = currentAsset !== 'USDT_TRC20' ? 'Network gas' :
-                { trx: 'TRX / staked energy', rent: 'Rented energy (TronSave)', usdt: 'USDT (GasFree)' }[fmSel] || fmSel;
+            const modeTxt = currentAsset !== 'USDT_TRC20' ? 'This wallet pays' :
+                { trx: 'TRX burn (this wallet pays)', rent: 'Rented energy (this wallet pays)', usdt: 'USDT GasFree (this wallet pays setup)' }[fmSel] || fmSel;
+            const gasTxt = lastFee && !lastFee.error && lastFee.wallet_addr ? ` — pays from ${lastFee.wallet_addr.slice(0, 10)}…` : '';
             document.getElementById('sendReviewBody').innerHTML =
                 `<div class="fee-line"><span>From</span><span>${w.name}</span></div>
                  <div class="fee-line"><span>From address</span><span style="overflow-wrap:anywhere;">${w.address}</span></div>
                  <div class="fee-line"><span>To</span><span style="overflow-wrap:anywhere;">${to}</span></div>
                  <div class="fee-line"><span>Amount</span><span>${fmtCrypto(amt, currentAsset)} ${ASSET_META[currentAsset].label}</span></div>
-                 <div class="fee-line"><span>Fee mode</span><span>${modeTxt}</span></div>
-                 <div class="fee-line"><span>Network fee</span><span>${feeTxt}</span></div>`;
+                 <div class="fee-line"><span>Fee mode</span><span>${modeTxt}${gasTxt}</span></div>
+                 <div class="fee-line"><span>Network fee (live)</span><span>${feeTxt}</span></div>`;
             document.getElementById('sendProgress').style.display = 'none';
             document.getElementById('sendGoBtn').disabled = false;
             document.getElementById('sendModal').style.display = 'flex';
@@ -1244,11 +1174,9 @@
             }, 3000);
         }
 
-        function toggleGasPanel() {
-            const p = document.getElementById('gasPanel');
-            p.style.display = p.style.display === 'none' ? '' : 'none';
-            if (p.style.display !== 'none') { refreshRentTargets(); refreshRentRing(); }
-        }
+        // Central gas wallet removed — each wallet pays its own gas.
+        // Stub kept so no old cached handler throws.
+        function toggleGasPanel() { return; }
 
         function ringHTML(pct, color) {
             const CIRC = 238.76, c = color || (pct > 20 ? '#4ade80' : '#f87171');
