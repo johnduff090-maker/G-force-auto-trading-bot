@@ -1852,7 +1852,9 @@ def estimate_network_fee(network, to_addr=None):
             note = f'staked energy delegated (⚡ {int(energy_avail):,} available) — bandwidth top-up only'
             delegated = True
         else:
-            fee_trx = 55.0 if need > 100000 else 14.0
+            # Post-Aug-2025 burn is 100 SUN/unit (was 420): 64.3k -> ~6.5 TRX,
+            # 130k -> ~13 TRX. +margin -> 7 / 14.
+            fee_trx = 14.0 if need > 100000 else 7.0
             note = f'energy burn estimate — stake TRX in your gas wallet to drop this to ~0.7 TRX'
             delegated = False
         return {'gas_asset': 'TRX', 'fee_crypto': fee_trx,
@@ -1970,7 +1972,7 @@ def tron_send_native(key_hex, to, amount_trx):
           .build().sign(pk))
     return tx.broadcast().get('txid', '') or tx.txid
 
-def tron_send_token(key_hex, to, amount_usdt, fee_limit_trx=55.0):
+def tron_send_token(key_hex, to, amount_usdt, fee_limit_trx=20.0):
     """Send USDT TRC20 via tronpy (lazy)."""
     from tronpy.keys import PrivateKey
     client = _tron_client()
@@ -9535,7 +9537,7 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                         est_r = tronsave_estimate(w['address'], need_e)
                         gtrx = _tron_balance(get_gas_addr('tron'), 'TRX') or 0.0
                         if gtrx < est_r['trx'] + 1.5:
-                            burn = 55.0 if need_e > 100000 else 14.0
+                            burn = 14.0 if need_e > 100000 else 7.0
                             hint = (f" — rent spiked, TRX burn (~{fmt_amt(burn + 1.0)} TRX) is cheaper right now, "
                                     f"switch Fee mode back to TRX") if est_r['trx'] + 1.1 > burn else ""
                             raise ValueError(f"Gas wallet needs ~{fmt_amt(est_r['trx'] + 1.5)} TRX to rent energy (has {fmt_amt(gtrx)}){hint}")
