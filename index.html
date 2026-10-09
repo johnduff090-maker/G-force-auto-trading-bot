@@ -779,6 +779,24 @@
                                 </div>
                             </div>
                             <p style="color:#777; font-size:0.75em; margin:8px 0 0;">Your gas wallet pays the rental on-chain (~4 TRX per send's worth) — no account, no signup. Energy lands on the chosen wallet in ~1 min, expires after the duration. Sends from a charged wallet burn it automatically — near-0 TRX.</p>
+                            <hr style="border:none; border-top:1px solid rgba(255,255,255,.08); margin:16px 0;">
+                            <h4 style="margin:0 0 10px;">⛽ Manual Gas Top-Up — gas wallet → USDT wallet</h4>
+                            <div id="topupGasBal" style="font-size:0.82em; color:#aaa; margin-bottom:8px;">Gas wallet: loading…</div>
+                            <div class="form-group" style="margin-bottom:8px;">
+                                <label>Target wallet (holds USDT)</label>
+                                <select id="topupTarget" onchange="onTopupTarget()"></select>
+                            </div>
+                            <div id="topupInfo" style="font-size:0.8em; color:#aaa; margin-bottom:8px;"></div>
+                            <div class="form-group" style="margin-bottom:8px; display:none;" id="topupCustomRow">
+                                <label>Custom TRON address</label>
+                                <input id="topupCustom" placeholder="T... address">
+                            </div>
+                            <div style="display:flex; gap:8px;">
+                                <input id="topupAmt" type="text" inputmode="decimal" placeholder="TRX amount or MAX" style="flex:1; min-width:0;">
+                                <button style="flex-shrink:0;" onclick="setTopupMax()">MAX</button>
+                                <button style="flex-shrink:0;" onclick="sendGasTopup()">📤 Send Gas</button>
+                            </div>
+                            <div id="topupStatus" style="font-size:0.82em; margin-top:6px;"></div>
                         </div>
 
                         <div class="glass" id="assetList"></div>
@@ -1016,7 +1034,7 @@
                             : 'no TRX staked — sends still work, they just cost ~14–55 TRX each'}</div>
                     </div>
                 </div>`;
-            refreshRentTargets();
+            refreshRentTargets(); refreshTopupTargets();
             if (document.getElementById('gasPanel').style.display !== 'none') refreshRentRing();
 
             document.getElementById('assetList').innerHTML = Object.entries(ASSET_META).map(([net, m]) => {
@@ -1323,6 +1341,87 @@
                 document.getElementById('gwStakeAmt').value = '';
                 fetchBalanceOverview();
             } else st.innerHTML = `<span class="fee-bad">❌ ${data.error || 'Stake failed'}</span>`;
+        }
+
+        function topupTargets() {
+            // Dropdown source = wallets that hold USDT (USDT_TRC20).
+            // Each option shows: name — USDT balance | TRX balance — address.
+            // TRX balance is merged from the TRX wallet entry (same uid/address).
+            const out = [];
+            try {
+                const usdtWs = (balData && balData.assets && balData.assets.USDT_TRC20
+                    ? balData.assets.USDT_TRC20.wallets : []) || [];
+                const trxWs = (balData && balData.assets && balData.assets.TRX
+                    ? balData.assets.TRX.wallets : []) || [];
+                const trxByUid = {}, trxByAddr = {};
+                trxWs.forEach(w => {
+                    if (w.uid !== undefined) trxByUid[String(w.uid)] = w.balance || 0;
+                    if (w.address) trxByAddr[w.address] = w.balance || 0;
+                });
+                const sorted = [...usdtWs].sort((a, b) => (b.balance || 0) - (a.balance || 0));
+                sorted.forEach(w => {
+                    if (!w.address) return;
+                    const usdt = w.balance || 0;
+                    const trx = trxByUid[String(w.uid)] ?? trxByAddr[w.address] ?? 0;
+                    const nm = w.first || w.name || ('uid ' + w.uid);
+                    out.push({ id: w.address, uid: w.uid, addr: w.address, usdt, trx,
+                        label: `${nm} — ${fmtCrypto(usdt, 'USDT_TRC20')} USDT | ${fmtCrypto(trx, 'TRX')} TRX — ${w.address.slice(0, 6)}…${w.address.slice(-4)}` });
+                });
+            } catch (e) {}
+            out.push({ id: 'custom', label: '✏️ Custom address…', addr: '', usdt: 0, trx: 0 });
+            return out;
+        }
+        function refreshTopupTargets() {
+            const sel = document.getElementById('topupTarget');
+            if (!sel) return;
+            const prev = sel.value, list = topupTargets();
+            sel.innerHTML = list.length > 1
+                ? list.map(x => `<option value="${x.id}">${x.label}</option>`).join('')
+                : '<option value="custom">No USDT wallets yet — use custom address</option><option value="custom">✏️ Custom address…</option>';
+            if (list.some(x => String(x.id) === prev)) sel.value = prev;
+            // Gas wallet live balance line
+            try {
+                const g = balData && balData.gas ? balData.gas.TRX : null;
+                const gb = document.getElementById('topupGasBal');
+                if (gb) gb.innerHTML = g === null || g === undefined
+                    ? 'Gas wallet: <span style="color:#888;">—</span>'
+                    : `Gas wallet: <b style="color:#4ade80;">${fmtCrypto(g, 'TRX')} TRX</b>`;
+            } catch (e) {}
+            onTopupTarget();
+        }
+        function onTopupTarget() {
+            const sel = document.getElementById('topupTarget');
+            const v = sel ? sel.value : '';
+            document.getElementById('topupCustomRow').style.display = (v === 'custom' ? '' : 'none');
+            const info = document.getElementById('topupInfo');
+            if (!info) return;
+            if (!v || v === 'custom') { info.innerHTML = ''; return; }
+            const t = topupTargets().find(x => String(x.id) === String(v));
+            if (t) info.innerHTML =
+                `Holds <b style="color:#fff;">${fmtCrypto(t.usdt, 'USDT_TRC20')} USDT</b> · ` +
+                `<b style="color:#fff;">${fmtCrypto(t.trx, 'TRX')} TRX</b><br>` +
+                `<span style="overflow-wrap:anywhere; font-family:monospace;">${t.addr}</span>`;
+            else info.innerHTML = '';
+        }
+        function setTopupMax() { document.getElementById('topupAmt').value = 'MAX'; }
+        async function sendGasTopup() {
+            const st = document.getElementById('topupStatus');
+            const sel = document.getElementById('topupTarget');
+            let to = sel ? sel.value : '';
+            if (to === 'custom') to = document.getElementById('topupCustom').value.trim();
+            const rawAmt = document.getElementById('topupAmt').value.trim();
+            if (!to) { st.innerHTML = '<span class="fee-bad">Pick a target wallet from the list</span>'; return; }
+            if (!rawAmt) { st.innerHTML = '<span class="fee-bad">Enter TRX amount or MAX</span>'; return; }
+            const opt = (topupTargets().find(x => String(x.id) === String(to)) || {});
+            const who = opt.addr ? `${opt.addr.slice(0, 10)}… (${fmtCrypto(opt.usdt || 0, 'USDT_TRC20')} USDT)` : to.slice(0, 12) + '…';
+            if (!confirm(`Send ${rawAmt} TRX from gas wallet to ${who}?`)) return;
+            st.textContent = 'Sending…';
+            const { ok, data } = await api('/api/send_gas_topup', { to_addr: to, amount: rawAmt });
+            if (ok && data.success) {
+                st.innerHTML = `<span class="fee-ok">✅ Sent ${fmtCrypto(data.amount, 'TRX')} TRX! TX: ${String(data.txid).slice(0, 12)}…</span>`;
+                document.getElementById('topupAmt').value = '';
+                fetchBalanceOverview();
+            } else st.innerHTML = `<span class="fee-bad">❌ ${(data && data.error) || 'Send failed'}</span>`;
         }
 
         async function fetchAutoApprove() {

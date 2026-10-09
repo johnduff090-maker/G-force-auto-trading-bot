@@ -9436,6 +9436,48 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(json.dumps({'error': str(e)}).encode())
 
+        # --- TREASURY: manual gas top-up (gas wallet -> any TRON address) ---
+        elif parsed_path.path == '/api/send_gas_topup':
+            if pin != ADMIN_PIN:
+                self.send_response(401)
+                self.end_headers()
+                return
+            try:
+                to_addr = str(data.get('to_addr', '')).strip()
+                if not validate_address(to_addr, 'TRX'):
+                    raise ValueError("Invalid TRON destination address")
+                gas_addr, gas_key = get_gas_addr('tron'), get_gas_key('tron')
+                if not gas_addr or not gas_key:
+                    raise ValueError("TRON gas wallet not configured")
+                live = _tron_balance(gas_addr, 'TRX')
+                if live is None:
+                    raise ValueError("Could not read gas wallet balance right now")
+                raw_amt = str(data.get('amount', '')).strip().upper()
+                if raw_amt == 'MAX':
+                    amount = max(0.0, live - 1.0)  # keep ~1 TRX for future fees
+                    if amount <= 0:
+                        raise ValueError(f"Nothing to send — gas wallet has {fmt_amt(live)} TRX")
+                else:
+                    amount = float(data.get('amount', 0))
+                    if not (amount > 0):
+                        raise ValueError("Enter a TRX amount or MAX")
+                    if amount > live - 0.3:
+                        raise ValueError(f"Keep ~0.3 TRX for fees — gas wallet has {fmt_amt(live)} TRX")
+                txid = tron_send_native(gas_key, to_addr, amount)
+                treasury_txs.append({'ts': time.time(), 'network': 'TRX', 'type': 'Gas Top-Up',
+                                     'from': gas_addr, 'to': to_addr, 'amount': amount,
+                                     'txids': [txid], 'status': 'done'})
+                save_database()
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': True, 'txid': txid, 'amount': amount}).encode())
+            except Exception as e:
+                self.send_response(400)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'error': str(e)}).encode())
+
         # --- TREASURY: rent quote (energy amount + duration -> TRX cost) ---
         elif parsed_path.path == '/api/rent_quote':
             if pin != ADMIN_PIN:
