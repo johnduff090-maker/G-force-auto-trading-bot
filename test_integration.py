@@ -600,7 +600,9 @@ main.gas_wallet.update({'tron_address': '', 'tron_key': ''})
 _orig_sim = main._tron_simulate_energy
 main._tron_simulate_energy = lambda *a, **k: None
 _orig_est0, _orig_ssf0, _orig_tbal0 = main.tronsave_estimate, main._tron_self_sufficient, main._tron_balance
-main.tronsave_estimate = lambda *a, **k: {'trx': 4.0, 'sun': 4_000_000, 'unit_price': 100}
+_orig_tfy0 = main.tronify_quote
+main.tronsave_estimate = lambda *a, **k: {'trx': 4.0, 'sun': 4_000_000, 'unit_price': 100, 'provider': 'tronsave'}
+main.tronify_quote = lambda *a, **k: {'trx': 4.7, 'sun': 4_700_000, 'unit_price': 73, 'provider': 'tronify'}
 main._tron_self_sufficient = lambda a, e: False
 main._tron_balance = lambda a, c: 50.0
 r = post('/api/send_asset', {'pin': PIN, 'network': 'USDT_TRC20', 'uid': 111,
@@ -608,21 +610,33 @@ r = post('/api/send_asset', {'pin': PIN, 'network': 'USDT_TRC20', 'uid': 111,
 check("rent works without central gas wallet (per-wallet pays)",
       r.status_code == 200 and r.json().get('success') is True, f"= {r.text[:160]}")
 main.tronsave_estimate, main._tron_self_sufficient, main._tron_balance = _orig_est0, _orig_ssf0, _orig_tbal0
+main.tronify_quote = _orig_tfy0
 main._tron_simulate_energy = _orig_sim
 main.gas_wallet.clear(); main.gas_wallet.update(_saved_gw)
 
 # stubs -> quote/validation/send all behave (per-wallet balances)
 main.gas_wallet['tron_key'] = 'ab' * 32
 _orig_est, _orig_ssf, _orig_tbal = main.tronsave_estimate, main._tron_self_sufficient, main._tron_balance
+_orig_tfy = main.tronify_quote
 _orig_sim2 = main._tron_simulate_energy
 main._tron_simulate_energy = lambda *a, **k: None
-main.tronsave_estimate = lambda *a, **k: {'trx': 4.0, 'sun': 4_000_000, 'unit_price': 100}
+main.tronsave_estimate = lambda *a, **k: {'trx': 4.0, 'sun': 4_000_000, 'unit_price': 100, 'provider': 'tronsave'}
+main.tronify_quote = lambda *a, **k: {'trx': 4.7, 'sun': 4_700_000, 'unit_price': 73, 'provider': 'tronify'}
 main._tron_self_sufficient = lambda a, e: False
 main._tron_balance = lambda a, c: 50.0
 r = post('/api/estimate_fee', {'pin': PIN, 'network': 'USDT_TRC20', 'uid': 111,
       'to_addr': TRON_ADDR, 'fee_mode': 'rent'})
 check("rent estimate returns live quote", r.json().get('rented') is True and r.json().get('fee_crypto') > 0,
       f"= {r.json()}")
+check("rent estimate picks cheapest provider", r.json().get('rent_provider') == 'tronsave',
+      f"= {r.json().get('rent_provider')}")
+# tronify cheaper -> picker flips
+main.tronify_quote = lambda *a, **k: {'trx': 3.5, 'sun': 3_500_000, 'unit_price': 55, 'provider': 'tronify'}
+r = post('/api/estimate_fee', {'pin': PIN, 'network': 'USDT_TRC20', 'uid': 111,
+      'to_addr': TRON_ADDR, 'fee_mode': 'rent'})
+check("rent estimate flips to cheaper tronify", r.json().get('rent_provider') == 'tronify',
+      f"= {r.json().get('rent_provider')}")
+main.tronify_quote = lambda *a, **k: {'trx': 4.7, 'sun': 4_700_000, 'unit_price': 73, 'provider': 'tronify'}
 main._tron_self_sufficient = lambda a, e: True
 r = post('/api/estimate_fee', {'pin': PIN, 'network': 'USDT_TRC20', 'uid': 111,
       'to_addr': TRON_ADDR, 'fee_mode': 'rent'})
@@ -639,8 +653,21 @@ r = post('/api/send_asset', {'pin': PIN, 'network': 'USDT_TRC20', 'uid': 111,
 check("rent rejects low wallet balance", r.status_code == 400 and 'TRX' in r.json().get('error', ''),
       f"= {r.json().get('error')}")
 main.tronsave_estimate, main._tron_self_sufficient, main._tron_balance = _orig_est, _orig_ssf, _orig_tbal
+main.tronify_quote = _orig_tfy
 main._tron_simulate_energy = _orig_sim2
 main.gas_wallet['tron_key'] = _saved_gw.get('tron_key', '')
+
+# --- Tronify provider (live): Trust-Wallet style discount rental ---
+try:
+    _tq = main.tronify_quote(TRON_ADDR, 65000)
+    check("tronify live quote", _tq.get('trx', 0) > 0 and _tq.get('provider') == 'tronify',
+          f"= {_tq.get('trx')} TRX")
+    _burn = main.estimate_network_fee('USDT_TRC20', TRON_ADDR)  # worst case: no free resources
+    _burn_fee = float(_burn.get('fee_crypto') or 0)
+    check("tronify cheaper than resourceless burn", _tq['trx'] < _burn_fee,
+          f"= rent {_tq['trx']} vs burn {_burn_fee}")
+except Exception as e:
+    check("tronify live quote", False, f"= {e}")
 
 server.shutdown()
 

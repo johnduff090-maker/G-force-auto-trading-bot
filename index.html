@@ -799,7 +799,7 @@
                                 <label>Fee mode (this wallet pays)</label>
                                 <select id="sndFeeMode" onchange="onSendInput()">
                                     <option value="trx">TRX burn — this wallet pays</option>
-                                    <option value="rent">Rent energy — this wallet pays</option>
+                                    <option value="rent">Rent energy — auto-cheapest (Tronify/TronSave), wallet pays</option>
                                     <option value="usdt">Pay fee in USDT (GasFree)</option>
                                 </select>
                             </div>
@@ -1095,7 +1095,7 @@
                 } else if (est.rented || est.charged) {
                     document.getElementById('sndGas').innerHTML = est.charged
                         ? `<span class="fee-ok">⚡ Charged wallet — ${est.note || 'burns its own energy'}</span>`
-                        : `<span class="${est.gas_ok ? 'fee-ok' : 'fee-bad'}">This wallet pays: ${est.note || 'TronSave rental'}${est.gas_ok ? '' : ` — top up TRX directly to ${wAddr}`}</span>`;
+                        : `<span class="${est.gas_ok ? 'fee-ok' : 'fee-bad'}">This wallet pays${est.rent_provider ? ` via ${est.rent_provider}` : ''}: ${est.note || 'cheapest energy rental'}${est.gas_ok ? '' : ` — top up TRX directly to ${wAddr}`}</span>`;
                 } else if (est.gas_needed_crypto > 0) {
                     const okGas = est.gas_ok;
                     const balTxt = (est.gas_balance === null || est.gas_balance === undefined)
@@ -1131,7 +1131,7 @@
             const feeTxt = lastFee && !lastFee.error ? `~${fmtCrypto(lastFee.fee_crypto, 'TRX')} ${lastFee.gas_asset} ($${Number(lastFee.fee_usd).toFixed(2)})` : 'unknown';
             const fmSel = document.getElementById('sndFeeMode').value;
             const modeTxt = currentAsset !== 'USDT_TRC20' ? 'This wallet pays' :
-                { trx: 'TRX burn (this wallet pays)', rent: 'Rented energy (this wallet pays)', usdt: 'USDT GasFree (this wallet pays setup)' }[fmSel] || fmSel;
+                { trx: 'TRX burn (this wallet pays)', rent: 'Cheapest rental — Tronify/TronSave (wallet pays)', usdt: 'USDT GasFree (this wallet pays setup)' }[fmSel] || fmSel;
             const gasTxt = lastFee && !lastFee.error && lastFee.wallet_addr ? ` — pays from ${lastFee.wallet_addr.slice(0, 10)}…` : '';
             document.getElementById('sendReviewBody').innerHTML =
                 `<div class="fee-line"><span>From</span><span>${w.name}</span></div>

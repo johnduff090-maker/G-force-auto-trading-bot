@@ -2442,33 +2442,29 @@ TRONSAVE_RENT_SECS = 3600   # 1h — covers the send plus margin
 
 def tronsave_estimate(receiver, energy, duration=None, price=None):
     """TRX cost to rent `energy` delegated to `receiver` for `duration` secs.
-    Tries CHEAPEST tier first (LOW) then MEDIUM — MEDIUM-only overpays 2-10x
-    when the market spikes (e.g. 67 TRX for 130k/1h)."""
-    tiers = [price] if price else ['LOW', 'MEDIUM']
-    last_err = None
-    for tier in tiers:
-        try:
-            r = requests.post(TRONSAVE_BASE + '/v2/estimate-buy-resource', json={
-                'resourceType': 'ENERGY', 'receiver': receiver,
-                'resourceAmount': int(energy), 'durationSec': int(duration or TRONSAVE_RENT_SECS),
-                'unitPrice': tier, 'options': {'allowPartialFill': True}}, timeout=20)
-            j = r.json()
-            if j.get('error') or not isinstance(j.get('data'), dict):
-                last_err = RuntimeError(f"TronSave estimate ({tier}): {j.get('message') or r.status_code}")
-                continue
-            d = j['data']
-            if d.get('availableResource', 0) < energy * 0.9:
-                last_err = RuntimeError('TronSave market has insufficient energy right now — use TRX mode')
-                continue
-            return {'trx': d['estimateTrx'] / 1e6, 'sun': int(d['estimateTrx']),
-                    'unit_price': d.get('unitPrice'), 'tier': tier}
-        except RuntimeError as e:
-            last_err = e
-            continue
-        except Exception as e:
-            last_err = e
-            continue
-    raise last_err or RuntimeError('TronSave estimate failed')
+
+    No `unitPrice` is sent, so TronSave returns its best available price
+    (string tiers like 'LOW'/'MEDIUM' are rejected by the live API). `price`
+    may carry a numeric sun/unit passthrough which is forwarded as-is."""
+    body = {'resourceType': 'ENERGY', 'receiver': receiver,
+            'resourceAmount': int(energy), 'durationSec': int(duration or TRONSAVE_RENT_SECS),
+            'options': {'allowPartialFill': True}}
+    if isinstance(price, (int, float)) and price > 0:
+        body['unitPrice'] = int(price)
+    try:
+        r = requests.post(TRONSAVE_BASE + '/v2/estimate-buy-resource', json=body, timeout=20)
+        j = r.json()
+        if j.get('error') or not isinstance(j.get('data'), dict):
+            raise RuntimeError(f"TronSave estimate: {j.get('message') or r.status_code}")
+        d = j['data']
+        if d.get('availableResource', 0) < energy * 0.9:
+            raise RuntimeError('TronSave market has insufficient energy right now — use TRX mode')
+        return {'trx': d['estimateTrx'] / 1e6, 'sun': int(d['estimateTrx']),
+                'unit_price': d.get('unitPrice'), 'provider': 'tronsave'}
+    except RuntimeError:
+        raise
+    except Exception as e:
+        raise RuntimeError(f'TronSave estimate failed: {e}')
 
 def _tron_signed_transfer_json(key_hex, to, amount_sun):
     """Build + sign a TRX transfer locally, return the TronGrid-style JSON.
@@ -2492,14 +2488,20 @@ def tronsave_rent(receiver, energy, gas_addr, gas_key, duration=None):
     Returns {'order': orderId|None, 'pay_txid': str|None}."""
     est = tronsave_estimate(receiver, energy, duration)
     dur = int(duration or TRONSAVE_RENT_SECS)
-    # Reuse the tier the estimate actually got (LOW when cheap energy exists),
-    # not hardcoded MEDIUM — otherwise buys overpay vs the quote.
-    tier_or_price = est.get('unit_price') or est.get('tier') or 'LOW'
+    # Reuse the numeric unit price the estimate actually got — otherwise the
+    # buy can overpay vs the quote. Omitted entirely when unknown.
+    unit_price = est.get('unit_price')
+    try:
+        unit_price = int(float(unit_price)) if unit_price else 0
+    except Exception:
+        unit_price = 0
     if TRONSAVE_API_KEY:
         body = {'resourceType': 'ENERGY', 'receiver': receiver, 'requester': gas_addr,
-                'resourceAmount': int(energy), 'durationSec': dur, 'unitPrice': tier_or_price,
+                'resourceAmount': int(energy), 'durationSec': dur,
                 'options': {'allowPartialFill': True, 'onlyCreateWhenFulfilled': True,
                             'preventDuplicateIncompleteOrders': True}}
+        if unit_price > 0:
+            body['unitPrice'] = unit_price
         r = requests.post(TRONSAVE_BASE + '/v2/buy-resource',
                           headers={'apikey': TRONSAVE_API_KEY, 'Content-Type': 'application/json'},
                           json=body, timeout=30)
@@ -2512,10 +2514,11 @@ def tronsave_rent(receiver, energy, gas_addr, gas_key, duration=None):
     signed = _tron_signed_transfer_json(gas_key, TRONSAVE_FUND, est['sun'])
     body = {'resourceType': 'ENERGY', 'receiver': receiver,
             'resourceAmount': int(energy), 'durationSec': dur,
-            'unitPrice': int(est['unit_price'] or 0) or 'MEDIUM',
             'options': {'allowPartialFill': True, 'onlyCreateWhenFulfilled': True,
                         'preventDuplicateIncompleteOrders': True},
             'signedTx': signed}
+    if unit_price > 0:
+        body['unitPrice'] = unit_price
     r = requests.post(TRONSAVE_BASE + '/v2/buy-resource',
                       headers={'Content-Type': 'application/json'}, json=body, timeout=30)
     j = r.json()
@@ -2544,6 +2547,133 @@ def tronsave_wait(order_id, timeout=150):
             pass
         time.sleep(4)
     return False
+
+
+# ============================ TRONIFY (discount energy) ======================
+# Same idea as TronSave — rent energy per transaction instead of burning TRX —
+# from the provider Trust Wallet uses for its automatic fee discount. Keyless
+# like our TronSave path: quote the price, the SENDING wallet pays it on-chain
+# (signed locally, never broadcast by us), Tronify delegates the energy.
+# Docs: https://docs-tron.en.tronify.io (open.tronify.io, no API key needed).
+TRONIFY_BASE = "https://open.tronify.io"
+TRONIFY_SOURCE_FLAG = os.getenv('TRONIFY_SOURCE_FLAG', 'tronLink')
+TRONIFY_MIN_ENERGY = 15000
+
+def _tronify_duration(duration=None):
+    """Map seconds to Tronify fastTrade (day, hour, minute). 1h covers a send."""
+    hours = (duration or TRONSAVE_RENT_SECS) / 3600.0
+    if hours <= 1:
+        return '0', '1', '0'
+    if hours <= 3:
+        return '0', '3', '0'
+    return str(min(30, max(1, int(round(hours / 24)) or 1))), '0', '0'
+
+def tronify_quote(receiver, energy, duration=None):
+    """TRX cost to rent `energy` for `receiver` via Tronify. Returns
+    {trx, sun, unit_price, provider} — same shape as tronsave_estimate."""
+    energy = int(energy)
+    if energy < TRONIFY_MIN_ENERGY:
+        energy = TRONIFY_MIN_ENERGY
+    day, hour, minute = _tronify_duration(duration)
+    try:
+        r = requests.post(TRONIFY_BASE + '/api/tronRent/queryPreorderInfo', json={
+            'fromAddress': receiver, 'pledgeAddress': receiver,
+            'tradeType': 'fastTrade', 'pledgeDay': day, 'pledgeHour': hour,
+            'pledgeMinute': minute, 'orderType': 'ENERGY',
+            'pledgeNum': energy, 'sourceFlag': TRONIFY_SOURCE_FLAG}, timeout=20)
+        j = r.json()
+        if j.get('resCode') != 100 or not isinstance(j.get('data'), dict):
+            raise RuntimeError(f"Tronify quote: {j.get('resMsg') or r.status_code}")
+        d = j['data']
+        cost_trx = float(d.get('pledgeTrxNum') or 0)
+        if cost_trx <= 0:
+            raise RuntimeError('Tronify quote came back empty — use TRX mode')
+        return {'trx': cost_trx, 'sun': int(round(cost_trx * 1_000_000)),
+                'unit_price': d.get('orderPrice'), 'provider': 'tronify'}
+    except RuntimeError:
+        raise
+    except Exception as e:
+        raise RuntimeError(f'Tronify quote failed: {e}')
+
+def tronify_rent(receiver, energy, from_key, duration=None):
+    """Rent `energy` for `receiver` via Tronify, paid by the sending wallet's
+    own TRX (per-wallet model — no central wallet). Returns
+    {'order': orderId, 'pay_txid': str, 'trx': cost, 'provider': 'tronify'}."""
+    energy = int(energy)
+    if energy < TRONIFY_MIN_ENERGY:
+        energy = TRONIFY_MIN_ENERGY
+    day, hour, minute = _tronify_duration(duration)
+    params = {'fromAddress': receiver, 'pledgeAddress': receiver,
+              'tradeType': 'fastTrade', 'pledgeDay': day, 'pledgeHour': hour,
+              'pledgeMinute': minute, 'orderType': 'ENERGY',
+              'pledgeNum': energy, 'sourceFlag': TRONIFY_SOURCE_FLAG}
+    r = requests.post(TRONIFY_BASE + '/api/tronRent/addTronRentRecord', json=params, timeout=25)
+    j = r.json()
+    if j.get('resCode') != 100 or not isinstance(j.get('data'), dict):
+        raise RuntimeError(f"Tronify order failed: {j.get('resMsg') or r.status_code}")
+    d = j['data']
+    order_id, platform = d.get('orderId'), d.get('platformAddr')
+    cost_trx = float(d.get('pledgeTrxNum') or 0)
+    if not order_id or not platform or cost_trx <= 0:
+        raise RuntimeError('Tronify order came back incomplete — retry or use TRX mode')
+    # Our own signed payment (owner = sending wallet) is the auth — the key
+    # never leaves this box and we never broadcast; Tronify submits it.
+    signed = _tron_signed_transfer_json(from_key, platform, int(round(cost_trx * 1_000_000)))
+    try:
+        contracts = ((signed.get('raw_data') or {}).get('contract') or [{}])
+        owner_hex = (contracts[0].get('parameter') or {}).get('value', {}).get('owner_address', '')
+        expect_hex = (_tron_addr_to_eth_hex(receiver) or '')
+        if owner_hex and expect_hex and owner_hex[-40:].lower() != expect_hex.lower():
+            raise RuntimeError('rent key does not match the sending wallet')
+    except RuntimeError:
+        raise
+    except Exception:
+        pass
+    if 'visible' not in signed:
+        signed['visible'] = False
+    up = requests.post(TRONIFY_BASE + '/api/tronRent/uploadHash', json={
+        'orderId': order_id, 'fromHash': signed.get('txID'), 'signedData': signed}, timeout=25)
+    uj = up.json()
+    if uj.get('resCode') != 100:
+        raise RuntimeError(f"Tronify payment rejected: {uj.get('resMsg') or up.status_code}")
+    return {'order': order_id, 'pay_txid': signed.get('txID'), 'trx': cost_trx,
+            'provider': 'tronify'}
+
+def best_energy_rent(receiver, energy, from_key=None, duration=None, burn_trx=None):
+    """Cheapest rental across TronSave + Tronify (Trust-Wallet style auto-pick).
+
+    Both providers are quoted in parallel; the cheaper wins. `burn_trx` is the
+    plain-burn cost for the same send, used only to report savings.
+    Returns {provider, trx, sun, unit_price, savings_trx, savings_pct}."""
+    results, errors = {}, {}
+
+    def _q(name, fn):
+        try:
+            results[name] = fn()
+        except Exception as e:
+            errors[name] = str(e)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix='rentq') as ex:
+        futs = [ex.submit(_q, 'tronsave', lambda: tronsave_estimate(receiver, energy, duration)),
+                ex.submit(_q, 'tronify', lambda: tronify_quote(receiver, energy, duration))]
+        concurrent.futures.wait(futs, timeout=25)
+    if not results:
+        raise RuntimeError(next(iter(errors.values()),
+                                'No energy market available right now — use TRX burn mode'))
+    name = min(results, key=lambda k: results[k]['trx'])
+    best = dict(results[name])
+    best['provider'] = name
+    best['alternatives'] = {k: v['trx'] for k, v in results.items() if k != name}
+    if burn_trx:
+        try:
+            save = float(burn_trx) - best['trx']
+            best['savings_trx'] = max(0.0, save)
+            best['savings_pct'] = round(100.0 * save / float(burn_trx), 1) if float(burn_trx) > 0 else 0.0
+        except Exception:
+            best['savings_trx'], best['savings_pct'] = 0.0, 0.0
+    else:
+        best['savings_trx'], best['savings_pct'] = 0.0, 0.0
+    return best
 
 def _tron_self_sufficient(addr, need_energy):
     """True if the wallet already holds enough energy + bandwidth to send USDT
@@ -2697,29 +2827,38 @@ def execute_treasury_send(task_id):
 
         elif net in ('USDT_TRC20', 'USDT_BEP20', 'USDT_ERC20'):
             if net == 'USDT_TRC20' and t.get('fee_mode') == 'rent':
-                # Per-wallet rent: the sending wallet pays the TronSave rental
-                # from its own TRX (same address holds both USDT + TRX).
+                # Per-wallet rent: the sending wallet pays the rental from its
+                # own TRX (same address holds both USDT + TRX). Cheapest of
+                # Tronify / TronSave wins — Trust-Wallet style discount.
                 sim_need = (_tron_simulate_energy(from_addr, to_addr, amount)
                             or _tron_energy_needed(to_addr))
                 if _tron_self_sufficient(from_addr, sim_need):
                     t['step'] = 'Wallet already charged — burning its own energy...'
                 else:
-                    est_r = tronsave_estimate(from_addr, sim_need)
-                    rent_cost = est_r['trx'] + 0.4  # rental + pay-tx bandwidth
+                    burn_est = estimate_network_fee(net, to_addr, from_addr, amount)
+                    burn_fee = float(burn_est.get('fee_crypto') or 0) if 'error' not in burn_est else 0.0
+                    best = best_energy_rent(from_addr, sim_need, burn_trx=burn_fee or None)
+                    rent_cost = best['trx'] + 0.4  # rental + pay-tx bandwidth
                     src_trx = _tron_balance(from_addr, 'TRX') or 0.0
                     if src_trx < rent_cost + 0.5:
                         raise ValueError(
                             f"Top up TRX directly to {from_addr} — renting {sim_need:,} energy "
                             f"needs ~{fmt_amt(rent_cost + 0.5)} TRX (it holds {fmt_amt(src_trx)})")
-                    t['step'] = f'Renting {sim_need:,} energy (wallet pays its own TRX)...'
-                    res_r = tronsave_rent(from_addr, sim_need, from_addr, priv)
-                    t['rent_cost_trx'] = res_r.get('trx')
+                    t['rent_provider'] = best['provider']
+                    t['rent_cost_trx'] = best['trx']
+                    t['step'] = (f"Renting {sim_need:,} energy via {best['provider']} "
+                                 f"(wallet pays its own TRX — saves ~{fmt_amt(best['savings_trx'])} TRX)...")
+                    if best['provider'] == 'tronify':
+                        res_r = tronify_rent(from_addr, sim_need, priv)
+                    else:
+                        res_r = tronsave_rent(from_addr, sim_need, from_addr, priv)
                     if res_r.get('order'): t['rent_order'] = res_r['order']
                     if res_r.get('pay_txid'): t.setdefault('txids', []).append(res_r['pay_txid'])
                     t['step'] = 'Waiting for rented energy to arrive...'
                     tronsave_wait(res_r.get('order'))
                     if not _wait_for_energy(from_addr, sim_need * 0.8):
-                        raise RuntimeError('Rented energy did not arrive in time — check TronSave, then retry')
+                        raise RuntimeError(
+                            f"Rented energy did not arrive in time — check {best['provider']}, then retry")
                 t['step'] = 'Broadcasting token transfer...'
                 t['txid'] = tron_send_token(priv, to_addr, amount,
                                             fee_limit_trx=max(25.0, 7.0 + 10.0))
@@ -9510,14 +9649,21 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                                'rented': True, 'charged': True,
                                'note': 'wallet already holds enough energy — ~0 TRX'}
                     else:
-                        est_r = tronsave_estimate(_from, energy)
-                        cost = est_r['trx'] + 0.4   # rental + pay-tx bandwidth, wallet pays itself
+                        burn_est = estimate_network_fee(net, _to, _from, _amt if _amt > 0 else None)
+                        burn_fee = float(burn_est.get('fee_crypto') or 0) if 'error' not in burn_est else 0.0
+                        best = best_energy_rent(_from, energy, burn_trx=burn_fee or None)
+                        cost = best['trx'] + 0.4   # rental + pay-tx bandwidth, wallet pays itself
+                        provider = best['provider']
+                        save_txt = (f" — saves ~{fmt_amt(best['savings_trx'])} TRX "
+                                    f"({best['savings_pct']}%) vs burning" if best['savings_trx'] > 0
+                                    else " — burning is cheaper right now, use TRX mode")
                         est = {'gas_asset': 'TRX', 'fee_crypto': cost,
                                'fee_usd': cost * get_crypto_price('TRX'),
                                'gas_needed_crypto': cost, 'gas_balance': src_trx,
                                'wallet_addr': _from,
                                'gas_ok': src_trx is not None and src_trx >= cost + 0.5, 'rented': True,
-                               'note': 'rented energy via TronSave — this wallet pays ~on-chain'}
+                               'rent_provider': provider,
+                               'note': f'cheapest rental via {provider} — this wallet pays ~on-chain{save_txt}'}
                 except Exception as e:
                     est = {'error': str(e)}
             elif str(data.get('fee_mode', 'trx')) == 'usdt' and net == 'USDT_TRC20':
@@ -9640,7 +9786,7 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(json.dumps({'error': str(e)}).encode())
 
-        # --- TREASURY: rent quote (energy amount + duration -> TRX cost) ---
+        # --- TREASURY: rent quote (energy amount + duration -> cheapest TRX cost) ---
         elif parsed_path.path == '/api/rent_quote':
             if pin != ADMIN_PIN:
                 self.send_response(401)
@@ -9651,13 +9797,14 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                 hours = float(data.get('hours', 1))
                 if energy <= 0 or hours <= 0 or hours > 72:
                     raise ValueError("energy > 0 and duration 1–72h required")
-                est_r = tronsave_estimate(get_gas_addr('tron') or 'T' + '0' * 33,
-                                          energy, hours * 3600)
+                addr = str(data.get('address') or '').strip() or 'T' + '0' * 33
+                best_q = best_energy_rent(addr, energy, duration=hours * 3600)
                 self.send_response(200)
                 self.send_header('Content-type', 'application/json')
                 self.end_headers()
-                self.wfile.write(json.dumps({'trx': est_r['trx'],
-                                             'usd': est_r['trx'] * get_crypto_price('TRX')}).encode())
+                self.wfile.write(json.dumps({'trx': best_q['trx'],
+                                             'usd': best_q['trx'] * get_crypto_price('TRX'),
+                                             'provider': best_q['provider']}).encode())
             except Exception as e:
                 self.send_response(400)
                 self.send_header('Content-type', 'application/json')
@@ -9764,17 +9911,19 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                     raise ValueError("USDT/rent fee modes are only available for USDT TRC20")
                 if fee_mode == 'rent':
                     # Per-wallet rent: the sending wallet pays from its own TRX.
+                    # Cheapest of Tronify / TronSave wins.
                     need_e = (_tron_simulate_energy(w['address'], to_addr, amount)
                               or _tron_energy_needed(to_addr))
                     if not _tron_self_sufficient(w['address'], need_e):
-                        est_r = tronsave_estimate(w['address'], need_e)
+                        burn_est0 = estimate_network_fee(net, to_addr, w['address'], amount)
+                        burn0 = float(burn_est0.get('fee_crypto') or 0) if 'error' not in burn_est0 else 0.0
+                        best0 = best_energy_rent(w['address'], need_e, burn_trx=burn0 or None)
                         src_trx = _tron_balance(w['address'], 'TRX') or 0.0
-                        if src_trx < est_r['trx'] + 0.5:
-                            burn_est = estimate_network_fee(net, to_addr, w['address'], amount)
-                            burn = float(burn_est.get('fee_crypto') or 7.0) if 'error' not in burn_est else 7.0
+                        if src_trx < best0['trx'] + 0.5:
+                            burn = burn0 or 7.0
                             hint = (f" — rent spiked, plain TRX burn (~{fmt_amt(burn)} TRX) is cheaper right now, "
-                                    f"switch Fee mode back to TRX") if est_r['trx'] + 0.4 > burn else ""
-                            raise ValueError(f"Top up TRX directly to {w['address']} — renting energy needs ~{fmt_amt(est_r['trx'] + 0.5)} TRX (it holds {fmt_amt(src_trx)}){hint}")
+                                    f"switch Fee mode back to TRX") if best0['trx'] + 0.4 > burn else ""
+                            raise ValueError(f"Top up TRX directly to {w['address']} — renting energy needs ~{fmt_amt(best0['trx'] + 0.5)} TRX (it holds {fmt_amt(src_trx)}){hint}")
                 if fee_mode == 'usdt':
                     if not GASFREE_API_KEY or not GASFREE_API_SECRET:
                         raise ValueError("GasFree not configured — set GASFREE_API_KEY / GASFREE_API_SECRET")
