@@ -2552,16 +2552,29 @@ def execute_treasury_send(task_id):
                     topup = 0.0
                 elif delegated:
                     # skip the bandwidth top-up when the wallet's free daily
-                    # bandwidth already covers the transfer — saves ~30s
+                    # bandwidth already covers the transfer — saves ~30s.
+                    # Otherwise the SOURCE pays it first from its own TRX;
+                    # gas only sends the shortfall (like Trust Wallet).
                     res_bw = _tron_account_resources(from_addr) or {}
-                    topup = 0.0 if (res_bw.get('freenet', 0) + res_bw.get('net', 0)) >= 400 else 0.7
+                    if (res_bw.get('freenet', 0) + res_bw.get('net', 0)) >= 400:
+                        topup = 0.0
+                    else:
+                        src_trx_bw = _tron_balance(from_addr, 'TRX') or 0.0
+                        topup = max(0.0, 0.7 - src_trx_bw)
                 else:
-                    topup = gas_needed + 1.0
+                    # Each wallet pays from itself first (Trust-Wallet style):
+                    # source TRX covers as much of the burn as it can, gas
+                    # wallet only tops up the shortfall.
+                    src_trx = _tron_balance(from_addr, 'TRX') or 0.0
+                    topup = max(0.0, gas_needed + 1.0 - src_trx)
+                    if topup > 0 and src_trx > 0:
+                        t['src_covered_trx'] = min(src_trx, gas_needed + 1.0)
                 if topup > 0:
                     gb_now = _tron_balance(gas_addr, 'TRX')
                     if gb_now is not None and gb_now < topup + 0.3:
+                        src_have = _tron_balance(from_addr, 'TRX') or 0.0
                         raise RuntimeError(f"Gas wallet is short on TRX: needs ~{fmt_amt(topup + 0.3)} "
-                                           f"(has {fmt_amt(gb_now)}) — top it up, stake, or switch fee mode")
+                                           f"(has {fmt_amt(gb_now)}, source covers {fmt_amt(src_have)}) — top it up, stake, or switch fee mode")
                     if trx_w:
                         # pre-count the incoming TRX so the watcher can't treat it as a deposit
                         cur_bal = get_onchain_balance(from_addr, 'TRX') or 0.0
@@ -9347,6 +9360,22 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                     gas = get_gas_balances()
                     have = gas.get(est['gas_asset'])
                     est['gas_balance'] = have
+                    # Net display: source wallet pays first from its own TRX,
+                    # gas only covers the shortfall (Trust-Wallet style).
+                    try:
+                        if net == 'USDT_TRC20' and not est.get('delegated') and not est.get('charged') and not est.get('auto_rent') and not est.get('rented'):
+                            _uid = int(data.get('uid', 0))
+                            _w = user_db.get(_uid, {}).get('wallets', {}).get(net) if _uid else None
+                            if _w and _w.get('address'):
+                                _src = _tron_balance(_w['address'], 'TRX') or 0.0
+                                _full = float(est.get('gas_needed_crypto', 0) or 0) + 1.0
+                                _net = max(0.0, _full - _src)
+                                est['gas_needed_crypto'] = _net
+                                est['src_covered_trx'] = min(_src, _full)
+                                if _src > 0:
+                                    est['note'] = (est.get('note', '') + f' — source covers {fmt_amt(min(_src, _full))} TRX').strip()
+                    except Exception:
+                        pass
                     est['gas_ok'] = (have is not None and est.get('gas_needed_crypto', 0) > 0
                                      and have >= est['gas_needed_crypto']) or est.get('gas_needed_crypto', 0) == 0
             self.send_response(200)
