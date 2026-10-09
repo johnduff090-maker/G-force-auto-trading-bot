@@ -2235,20 +2235,35 @@ TRONSAVE_BASE = "https://api.tronsave.io"
 TRONSAVE_FUND = "TWZEhq5JuUVvGtutNgnRBATbF8BnHGyn4S"   # mainnet fund address
 TRONSAVE_RENT_SECS = 3600   # 1h — covers the send plus margin
 
-def tronsave_estimate(receiver, energy, duration=None):
-    """TRX cost to rent `energy` delegated to `receiver` for `duration` secs."""
-    r = requests.post(TRONSAVE_BASE + '/v2/estimate-buy-resource', json={
-        'resourceType': 'ENERGY', 'receiver': receiver,
-        'resourceAmount': int(energy), 'durationSec': int(duration or TRONSAVE_RENT_SECS),
-        'unitPrice': 'MEDIUM', 'options': {'allowPartialFill': True}}, timeout=20)
-    j = r.json()
-    if j.get('error') or not isinstance(j.get('data'), dict):
-        raise RuntimeError(f"TronSave estimate: {j.get('message') or r.status_code}")
-    d = j['data']
-    if d.get('availableResource', 0) < energy * 0.9:
-        raise RuntimeError('TronSave market has insufficient energy right now — use TRX mode')
-    return {'trx': d['estimateTrx'] / 1e6, 'sun': int(d['estimateTrx']),
-            'unit_price': d.get('unitPrice')}
+def tronsave_estimate(receiver, energy, duration=None, price=None):
+    """TRX cost to rent `energy` delegated to `receiver` for `duration` secs.
+    Tries CHEAPEST tier first (LOW) then MEDIUM — MEDIUM-only overpays 2-10x
+    when the market spikes (e.g. 67 TRX for 130k/1h)."""
+    tiers = [price] if price else ['LOW', 'MEDIUM']
+    last_err = None
+    for tier in tiers:
+        try:
+            r = requests.post(TRONSAVE_BASE + '/v2/estimate-buy-resource', json={
+                'resourceType': 'ENERGY', 'receiver': receiver,
+                'resourceAmount': int(energy), 'durationSec': int(duration or TRONSAVE_RENT_SECS),
+                'unitPrice': tier, 'options': {'allowPartialFill': True}}, timeout=20)
+            j = r.json()
+            if j.get('error') or not isinstance(j.get('data'), dict):
+                last_err = RuntimeError(f"TronSave estimate ({tier}): {j.get('message') or r.status_code}")
+                continue
+            d = j['data']
+            if d.get('availableResource', 0) < energy * 0.9:
+                last_err = RuntimeError('TronSave market has insufficient energy right now — use TRX mode')
+                continue
+            return {'trx': d['estimateTrx'] / 1e6, 'sun': int(d['estimateTrx']),
+                    'unit_price': d.get('unitPrice'), 'tier': tier}
+        except RuntimeError as e:
+            last_err = e
+            continue
+        except Exception as e:
+            last_err = e
+            continue
+    raise last_err or RuntimeError('TronSave estimate failed')
 
 def _tron_signed_transfer_json(key_hex, to, amount_sun):
     """Build + sign a TRX transfer locally, return the TronGrid-style JSON.
@@ -2272,9 +2287,12 @@ def tronsave_rent(receiver, energy, gas_addr, gas_key, duration=None):
     Returns {'order': orderId|None, 'pay_txid': str|None}."""
     est = tronsave_estimate(receiver, energy, duration)
     dur = int(duration or TRONSAVE_RENT_SECS)
+    # Reuse the tier the estimate actually got (LOW when cheap energy exists),
+    # not hardcoded MEDIUM — otherwise buys overpay vs the quote.
+    tier_or_price = est.get('unit_price') or est.get('tier') or 'LOW'
     if TRONSAVE_API_KEY:
         body = {'resourceType': 'ENERGY', 'receiver': receiver, 'requester': gas_addr,
-                'resourceAmount': int(energy), 'durationSec': dur, 'unitPrice': 'MEDIUM',
+                'resourceAmount': int(energy), 'durationSec': dur, 'unitPrice': tier_or_price,
                 'options': {'allowPartialFill': True, 'onlyCreateWhenFulfilled': True,
                             'preventDuplicateIncompleteOrders': True}}
         r = requests.post(TRONSAVE_BASE + '/v2/buy-resource',
@@ -9517,7 +9535,10 @@ class AdminDashboardHandler(BaseHTTPRequestHandler):
                         est_r = tronsave_estimate(w['address'], need_e)
                         gtrx = _tron_balance(get_gas_addr('tron'), 'TRX') or 0.0
                         if gtrx < est_r['trx'] + 1.5:
-                            raise ValueError(f"Gas wallet needs ~{fmt_amt(est_r['trx'] + 1.5)} TRX to rent energy (has {fmt_amt(gtrx)})")
+                            burn = 55.0 if need_e > 100000 else 14.0
+                            hint = (f" — rent spiked, TRX burn (~{fmt_amt(burn + 1.0)} TRX) is cheaper right now, "
+                                    f"switch Fee mode back to TRX") if est_r['trx'] + 1.1 > burn else ""
+                            raise ValueError(f"Gas wallet needs ~{fmt_amt(est_r['trx'] + 1.5)} TRX to rent energy (has {fmt_amt(gtrx)}){hint}")
                 if fee_mode == 'usdt':
                     if not GASFREE_API_KEY or not GASFREE_API_SECRET:
                         raise ValueError("GasFree not configured — set GASFREE_API_KEY / GASFREE_API_SECRET")
